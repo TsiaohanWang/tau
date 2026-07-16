@@ -104,6 +104,21 @@ description: rendering/ 包全貌
   3. 其余情况(默认 `transcript`)返回 `TranscriptRenderer(custom_message_renderer=custom_message_renderer)`,并把可选扩展消息渲染器透传进去。
 - 数据流:输入是打印模式枚举与可选扩展渲染回调,输出是一个符合 `EventRenderer` 协议的实例;三个分支覆盖了 `PrintOutputMode` 的全部取值,保证返回类型稳定。
 
+```python
+def create_event_renderer(
+    mode: PrintOutputMode,
+    *,
+    custom_message_renderer: CustomMessageMarkup | None = None,
+) -> EventRenderer:
+    if mode is PrintOutputMode.text:
+        return FinalTextRenderer()
+    if mode is PrintOutputMode.json:
+        return JsonEventRenderer()
+    return TranscriptRenderer(custom_message_renderer=custom_message_renderer)
+```
+
+关键点:工厂把 模式→渲染器 的映射集中在一处,调用方只依赖 `EventRenderer` 协议,不感知具体实现。
+
 ### __all__
 
 - 作用:声明包的公开导出符号列表,约束 `from tau_coding.rendering import *` 的行为。
@@ -126,6 +141,15 @@ description: rendering/ 包全貌
   - `json = "json"`:逐事件 JSONL 流式模式。
   - `transcript = "transcript"`:人类可读的流式转写模式(默认)。
 
+```python
+class PrintOutputMode(StrEnum):
+    text = "text"
+    json = "json"
+    transcript = "transcript"
+```
+
+关键点:`StrEnum` 让枚举值既可比又可直接当字符串用(如命令行参数解析)。
+
 ### EventRenderer
 
 #### EventRenderer(Protocol)
@@ -135,6 +159,17 @@ description: rendering/ 包全貌
   - `def render(self, event: AgentEvent) -> None`:渲染单个事件。
   - `def finish(self) -> bool`:结束渲染,并返回本次运行是否成功(`True` 表示成功)。
 - 实现说明:由于是 `Protocol`,它仅作结构子类型检查用途,不提供共享原语。三种具体 renderer(`TranscriptRenderer`、`JsonEventRenderer`、`FinalTextRenderer`)各自独立实现了 `render`/`finish`,在运行成败判断上统一采用 `self._failed` 布尔标志(由各实现自行维护),在失败语义上约定:`ErrorEvent.recoverable == False` 即视为失败。
+
+```python
+class EventRenderer(Protocol):
+    def render(self, event: AgentEvent) -> None:
+        """Render one event."""
+
+    def finish(self) -> bool:
+        """Finish rendering and return whether the run succeeded."""
+```
+
+关键点:`Protocol` 只规定两个方法签名,任何实现了 `render`/`finish` 的对象都算合规渲染器,便于在不改动 harness 的情况下切换输出格式。
 
 ---
 
@@ -154,6 +189,17 @@ description: rendering/ 包全貌
   4. `self._console = Console(stderr=True, highlight=False)`:专用 stderr 控制台,关闭 Rich 自动语法高亮,用于打印工具/错误/自定义块。
   5. `self._custom_message_renderer = custom_message_renderer`:保存扩展 `CustomMessageMarkup` 回调,供自定义用户消息渲染。
 
+```python
+def __init__(self, *, custom_message_renderer: CustomMessageMarkup | None = None) -> None:
+    self._assistant_started = False
+    self._assistant_ended = False
+    self._failed = False
+    self._console = Console(stderr=True, highlight=False)
+    self._custom_message_renderer = custom_message_renderer
+```
+
+关键点:`Console(stderr=True, highlight=False)` 是专用 stderr 控制台,关闭 Rich 自动高亮,用于工具/错误/自定义块的输出。
+
 #### render(self, event: AgentEvent) -> None
 
 - 作用:事件分派中枢,按事件类型 `isinstance` 逐类处理一个 `AgentEvent`,实现流式增量渲染。
@@ -169,6 +215,43 @@ description: rendering/ 包全貌
   9. `AgentEndEvent`:仅做 `_ensure_assistant_newline(final=True)` 收尾,无额外输出。
 - 数据流:文本增量→stdout;所有工具/错误/提示→stderr(带样式);失败态通过 `_failed` 累积,最终由 `finish()` 报告。
 
+```python
+def render(self, event: AgentEvent) -> None:
+    if isinstance(event, MessageStartEvent):
+        self._assistant_started = False
+        self._assistant_ended = False
+        return
+    if isinstance(event, MessageDeltaEvent):
+        self._assistant_started = True
+        typer.echo(event.delta, nl=False)
+        return
+    if isinstance(event, ToolExecutionStartEvent):
+        self._ensure_assistant_newline()
+        self._console.print(Text(format_tool_call_block(event.tool_call), style="cyan"))
+        return
+    if isinstance(event, ToolExecutionEndEvent):
+        status = "✓" if event.result.ok else "✗"
+        style = "green" if event.result.ok else "red"
+        self._print_tool_line(status, event.result.name, style=style)
+        if event.result.content:
+            self._print_tool_content(event.result.content)
+        return
+    if isinstance(event, ErrorEvent):
+        if not event.recoverable:
+            self._failed = True
+        self._ensure_assistant_newline()
+        self._console.print(Text(f"Error: {event.message}", style="red"))
+        return
+    if isinstance(event, MessageEndEvent):
+        self._render_custom_message(event)
+        self._ensure_assistant_newline(final=True)
+        return
+    if isinstance(event, AgentEndEvent):
+        self._ensure_assistant_newline(final=True)
+```
+
+关键点:以 `isinstance` 对事件继承体系做分派,文本增量走 stdout(`nl=False` 拼接),工具/错误/提示等侧信道走带样式的 stderr。
+
 #### _render_custom_message(self, event: MessageEndEvent) -> None
 
 - 作用:在消息结束时,针对扩展自定义消息(如用户侧注入的 markup)调用注册的渲染器生成 Rich markup,并安全落屏;若无可渲染内容则回退为纯文本。
@@ -179,10 +262,40 @@ description: rendering/ 包全貌
   4. 若 `markup is None`:`self._console.print(Text(message.content))` 直接打印纯文本内容。
   5. 否则尝试 `Text.from_markup(markup)`;用 `try/except Exception` 兜底——若 markup 格式非法则退化为 `Text(markup)` 原样输出,保证 print 模式绝因渲染错误崩溃(注释 noqa BLE001)。
 
+```python
+def _render_custom_message(self, event: MessageEndEvent) -> None:
+    message = event.message
+    if message.role != "user" or message.custom_type is None:
+        return
+    markup: str | None = None
+    if self._custom_message_renderer is not None:
+        markup = self._custom_message_renderer(
+            message.custom_type, message.content, message.details, False
+        )
+    self._ensure_assistant_newline()
+    if markup is None:
+        self._console.print(Text(message.content))
+        return
+    try:
+        rendered = Text.from_markup(markup)
+    except Exception:
+        rendered = Text(markup)
+    self._console.print(rendered)
+```
+
+关键点:只处理 `role == "user"` 且带 `custom_type` 的消息;`try/except Exception` 保证一段坏的扩展 markup 绝不能让 print 模式崩溃。
+
 #### finish(self) -> bool
 
 - 作用:结束渲染并报告运行成败。
 - 实现:`return not self._failed`,与 `EventRenderer.finish` 契约一致。
+
+```python
+def finish(self) -> bool:
+    return not self._failed
+```
+
+关键点:`finish()` 统一返回 `not self._failed`,CLI 据此选择进程退出码。
 
 #### _ensure_assistant_newline(self, *, final: bool = False) -> None
 
@@ -191,6 +304,17 @@ description: rendering/ 包全貌
   1. 若 `_assistant_started and not _assistant_ended`:`typer.echo()` 输出一个换行,并把 `_assistant_ended = True`(标记助手段结束)。
   2. 否则 `elif final and not _assistant_started`:仅把 `_assistant_ended = True`(处理"全程无助手输出却需要收尾"的边界,如直接出错)。
   3. 其余情况(已结束或无需收尾)不动作。
+
+```python
+def _ensure_assistant_newline(self, *, final: bool = False) -> None:
+    if self._assistant_started and not self._assistant_ended:
+        typer.echo()
+        self._assistant_ended = True
+    elif final and not self._assistant_started:
+        self._assistant_ended = True
+```
+
+关键点:换行簿记确保工具/错误行不会追加到半截助手句子之后,同时处理"全程无助手输出却需收尾"的边界。
 
 #### _print_tool_line(self, marker: str, name: str, detail: str | None = None, *, style: str) -> None
 
@@ -202,12 +326,34 @@ description: rendering/ 包全貌
   4. 若 `detail` 非空:`line.append(f" {detail}", style="bright_black")` 以暗灰附加细节。
   5. `self._console.print(line)` 落到 stderr。
 
+```python
+def _print_tool_line(
+    self, marker: str, name: str, detail: str | None = None, *, style: str
+) -> None:
+    line = Text()
+    line.append(marker, style=style)
+    line.append(f" {name}", style=style)
+    if detail:
+        line.append(f" {detail}", style="bright_black")
+    self._console.print(line)
+```
+
+关键点:工具结果行用 `Text` 增量拼接,状态符(✓/✗)与工具名按 `style` 着色,细节以暗灰附加。
+
 #### _print_tool_content(self, content: str) -> None
 
 - 作用:把工具返回的多行内容逐行缩进打印,便于阅读。
 - 关键实现步骤:
   1. `content.splitlines() or [""]`:按行切分;若结果为空则退化为单行空串,保证至少打印一次。
   2. 对每行 `self._console.print(Text(f"  {line}", style="white"))`:以白色、两空格缩进输出到 stderr。
+
+```python
+def _print_tool_content(self, content: str) -> None:
+    for line in content.splitlines() or [""]:
+        self._console.print(Text(f"  {line}", style="white"))
+```
+
+关键点:`splitlines() or [""]` 保证即使内容为空也至少打印一次,逐行缩进两格便于阅读工具返回。
 
 ---
 
@@ -222,6 +368,13 @@ description: rendering/ 包全貌
 - 作用:初始化 JSON 事件流渲染器。
 - 实现:`self._failed = False`,仅维护一个运行失败标志。
 
+```python
+def __init__(self) -> None:
+    self._failed = False
+```
+
+关键点:JSON 渲染器无缓冲,仅用一个布尔标志追踪运行成败。
+
 #### render(self, event: AgentEvent) -> None
 
 - 作用:把单个事件写成一行 JSON 并立即输出。
@@ -229,10 +382,26 @@ description: rendering/ 包全貌
   1. 若 `isinstance(event, ErrorEvent) and not event.recoverable`:置 `self._failed = True`(不可恢复错误标记运行失败)。
   2. `typer.echo(event.model_dump_json())`:直接调用 Pydantic 的 `model_dump_json()` 序列化整个事件对象并输出一行,不区分事件类型(所有类型一视同仁)。
 
+```python
+def render(self, event: AgentEvent) -> None:
+    if isinstance(event, ErrorEvent) and not event.recoverable:
+        self._failed = True
+    typer.echo(event.model_dump_json())
+```
+
+关键点:所有事件一律 `model_dump_json()` 原样输出,JSONL 因此获得完整事件保真度,无需自定义序列化。
+
 #### finish(self) -> bool
 
 - 作用:结束渲染并报告运行成败。
 - 实现:`return not self._failed`,与协议一致。
+
+```python
+def finish(self) -> bool:
+    return not self._failed
+```
+
+关键点:与 `TranscriptRenderer` 等实现一致,统一以 `not self._failed` 报告成败,使调用方无需关心模式。
 
 - Schema 约定说明:本渲染器不自定义 schema,完全依赖 `tau_agent` 中各 `AgentEvent` 子类的 Pydantic 字段定义;`model_dump_json()` 输出的字段名、嵌套结构与事件模型一致,因此"JSONL 的每一行都是一个完整事件对象,其 `type`/字段由对应事件模型决定"。
 
@@ -252,6 +421,15 @@ description: rendering/ 包全貌
   2. `self._failed = False`:运行失败标志。
   3. `self._error_messages: list[str] = []`:累积所有错误信息(便于失败时逐条输出)。
 
+```python
+def __init__(self) -> None:
+    self._last_assistant_text = ""
+    self._failed = False
+    self._error_messages: list[str] = []
+```
+
+关键点:只准备三个缓冲字段——最终文本、失败标志、错误列表,运行期间不写任何终端输出。
+
 #### render(self, event: AgentEvent) -> None
 
 - 作用:在运行过程中静默记录用于最终输出的关键信息,不向终端写任何内容。
@@ -260,6 +438,19 @@ description: rendering/ 包全貌
   2. 若 `isinstance(event, ErrorEvent)`:若 `not event.recoverable` 则 `_failed = True`;并把 `event.message` 追加进 `_error_messages`。
   3. 其他事件类型(工具事件、增量事件等)一律忽略——本渲染器不关心过程,只看最终文本与错误。
 
+```python
+def render(self, event: AgentEvent) -> None:
+    if isinstance(event, MessageEndEvent):
+        self._last_assistant_text = event.message.content
+        return
+    if isinstance(event, ErrorEvent):
+        if not event.recoverable:
+            self._failed = True
+        self._error_messages.append(event.message)
+```
+
+关键点:`MessageEndEvent` 覆盖式写入使"最后一轮"胜出;工具/增量等中间事件全部静默忽略。
+
 #### finish(self) -> bool
 
 - 作用:在运行结束时打印最终结果并返回成败,是实际产生终端输出的唯一方法。
@@ -267,6 +458,19 @@ description: rendering/ 包全貌
   1. 若 `self._failed`:遍历 `_error_messages`,用 `typer.echo(f"Error: {message}", err=True)` 把每条错误输出到 stderr,然后 `return False`。
   2. 否则若 `self._last_assistant_text` 非空:`typer.echo(self._last_assistant_text)` 把最终助手文本打印到 stdout,`return True`。
   3. 若既未失败也无最终文本(如空运行):不打印任何内容,`return True`。
+
+```python
+def finish(self) -> bool:
+    if self._failed:
+        for message in self._error_messages:
+            typer.echo(f"Error: {message}", err=True)
+        return False
+    if self._last_assistant_text:
+        typer.echo(self._last_assistant_text)
+    return True
+```
+
+关键点:`finish()` 是实际产生终端输出的唯一方法——失败时把错误逐条写到 stderr,否则只把最终助手文本打印到 stdout。
 
 ---
 

@@ -25,6 +25,25 @@ LOGIN_PROVIDER_ALIASES = {
 `huggingface`/`hf` 别名。该常量存在的意义是让命令层与 provider 目录保持同步，
 而无需在命令层里硬编码 provider 名称；login 命令中会解包出 `(provider, method)` 这一对值。
 
+```python
+def _login_command(context: CommandContext) -> CommandResult:
+    provider_name = context.args.strip()
+    if provider_name in {"custom", "new", "add"}:
+        return CommandResult(handled=True, custom_provider_login_requested=True)
+    if provider_name:
+        aliased_provider = LOGIN_PROVIDER_ALIASES.get(provider_name)
+        if aliased_provider is not None:
+            provider_name, login_method = aliased_provider
+        else:
+            login_method = None
+        entry = builtin_provider_entry(provider_name)
+        ...
+        return CommandResult(handled=True, login_provider=entry.name, login_method=login_method)
+    return CommandResult(handled=True, login_picker_requested=True)
+```
+
+上面这段 `_login_command` 的真实实现展示了别名解包：命中 `LOGIN_PROVIDER_ALIASES` 时把 `(provider_name, login_method)` 一并解出，否则 `login_method` 置 `None` 走通用校验。
+
 ### `CommandRegistry`
 
 持有可用命令的核心对象。
@@ -40,6 +59,34 @@ LOGIN_PROVIDER_ALIASES = {
 注册表不持有任何逐命令的行为：它并不知道每条命令具体做什么。这样就把应用装配
 （存在哪些命令）与 `CodingSession` 的逻辑（每条命令在会话中改变什么）分离开来。
 新增一条斜杠命令只需在此注册；它所调用的 `CodingSession` 方法已在第 3b 部分实现。
+
+```python
+class CommandRegistry:
+    def __init__(self) -> None:
+        self._commands: dict[str, SlashCommand] = {}
+        self._aliases: dict[str, str] = {}
+
+    def register(self, command: SlashCommand) -> None:
+        name = _normalize_name(command.name)
+        if name in self._commands:
+            raise ValueError(f"Duplicate slash command: /{name}")
+        self._commands[name] = command
+        for alias in command.aliases:
+            normalized_alias = _normalize_name(alias)
+            if normalized_alias in self._commands or normalized_alias in self._aliases:
+                raise ValueError(f"Duplicate slash command alias: /{normalized_alias}")
+            self._aliases[normalized_alias] = name
+
+    def get(self, name: str) -> SlashCommand | None:
+        normalized = _normalize_name(name)
+        command_name = self._aliases.get(normalized, normalized)
+        return self._commands.get(command_name)
+
+    def list_commands(self) -> tuple[SlashCommand, ...]:
+        return tuple(self._commands[name] for name in sorted(self._commands))
+```
+
+以上为 `register`/`get`/`list_commands` 的精简实现：`register` 把命令写进 `_commands`、把别名写进 `_aliases`（重名即报错）；`get` 先经 `_aliases` 解析别名再查主表；`list_commands` 仅遍历主命令并按名排序。
 
 > **为什么注册表是无行为的。** 这遵循 Tau 的分层规则 ——
 > `AgentHarness = 可复用的 agent 大脑`、`CodingSession = 编码 agent 环境`、
@@ -64,6 +111,30 @@ LOGIN_PROVIDER_ALIASES = {
 所有命令的*发现*都发生在 `CommandRegistry` 中。绝大多数处理函数甚至不直接调用
 `CodingSession` —— 它们返回一个 `CommandResult`，用其中的 `*_requested` 标志
 告知前端应驱动哪个动作 —— 从而让解析/分发层完全不沾染任何会话语义。
+
+```python
+def execute(self, session: CommandSession, text: str) -> CommandResult:
+    stripped = text.strip()
+    if not stripped.startswith("/"):
+        return CommandResult(handled=False)
+    if stripped.startswith("/skill:"):
+        return CommandResult(handled=False)
+    name, args = _parse_command(stripped)
+    if not name:
+        return CommandResult(handled=False)
+    command = self.get(name)
+    if command is None and name == "scoped" and args.lower() == "models":
+        command = self.get("scoped-models")
+        name = "scoped-models"
+        args = ""
+    if command is None:
+        return CommandResult(handled=False)
+    return command.handler(
+        CommandContext(session=session, registry=self, text=stripped, name=name, args=args)
+    )
+```
+
+`execute` 先判断 `/` 前缀与 `/skill:` 内联语法（`handled=False` 退回普通 prompt），再用 `_parse_command` 拆出 `(name, args)`，经 `get` 解析别名（含 `/scoped models` → `scoped-models` 兼容），命中则构造 `CommandContext` 调用 handler。
 
 ---
 
@@ -374,7 +445,29 @@ def create_default_command_registry() -> CommandRegistry:
 - **步骤**:
   1. `refresh_error = _refresh_provider_settings(context.session)`;非 `None` 直接返回该错误结果。
   2. 若有 `args`:`model = context.args.strip()`;把 `available_models` 转 `set`,若非空且 `model` 不在其中 → 报错列出可用模型;否则 `context.session.set_model(model)` 并 `CommandResult(handled=True, message="Current model: {model}")`。
-  3. 若无 `args` → `CommandResult(handled=True, model_picker_requested=True)`,前端打开模型选择器。
+   3. 若无 `args` → `CommandResult(handled=True, model_picker_requested=True)`,前端打开模型选择器。
+
+```python
+def _model_command(context: CommandContext) -> CommandResult:
+    refresh_error = _refresh_provider_settings(context.session)
+    if refresh_error is not None:
+        return refresh_error
+    if context.args:
+        model = context.args.strip()
+        available_models = set(context.session.available_models)
+        if available_models and model not in available_models:
+            models = ", ".join(sorted(available_models))
+            return CommandResult(
+                handled=True,
+                message=f"Unknown model for provider {context.session.provider_name}: {model}\n"
+                f"Available models: {models}",
+            )
+        context.session.set_model(model)
+        return CommandResult(handled=True, message=f"Current model: {model}")
+    return CommandResult(handled=True, model_picker_requested=True)
+```
+
+`_model_command` 先刷新 provider 设置，再决定是校验并直接 `set_model` 还是打开模型选择器——这是“handler 只产出 `*_requested` 标志、真实状态变更交给 `CodingSession`”的典型例子。
 
 #### `_scoped_models_command(context: CommandContext) -> CommandResult`
 

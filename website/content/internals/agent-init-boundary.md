@@ -101,6 +101,26 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 
 ### 导出项:`__all__`
 
+```python
+# __init__.py:63 — 公共契约清单：51 个 re-export 符号全部入列
+__all__ = [
+    "AgentEndEvent", "AgentEvent", "AgentMessage", "AgentStartEvent",
+    "AgentHarness", "AgentHarnessConfig", "AgentTool", "AgentToolResult",
+    "AssistantMessage", "BranchSummaryEntry", "CompactionEntry", "CustomEntry",
+    "ErrorEvent", "EventListener", "JSONObject", "JSONPrimitive",
+    "JsonlSessionStorage", "JSONValue", "LabelEntry", "LeafEntry",
+    "MessageDeltaEvent", "MessageEndEvent", "MessageEntry", "MessageStartEvent",
+    "ModelChangeEntry", "QueuedMessages", "QueueUpdateEvent", "RetryEvent",
+    "SessionEntry", "SessionInfoEntry", "SessionState", "SimpleCancellationToken",
+    "ThinkingLevelChangeEntry", "ThinkingDeltaEvent", "ToolCall", "ToolCallRenderer",
+    "ToolExecutionEndEvent", "ToolExecutionStartEvent", "ToolExecutionUpdateEvent",
+    "ToolExecutor", "ToolResultMessage", "ToolResultRenderer", "ToolUpdateCallback",
+    "TurnEndEvent", "TurnStartEvent", "Usage", "UsageCost", "UserMessage",
+    "run_agent_loop",
+]
+```
+
+
 `__all__` 是列表字面量(第 63–113 行),包含了下面所有被 re-export 的名字。它的作用是:
 
 - 定义 `from tau_agent import *` 时的可见集合;
@@ -125,12 +145,34 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
   - `append_interrupted_tool_results()`:修复被中断运行留下的"半截工具调用"transcript(给没有对应结果的 `ToolCall` 补一条 `ok=False` 的 `ToolResultMessage`),满足 OpenAI 兼容 provider 对"tool call 必须有 tool result"的要求(`harness.py:280` 起)。
 - **如何构成公共面**:它是 `tau_agent` 对外的"最高层门面"——上层应用(CLI / TUI)通常只直接持有 `AgentHarness`,通过它获得事件流并管理 transcript,而不必自己编排 `run_agent_loop`。
 
+```python
+# __init__.py:22 — AgentHarness 从 harness 子模块 re-export
+from tau_agent.harness import (
+    AgentHarness, AgentHarnessConfig, EventListener,
+    QueuedMessages, SimpleCancellationToken,
+)
+```
+
+
 ### 导出项:`AgentHarnessConfig`
 
 - **来源**:`tau_agent.harness`(第 22–28 行导入)。
 - **契约**:`harness.py:36` 定义的 `@dataclass(slots=True)`,是 `AgentHarness` 的配置对象。
 - **字段**:`provider: ModelProvider`、`model: str`、`system: str`、`tools: list[AgentTool]`(默认空)、`max_turns: int | None`(默认 `None` 表示不限)、`queue_mode: QueueMode`(默认 `"one_at_a_time"`)。其中 `QueueMode = Literal["one_at_a_time", "all"]`(`harness.py:20`)。
 - **如何构成公共面**:它是把 `tau_ai` 的 `ModelProvider` 与 agent 的 `tools`/系统提示/轮次上限绑定在一起的"接线配置",是构造 `AgentHarness` 的唯一入口参数。
+
+```python
+# __init__.py:36 — AgentHarnessConfig 的接线配置（来自 harness.py）
+@dataclass(slots=True)
+class AgentHarnessConfig:
+    provider: ModelProvider
+    model: str
+    system: str
+    tools: list[AgentTool] = field(default_factory=list)
+    max_turns: int | None = None
+    queue_mode: QueueMode = "one_at_a_time"
+```
+
 
 ### 导出项:`EventListener`
 
@@ -139,17 +181,50 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 - **契约**:任何接收 `AgentEvent`、可返回 `None`(同步)或 `Awaitable[None]`(异步)的可调用对象。`AgentHarness.subscribe` 接受它。
 - **如何构成公共面**:它定义了 agent 向外广播事件时,订阅者必须实现的"函数形状",是事件驱动集成的契约类型。
 
+```python
+# __init__.py:19 — EventListener 是模块级类型别名
+EventListener = Callable[[AgentEvent], Awaitable[None] | None]
+```
+
+
 ### 导出项:`QueuedMessages`
 
 - **来源**:`tau_agent.harness`(第 22–28 行导入)。
 - **契约**:`harness.py:23` 的 `@dataclass(frozen=True, slots=True)`,是 harness 拥有的排队消息快照:`steering: tuple[AgentMessage, ...]` 和 `follow_up: tuple[AgentMessage, ...]`,带 `count` 属性(两者之和)。
 - **如何构成公共面**:`harness.queued_messages` 返回它,让 UI 读取当前排队状态以展示待发消息,而无需碰 harness 内部 deque。
 
+```python
+# __init__.py:23 — QueuedMessages 是 frozen 快照（来自 harness.py）
+@dataclass(frozen=True, slots=True)
+class QueuedMessages:
+    steering: tuple[AgentMessage, ...] = ()
+    follow_up: tuple[AgentMessage, ...] = ()
+
+    @property
+    def count(self) -> int:
+        return len(self.steering) + len(self.follow_up)
+```
+
+
 ### 导出项:`SimpleCancellationToken`
 
 - **来源**:`tau_agent.harness`(第 22–28 行导入)。
 - **契约**:`harness.py:48` 定义的轻量取消令牌。有 `cancel()`(置 `_cancelled=True`)、`is_cancelled() -> bool`。
 - **如何构成公共面**:agent 循环与 harness 用它向 provider/工具传递"是否该停"的信号。注意它是 `tau_agent` 自己的实现;而 `run_agent_loop` 接受的是 `tau_ai.provider.CancellationToken`(协议),二者通过 `is_cancelled()` 形状兼容。
+
+```python
+# __init__.py:48 — SimpleCancellationToken 的轻量实现
+class SimpleCancellationToken:
+    def __init__(self):
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
+
+    def is_cancelled(self) -> bool:
+        return self._cancelled
+```
+
 
 ### 导出项:`run_agent_loop`
 
@@ -164,6 +239,18 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
   - 有 tool call 时:调 `_execute_tool_calls` 逐个执行(未知工具名 → `_unknown_tool_result`;取消 → `_cancelled_tool_result`),每个结果追加为 `ToolResultMessage`,并 `yield ToolExecutionStart/Update/EndEvent`。
   - `max_turns` 耗尽时 `yield ErrorEvent(recoverable=True)`;最后 `yield AgentEndEvent()`。
 - **如何构成公共面**:它是 harness 之下的"引擎",把 provider 流与工具执行编排成统一的 `AgentEvent` 流。需要无状态/嵌入式使用的调用方可以直接用它本身,而不经过 `AgentHarness`。
+
+```python
+# __init__.py:29 — run_agent_loop 从 loop 子模块 re-export
+from tau_agent.loop import run_agent_loop
+
+# loop.py:40 — 纯循环的签名：一切靠参数注入，messages 由调用方拥有
+async def run_agent_loop(*, provider, model, system, messages, tools,
+                         max_turns=None, signal=None,
+                         get_steering_messages=None, get_follow_up_messages=None,
+                         get_queue_update=None) -> AsyncIterator[AgentEvent]: ...
+```
+
 
 ### 导出项:`AgentMessage`
 
@@ -378,6 +465,19 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 除此之外,`tau_agent` 的 `events.py`、`messages.py`、`tools.py`、`types.py`、`session/*` 等模块**完全不 import `tau_ai`**——它们只依赖包内部的 `tau_agent.messages` / `tau_agent.tools` / `tau_agent.types` 等。这印证了边界的单向性:`tau_agent` 依赖 `tau_ai` 的"provider 与 provider 事件"两层,而 `tau_ai` 不反向依赖 `tau_agent`。
 
 **总结边界契约**:`tau_ai` 提供"模型与流",`tau_agent` 提供"大脑与事件面",`tau_coding`(CLI/TUI)负责"前端与资源"。`tau_agent` 通过 `ModelProvider` 抽象接收 provider 流、通过 `AgentEvent` 向外广播、通过 `SessionStorage` 协议接受调用方选定的落盘位置——它自身不触碰渲染、不碰文件位置、不绑具体模型。
+
+```python
+# loop.py:29 — agent 仅依赖 tau_ai 的协议与事件（不依赖具体 provider）
+from tau_ai.events import (ProviderErrorEvent, ProviderResponseEndEvent,
+                            ProviderResponseStartEvent, ProviderRetryEvent,
+                            ProviderTextDeltaEvent, ProviderThinkingDeltaEvent)
+from tau_ai.provider import CancellationToken, ModelProvider
+
+# 反方向：tau_ai.provider 的签名直接接收 tau_agent 的纯数据类型
+# ModelProvider.stream_response(model, system, messages: list[AgentMessage],
+#                               tools: list[AgentTool], signal) -> AsyncIterator[ProviderEvent]
+```
+
 
 ---
 

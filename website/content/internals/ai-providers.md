@@ -229,11 +229,31 @@ Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用�
 #### `__init__(self, config: OpenAICompatibleConfig, *, client: httpx.AsyncClient | None = None) -> None`
 保存 `config`,若调用方未传入 `client` 则置 `None` 并记 `self._owns_client = True`(之后由 `_get_client` 惰性创建、由 `aclose` 负责关闭);传入则 `_owns_client = False`。
 
+```python
+def __init__(self, config, *, client=None):
+    self._config = config
+    self._client = client
+    self._owns_client = client is None
+```
+
+这段代码说明了 client 的"拥有权"约定:只有自己创建的 client 才在 `aclose` 时关闭,外部注入的不会被动关掉。
+
 #### `async def aclose(self) -> None`
 若该 provider 自己创建了 client(`_owns_client`)且尚未关闭,则 `await self._client.aclose()` 并置 `None`。
 
 #### `def stream_response(self, *, model: str, system: str, messages: list[AgentMessage], tools: list[AgentTool], signal: CancellationToken | None = None) -> AsyncIterator[ProviderEvent]`
 入口分流:若 `config.api == "openai-responses"` 或 `_use_responses_api(model)` 为真,返回 `_stream_responses(...)`,否则返回 `_stream_chat_completions(...)`。两类方法各自先构造 payload 再调用共享的 `_stream`。
+
+```python
+def stream_response(self, *, model, system, messages, tools, signal=None):
+    if self._config.api == "openai-responses" or _use_responses_api(model):
+        return self._stream_responses(
+            model=model, system=system, messages=messages, tools=tools, signal=signal)
+    return self._stream_chat_completions(
+        model=model, system=system, messages=messages, tools=tools, signal=signal)
+```
+
+这段代码说明了路由逻辑:单凭模型名(或配置)就决定走 chat 还是 responses 协议,调用方无感知。
 
 #### `def _stream_chat_completions(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 构造 chat-completions payload(`_build_chat_payload`,传入 `reasoning_effort`/`reasoning_effort_parameter`/`thinking_format`/`compat`/`max_tokens`/`include_reasoning_effort_none`),再调用 `_stream`,URL 为 `{base_url}/chat/completions`,`parser_factory=_ChatStreamParser`。
@@ -243,6 +263,54 @@ Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用�
 
 #### `def _stream(self, *, model, url, payload, parser_factory, signal=None) -> AsyncIterator[ProviderEvent]`
 共享流式信封(核心)。内部定义 `async def iterator()`:
+
+```python
+def _stream(self, *, model, url, payload, parser_factory, signal=None):
+    async def iterator() -> AsyncIterator[ProviderEvent]:
+        client = self._get_client()
+        api_key = self._config.api_key
+        headers = dict(self._config.headers or {})
+        if self._config.credential_resolver is not None:
+            auth = await self._config.credential_resolver()
+            api_key = auth.api_key
+            headers.update(auth.headers or {})
+            if auth.base_url is not None:
+                endpoint = "/responses" if url.rstrip("/").endswith("/responses") else "/chat/completions"
+                request_url = f"{auth.base_url.rstrip('/')}{endpoint}"
+        if not self._config.omit_authorization_header:
+            has_authorization = any(key.casefold() == "authorization" for key in headers)
+            if not has_authorization:
+                headers["Authorization"] = f"Bearer {api_key}"
+        attempt = 0
+        while True:
+            parser = parser_factory()
+            try:
+                async with client.stream("POST", request_url, json=payload, headers=headers) as response:
+                    if response.status_code >= 400:
+                        # ... read body, retry or yield ProviderErrorEvent ...
+                        yield ProviderResponseStartEvent(model=model)
+                        async for line in response.aiter_lines():
+                            if signal is not None and signal.is_cancelled():
+                                return
+                            event = _parse_sse_line(line)
+                            if event is None:
+                                continue
+                            events, stop = parser.feed(event)
+                            for parser_event in events:
+                                yield parser_event
+                            if stop:
+                                break
+                        if parser.fatal:
+                            return
+                        for parser_event in parser.finalize():
+                            yield parser_event
+                        return
+            except httpx.HTTPError as exc:
+                # ... retry if not emitted_content else ProviderErrorEvent ...
+    return iterator()
+```
+
+这段代码说明了共享信封真正干的事:统一拼鉴权头、`credential_resolver` 改写 base_url、重试循环、把每行 SSE 交给 parser,而 HTTP/重试/取消逻辑对所有端点完全相同。
 1. 取 client;准备 `api_key` 与 `headers`(基于 `config.headers`)。
 2. 若 `config.credential_resolver` 非空,`await` 解析出 `auth`,覆盖 `api_key`、合并 `auth.headers`;若 `auth.base_url` 非空,则按当前 url 末尾是 `/responses` 还是 `/chat/completions` 重建 `request_url`。
 3. 若 `config.omit_authorization_header` 为假且 headers 中没有(大小写不敏感)`authorization`,则补 `Authorization: Bearer {api_key}`。
@@ -282,6 +350,47 @@ Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用�
 10. 对每个 `_tool_call_deltas(delta)`:记 emitted_content,按 `index` 取/建 `_ToolCallBuilder` 并 `add_delta`。
 11. 返回 `(events, False)`。
 
+```python
+def feed(self, event):
+    if event == "[DONE]":
+        return [], True
+    chunk = _loads_object(event)
+    if chunk is None:
+        self.fatal = True
+        return [ProviderErrorEvent(message="Provider returned invalid JSON chunk")], True
+    chunk_usage = chunk.get("usage")
+    if isinstance(chunk_usage, Mapping):
+        self._usage = _parse_chunk_usage(chunk_usage)
+    choice = _first_choice(chunk)
+    if choice is None:
+        return [], False
+    choice_usage = choice.get("usage")
+    if not isinstance(chunk_usage, Mapping) and isinstance(choice_usage, Mapping):
+        self._usage = _parse_chunk_usage(choice_usage)  # Moonshot 等回退
+    self._finish_reason = choice.get("finish_reason") or self._finish_reason
+    delta = choice.get("delta")
+    if not isinstance(delta, Mapping):
+        return [], False
+    events = []
+    content = delta.get("content")
+    if isinstance(content, str) and content:
+        self.emitted_content = True
+        self._content_parts.append(content)
+        events.append(ProviderTextDeltaEvent(delta=content))
+    thinking = _thinking_delta_text(delta)
+    if thinking:
+        self.emitted_content = True
+        events.append(ProviderThinkingDeltaEvent(delta=thinking))
+    for tool_call_delta in _tool_call_deltas(delta):
+        self.emitted_content = True
+        index = int(tool_call_delta.get("index", 0))
+        builder = self._tool_call_builders.setdefault(index, _ToolCallBuilder())
+        builder.add_delta(tool_call_delta)
+    return events, False
+```
+
+这段代码说明了 chat 解析器如何从 `choices[0].delta` 抽取文本/thinking/tool call,以及 usage 的双重来源(顶层或 choice 级)。
+
 #### `def finalize(self) -> list[ProviderEvent]`
 按 index 排序用 `_ToolCallBuilder.build` 生成 `tool_calls`;先 `yield` 每个 `ProviderToolCallEvent`,再发 `ProviderResponseEndEvent(AssistantMessage(content, tool_calls, usage=self._usage), finish_reason=self._finish_reason)`。
 
@@ -306,6 +415,57 @@ Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用�
 11. `response.failed`:置 `fatal=True`,返回 `[_responses_failure_event(chunk)], True`。
 12. `error`:置 `fatal=True`,返回 `[ProviderErrorEvent(message=_responses_error_message(chunk), data={"event":chunk})], True`。
 13. 其它返回 `([], False)`。
+
+```python
+def feed(self, event):
+    if event == "[DONE]":
+        return [], False  # responses 无此哨兵
+    chunk = _loads_object(event)
+    if chunk is None:
+        return [], False
+    chunk_type = chunk.get("type")
+    if not isinstance(chunk_type, str):
+        return [], False
+    if chunk_type in ("response.output_text.delta", "response.refusal.delta"):
+        delta = chunk.get("delta")
+        if isinstance(delta, str) and delta:
+            self.emitted_content = True
+            self._content_parts.append(delta)
+            return [ProviderTextDeltaEvent(delta=delta)], False
+    elif chunk_type in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+        delta = chunk.get("delta")
+        if isinstance(delta, str) and delta:
+            self.emitted_content = True
+            return [ProviderThinkingDeltaEvent(delta=delta)], False
+    elif chunk_type == "response.output_item.added":
+        _register_responses_item(self._tool_call_builders, chunk.get("item"), output_index=chunk.get("output_index"))
+    elif chunk_type == "response.function_call_arguments.delta":
+        item_id = chunk.get("item_id")
+        if isinstance(item_id, str):
+            builder = self._tool_call_builders.setdefault(item_id, _ResponsesToolCallBuilder())
+            builder.add_arguments_delta(chunk.get("delta"))
+            self.emitted_content = True
+    elif chunk_type == "response.function_call_arguments.done":
+        item_id = chunk.get("item_id")
+        if isinstance(item_id, str):
+            builder = self._tool_call_builders.setdefault(item_id, _ResponsesToolCallBuilder())
+            builder.set_final(arguments=chunk.get("arguments"))
+    elif chunk_type == "response.output_item.done":
+        _finalize_responses_item(self._tool_call_builders, chunk.get("item"), output_index=chunk.get("output_index"))
+    elif chunk_type in ("response.completed", "response.incomplete"):
+        self._status = _responses_finish_reason(chunk)
+        self._usage = _usage_from_responses_event(chunk) or self._usage
+        return [], True
+    elif chunk_type == "response.failed":
+        self.fatal = True
+        return [_responses_failure_event(chunk)], True
+    elif chunk_type == "error":
+        self.fatal = True
+        return [ProviderErrorEvent(message=_responses_error_message(chunk), data={"event": chunk})], True
+    return [], False
+```
+
+这段代码说明了 responses 解析器如何按事件类型分流——没有 `[DONE]`,而是靠 `response.completed/failed/error` 等终态事件收尾。
 
 #### `def finalize(self) -> list[ProviderEvent]`
 `[_ordered_builders(...)]` 按 output_index 排序生成 `tool_calls`,`yield` 每个 `ProviderToolCallEvent`,末尾 `ProviderResponseEndEvent` 的 `finish_reason` 经 `_normalize_finish_reason(self._status, has_tool_calls=...)` 归一化。
@@ -352,6 +512,30 @@ responses 路径的工具调用累积器(按字符串 item_id 索引,带 output_
 - 调 `_apply_chat_reasoning` 注入推理参数。
 - `tools` 非空前加 `tools=[_tool_to_openai(t) for t]`,若 `compat["zaiToolStream"] is True` 加 `tool_stream=True`。
 
+```python
+def _build_chat_payload(*, model, system, messages, tools, reasoning_effort, reasoning_effort_parameter, thinking_format, compat, max_tokens, include_reasoning_effort_none):
+    resolved_compat = dict(compat or {})
+    supports_usage = bool(resolved_compat.get("supportsUsageInStreaming", True))
+    max_tokens_field = _string_compat(resolved_compat.get("maxTokensField"), default="max_completion_tokens")
+    payload = {
+        "model": model,
+        "stream": True,
+        "messages": [_system_message(system), *[_message_to_openai(m) for m in messages]],
+    }
+    if supports_usage:
+        payload["stream_options"] = {"include_usage": True}
+    if bool(resolved_compat.get("supportsStore", True)):
+        payload["store"] = False
+    if max_tokens is not None:
+        payload["max_tokens" if max_tokens_field == "max_tokens" else "max_completion_tokens"] = max_tokens
+    _apply_chat_reasoning(payload, reasoning_effort=reasoning_effort, reasoning_effort_parameter=reasoning_effort_parameter, thinking_format=thinking_format, include_reasoning_effort_none=include_reasoning_effort_none)
+    if tools:
+        payload["tools"] = [_tool_to_openai(t) for t in tools]
+    return payload
+```
+
+这段代码说明了 chat payload 如何把 `compat` 开关逐一翻译成字段名差异(如 `max_tokens` vs `max_completion_tokens`)与 usage 开关。
+
 #### `def _apply_chat_reasoning(payload, *, reasoning_effort, reasoning_effort_parameter, thinking_format, include_reasoning_effort_none) -> None`
 按 `thinking_format` 注入不同的推理字段:
 - `zai`/`qwen`:`payload["enable_thinking"] = reasoning_enabled`。
@@ -367,6 +551,28 @@ responses 路径的工具调用累积器(按字符串 item_id 索引,带 output_
 
 #### `def _build_responses_payload(...) -> dict[str, JSONValue]`
 构造 responses 请求体:`model`、`stream=True`、`store=False`、`instructions=system`、`input=_messages_to_responses_input(messages)`;`max_tokens` 非 None 时 `max_output_tokens=...`;`_normalize_responses_effort` 返回非 None 则加 `reasoning={"effort":..., "summary":"auto"}`;`tools` 非空前 `tools=[_tool_to_responses(t) for t]`。
+
+```python
+def _build_responses_payload(*, model, system, messages, tools, reasoning_effort, max_tokens):
+    payload = {
+        "model": model,
+        "stream": True,
+        "store": False,                       # 无状态：每轮重发整段 transcript
+        "instructions": system,
+        "input": _messages_to_responses_input(messages),
+    }
+    if max_tokens is not None:
+        payload["max_output_tokens"] = max_tokens
+    effort = _normalize_responses_effort(reasoning_effort)
+    if effort is not None:
+        # summary:auto 让思考以 response.reasoning_summary_text.delta 可见
+        payload["reasoning"] = {"effort": effort, "summary": "auto"}
+    if tools:
+        payload["tools"] = [_tool_to_responses(t) for t in tools]
+    return payload
+```
+
+这段代码说明了 responses payload 用 `instructions` 当 system、`input` 承载消息,并显式 `store: false` 保持无状态。
 
 #### `def _normalize_responses_effort(reasoning_effort: str | None) -> str | None`
 None 或 `strip().lower()` 为 `""`/`"none"` 返回 None,否则返回小写化值。
@@ -460,6 +666,22 @@ Anthropic Messages API 适配器,完全偏离 openai_compatible 基类:使用 `a
 #### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 内部 `iterator()`:
 1. 取 client;准备 `api_key`、`base_url`、`auth_headers`;`credential_resolver` 存在则解析并可能改写 `base_url`(确保带 `/v1`)、合并 headers。
+
+```python
+headers = {
+    "anthropic-version": ANTHROPIC_VERSION,
+    "content-type": "application/json",
+    **(dict(self._config.headers or {})),
+    **auth_headers,
+}
+if self._config.bearer_auth:
+    headers.setdefault("Authorization", f"Bearer {api_key}")
+else:
+    headers["x-api-key"] = api_key          # Anthropic 专属鉴权头
+url = f"{base_url.rstrip('/')}/messages"
+```
+
+这段代码说明了 Anthropic 与 OpenAI 系的关键差异:它用 `x-api-key`(或 bearer)鉴权并强制带 `anthropic-version` 协议头,端点是 `/messages` 而非 `/chat/completions`。
 2. `_build_messages_payload(...)` 构造请求体。
 3. headers:`anthropic-version`、`content-type`、`config.headers`、`auth_headers`;若 `config.bearer_auth` 则 `Authorization: Bearer`,否则 `x-api-key`。URL=`{base_url}/messages`。
 4. 重试循环:`async with client.stream("POST", url, json=payload, headers=headers)`。
@@ -491,6 +713,24 @@ Anthropic Messages API 适配器,完全偏离 openai_compatible 基类:使用 `a
 
 #### `def _build_messages_payload(...) -> dict[str, JSONValue]`
 构造 Anthropic 请求体:`resolved_max_tokens = max_tokens or 4096`,若 `thinking_budget_tokens` 非空则 `max(resolved, budget+1024)`;含 `model`、`max_tokens`、`stream=True`、`system`(有 `oauth_system_prompt` 时拼成 `[{type:text,...},{type:text,...}]` 列表,否则纯字符串)、`messages=[_anthropic_message(m) for m]`;thinking:`thinking_mode=="adaptive"` 且 `thinking_effort` 非空→`thinking={"type":"adaptive","display":"summarized"}` 且 `output_config={"effort":...}`,否则 `thinking_budget_tokens` 非空→`thinking={"type":"enabled","budget_tokens":...}`;`tools` 非空→`tools=[_anthropic_tool(t) for t]`。
+
+```python
+payload = {
+    "model": model,
+    "max_tokens": resolved_max_tokens,
+    "stream": True,
+    "system": ([{"type": "text", "text": oauth_system_prompt}, {"type": "text", "text": system}]
+               if oauth_system_prompt else system),
+    "messages": [_anthropic_message(message) for message in messages],
+}
+if thinking_mode == "adaptive" and thinking_effort is not None:
+    payload["thinking"] = {"type": "adaptive", "display": "summarized"}
+    payload["output_config"] = {"effort": thinking_effort}
+elif thinking_budget_tokens is not None:
+    payload["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget_tokens}
+```
+
+这段代码说明了 Anthropic 思考的两种形态:adaptive 模式带 `output_config.effort`,budget 模式带 `thinking.budget_tokens`;`system` 还可前置一段 oauth 提示。
 
 #### `def _anthropic_message(message: AgentMessage) -> dict[str, JSONValue]`
 `UserMessage`→`{"role":"user","content":message.content}`;`AssistantMessage`→`{"role":"assistant","content":[...]}`,有 content 加 `{"type":"text","text":...}`,每个 tool_call 加 `{"type":"tool_use","id":...,"name":...,"input":arguments}`;`ToolResultMessage`→`{"role":"user","content":[{"type":"tool_result","tool_use_id":...,"content":...,"is_error":not ok}]}`;否则 `TypeError`。
@@ -533,6 +773,18 @@ Google Generative Language API 适配器,偏离基类最彻底:端点是 `{base_
 #### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 内部 `iterator()`:
 1. 取 client;`_build_google_payload(...)` 构造体。
+
+```python
+url = (
+    f"{self._config.base_url.rstrip('/')}/models/"
+    f"{model}:streamGenerateContent?alt=sse&key={self._config.api_key}"
+)
+headers = {
+    **dict(self._config.headers or {}),
+    "content-type": "application/json",
+}
+```
+
 2. URL=`{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`;headers=`config.headers`+`content-type`。
 3. 重试循环,每轮 `parser = _GoogleStreamParser()`(循环内重建,确保每次尝试干净)。
 4. `status>=400`:重试/错误逻辑同通用。
@@ -564,6 +816,26 @@ Google Generative Language API 适配器,偏离基类最彻底:端点是 `{base_
 
 #### `def _build_google_payload(...) -> dict[str, JSONValue]`
 `contents=[_message_to_google(m) for m]`;`system` 非空加 `systemInstruction={"parts":[{"text":system}]}`;`max_tokens` 非空加 `generationConfig.maxOutputTokens`;`_google_thinking_config` 非空则 `generationConfig.thinkingConfig`;`tools` 非空则 `tools=[{"functionDeclarations":[_tool_to_google(t) for t]}]`。
+
+```python
+payload = {
+    "contents": [_message_to_google(message) for message in messages],
+}
+if system:
+    payload["systemInstruction"] = {"parts": [{"text": system}]}
+config = {}
+if max_tokens is not None:
+    config["maxOutputTokens"] = max_tokens
+thinking_config = _google_thinking_config(model, reasoning_effort)
+if thinking_config is not None:
+    config["thinkingConfig"] = thinking_config
+if config:
+    payload["generationConfig"] = config
+if tools:
+    payload["tools"] = [{"functionDeclarations": [_tool_to_google(tool) for tool in tools]}]
+```
+
+这段代码说明了 Gemini 请求体的形态:`contents`/`systemInstruction`/`generationConfig` 三层结构,thinking 由 `thinkingConfig` 表达,与 OpenAI 的 `messages`/`tools` 完全不同。
 
 #### `def _google_thinking_config(model, reasoning_effort) -> dict[str, JSONValue] | None`
 `reasoning_effort is None`→None;`"none"`→按模型族返回 `thinkingLevel`(gemini-3-pro→LOW,gemini-3-flash/gemma-4→MINIMAL,其它→`thinkingBudget:0`);`reasoning_effort in {MINIMAL,LOW,MEDIUM,HIGH}`→`{includeThoughts:True, thinkingLevel:...}`;否则 `_google_budget` 给出预算则 `{includeThoughts:True, thinkingBudget:...}`,否则 `{includeThoughts:True, thinkingLevel:_google_level(...)}`。
@@ -618,6 +890,19 @@ Mistral Conversations 适配器,形态上最接近 openai_compatible 的 chat �
 #### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 先 `_build_mistral_payload(...)`,再调 `_stream(model=model, url=f"{_mistral_base_url(base_url)}/chat/completions", payload=payload, signal=signal)`。
 
+```python
+def stream_response(self, *, model, system, messages, tools, signal=None):
+    payload = _build_mistral_payload(
+        model=model, system=system, messages=messages, tools=tools,
+        reasoning_effort=self._config.reasoning_effort, max_tokens=self._config.max_tokens)
+    return self._stream(
+        model=model,
+        url=f"{_mistral_base_url(self._config.base_url)}/chat/completions",
+        payload=payload, signal=signal)
+```
+
+这段代码说明了 Mistral 路由的形态:它直接走 `/chat/completions`(且 `_mistral_base_url` 自动补 `/v1`),与 OpenAI chat 分支同构但独立实现。
+
 #### `def _stream(self, *, model, url, payload, signal) -> AsyncIterator[ProviderEvent]`
 内部 `iterator()`(与基类 `_stream` 同构):取 client,headers=`config.headers`+`Authorization: Bearer {api_key}`;重试循环每轮 `parser=_MistralStreamParser()`;`status>=400` 重试/错误;发 `ProviderResponseStartEvent`;逐行 `_parse_sse_line`→`events, stop = parser.feed(event)`,逐个 yield,`stop` 则 break;最后 `parser.finalize()`;HTTP 异常按 `parser.emitted_content` 重试。
 
@@ -661,6 +946,25 @@ Mistral Conversations 适配器,形态上最接近 openai_compatible 的 chat �
 
 #### `def _build_mistral_payload(...) -> dict[str, JSONValue]`
 `model`、`stream=True`、`messages=[*_system_messages(system), *[_message_to_mistral(m) for m]]`;`max_tokens` 非空加 `max_tokens`;`tools` 非空加 `tools=[_tool_to_mistral(t) for t]`;`reasoning_effort` 非 None 且非 `"none"` 时:若 `_uses_reasoning_effort(model)` 加 `reasoning_effort:"high"`,否则加 `prompt_mode:"reasoning"`。
+
+```python
+payload = {
+    "model": model,
+    "stream": True,
+    "messages": [*_system_messages(system), *[_message_to_mistral(m) for m in messages]],
+}
+if max_tokens is not None:
+    payload["max_tokens"] = max_tokens
+if tools:
+    payload["tools"] = [_tool_to_mistral(tool) for tool in tools]
+if reasoning_effort is not None and reasoning_effort != "none":
+    if _uses_reasoning_effort(model):
+        payload["reasoning_effort"] = "high"
+    else:
+        payload["prompt_mode"] = "reasoning"
+```
+
+这段代码说明了 Mistral 推理开关的两路分支:manus 系模型用 `reasoning_effort: "high"`,其余用 `prompt_mode: "reasoning"`(由 `_uses_reasoning_effort` 名单决定)。
 
 #### `def _system_messages(system: str) -> list[dict[str, JSONValue]]`
 非空则 `[{"role":"system","content":system}]`。
@@ -729,6 +1033,25 @@ OpenAI Codex 订阅版 Responses 适配器,完全自包含(不继承 openai_comp
 #### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 内部 `iterator()`:
 1. 取 client,`_build_codex_payload(...)` 构造体,`_resolve_codex_url(base_url)` 得 URL。
+
+```python
+credentials = await self._config.credential_resolver()
+headers = _build_codex_headers(
+    self._config.headers,
+    access_token=credentials.access_token,
+    account_id=credentials.account_id,
+    originator=self._config.originator,
+)
+async with client.stream("POST", url, json=payload, headers=headers) as response:
+    # ... status>=400 时 _should_retry 带 body 识别终端限流，否则 ProviderErrorEvent ...
+    yield ProviderResponseStartEvent(model=model)
+    async for event in _codex_provider_events(response, signal=signal):
+        if isinstance(event, ProviderTextDeltaEvent | ProviderToolCallEvent):
+            emitted_content = True
+        yield event
+```
+
+这段代码说明了 Codex 与别家的根本差异:每次请求都重新解析 OAuth 凭证(处理刷新),并用内联异步生成器 `_codex_provider_events` 解析 SSE,而非独立的 parser 类。
 2. 重试循环:`attempt=0`。每轮先 `await self._config.credential_resolver()` 取凭证,`_build_codex_headers(...)` 构造 headers;`async with client.stream("POST", url, json=payload, headers=headers)`。
 3. `status>=400`:读 body,`_should_retry(attempt, status_code=..., body=...)`(带 body 判定终端限流)则重试,否则发 `ProviderErrorEvent`(含 attempts)。
 4. 发 `ProviderResponseStartEvent`;`async for event in _codex_provider_events(response, signal=signal)`:若 event 是 `ProviderTextDeltaEvent | ProviderToolCallEvent` 则置 `emitted_content=True`,`yield event`。
@@ -761,6 +1084,24 @@ OpenAI Codex 订阅版 Responses 适配器,完全自包含(不继承 openai_comp
 
 #### `def _build_codex_payload(...) -> dict[str, JSONValue]`
 `model`、`store=False`、`stream=True`、`instructions=system or "You are a helpful assistant."`、`input=_messages_to_responses_input(messages)`、`text={"verbosity":"low"}`、`include=["reasoning.encrypted_content"]`、`tool_choice="auto"`、`parallel_tool_calls=True`;`reasoning_effort` 非空→`reasoning={"effort":...,"summary":reasoning_summary}`;`tools` 非空→`tools=[_tool_to_codex(t) for t]`。
+
+```python
+payload = {
+    "model": model,
+    "store": False,
+    "stream": True,
+    "instructions": system or "You are a helpful assistant.",
+    "input": _messages_to_responses_input(messages),
+    "text": {"verbosity": "low"},
+    "include": ["reasoning.encrypted_content"],
+    "tool_choice": "auto",
+    "parallel_tool_calls": True,
+}
+if reasoning_effort is not None:
+    payload["reasoning"] = {"effort": reasoning_effort, "summary": reasoning_summary}
+```
+
+这段代码说明了 Codex 是 Responses 风格的变体:`store: false`、自带 `text.verbosity`/`include`/`parallel_tool_calls`,并用 `reasoning.effort`+`summary` 表达思考。
 
 #### `def _messages_to_responses_input(messages) -> list[JSONValue]`
 与基类 responses 输入不同,使用细粒度 items:`UserMessage`→`{"role":"user","content":[{"type":"input_text","text":...}]}`;`AssistantMessage` 有 content→`{"type":"message","role":"assistant","content":[{"type":"output_text","text":...,"annotations":[]}],"status":"completed","id":f"msg_{i}"}`,每个 tool_call→`{"type":"function_call","call_id":...,"name":...,"arguments":dumps(...), ("id":item_id)}`;`ToolResultMessage`→`{"type":"function_call_output","call_id":(拆分后),"output":...}`。
@@ -820,6 +1161,21 @@ OpenAI Codex 订阅版 Responses 适配器,完全自包含(不继承 openai_comp
 #### `def _build_codex_headers(configured_headers, *, access_token, account_id, originator) -> dict[str, str]`
 合并 headers + `Authorization: Bearer`、`chatgpt-account-id`、`originator`、`User-Agent`(含系统信息)、`OpenAI-Beta: responses=experimental`、`accept: text/event-stream`、`content-type`。
 
+```python
+headers = {
+    **dict(configured_headers or {}),
+    "Authorization": f"Bearer {access_token}",
+    "chatgpt-account-id": account_id,
+    "originator": originator,
+    "User-Agent": f"tau ({system()} {release()}; {machine()})",
+    "OpenAI-Beta": "responses=experimental",
+    "accept": "text/event-stream",
+    "content-type": "application/json",
+}
+```
+
+这段代码说明了 Codex 的专有鉴权头组合:除 Bearer 令牌外还需 `chatgpt-account-id` 与 `OpenAI-Beta: responses=experimental`,共同表明这是 ChatGPT 订阅会话。
+
 #### `def _resolve_codex_url(base_url) -> str`
 确保以 `/codex/responses` 结尾(已含 `/codex/responses` 保持;`/codex` 补 `/responses`;否则补)。
 
@@ -848,6 +1204,22 @@ body 小写后若含任一计费相关 marker(`gousagelimiterror`/`freeusagelimi
 
 #### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 记录本次调用到 `self.calls`(`model, system, list(messages), list(tools)`);从 `self._streams` 弹出下一条流(无则空列表);定义内部 `async def iterator()` 逐 `yield event`,但每轮检查 `signal is not None and signal.is_cancelled()` 可提前 `return`;返回该迭代器。即每次调用消费一个预脚本流,使测试具备确定性、可断言调用参数。
+
+```python
+def stream_response(self, *, model, system, messages, tools, signal=None):
+    self.calls.append((model, system, list(messages), list(tools)))
+    stream = self._streams.pop(0) if self._streams else []
+
+    async def iterator() -> AsyncIterator[ProviderEvent]:
+        for event in stream:
+            if signal is not None and signal.is_cancelled():
+                return
+            yield event
+
+    return iterator()
+```
+
+这段代码说明了 FakeProvider 的确定性来源:它不碰网络,只是逐条回放预存事件流,并把入参记进 `self.calls` 供测试断言。
 
 ### 对比小结(各 provider 在 payload / 工具 schema / thinking / 事件映射 上的异同)
 

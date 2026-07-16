@@ -36,6 +36,27 @@ description: loop.py 纯循环 / harness.py 有状态大脑
 4. 若因 `max_turns` 耗尽退出 `while`：`yield` 可恢复 `ErrorEvent`。
 5. 最后 `yield AgentEndEvent()`。
 
+```python
+# loop.py:40 — 纯异步生成器，messages 由调用方拥有、循环只就地追加
+async def run_agent_loop(*, provider, model, system, messages, tools,
+                         max_turns=None, signal=None,
+                         get_steering_messages=None, get_follow_up_messages=None,
+                         get_queue_update=None) -> AsyncIterator[AgentEvent]:
+    yield AgentStartEvent()
+    tool_by_name = {tool.name: tool for tool in tools}
+    turn = 1
+    while max_turns is None or turn <= max_turns:
+        ...
+        async for provider_event in provider.stream_response(
+            model=model, system=system, messages=messages, tools=tools, signal=signal
+        ):
+            if isinstance(provider_event, ProviderResponseEndEvent):
+                assistant_message = provider_event.message
+                messages.append(assistant_message)   # 就地修改调用方的 transcript
+                yield MessageEndEvent(message=assistant_message)
+        ...
+    yield AgentEndEvent()
+```
 > Design note: transcript 列表由**调用方（harness）拥有**，loop 只往里 append。
 > 这是 loop/harness 边界的核心分工。Tau 的设计原则明确 **`AgentHarness = reusable agent brain`** 且 **`The core stays portable`**——`run_agent_loop` 因此被实现为纯 `async` 生成器：它不持有 transcript、不绑定工具、不感知会话文件或终端，所有状态都由调用方注入、就地修改。这样循环本身保持"无状态"，可被任意 harness、测试或嵌入场景复用；而真正有状态的大脑（持有 transcript、运行标志、取消令牌、排队与订阅）由 `AgentHarness` 叠加在循环之上。把"算法"与"状态"拆开，正对应 README 的 agent 拆分原则——可复用的 harness 绝不能依赖终端、文件路径或 Rich 渲染，那些只是包裹 harness 的外层。
 
@@ -74,6 +95,28 @@ description: loop.py 纯循环 / harness.py 有状态大脑
   `ToolResultMessage`；失败时把 `error` 拼进 `content`（`error not in content` 时），
   无 content 且有 data 时以 `str(data)` 兜底。
 
+```python
+# loop.py:241 — 用「队列 + 任务」竞速把同步进度回调桥接进异步事件流
+queue: asyncio.Queue[ToolExecutionUpdateEvent] = asyncio.Queue()
+
+def on_update(message, data=None):
+    queue.put_nowait(ToolExecutionUpdateEvent(tool_call_id=tool_call.id,
+                                              message=message, data=data))
+
+task = asyncio.ensure_future(_run_tool(tool, tool_call, signal, on_update))
+while not task.done():
+    getter = asyncio.ensure_future(queue.get())
+    done, _ = await asyncio.wait({task, getter}, return_when=asyncio.FIRST_COMPLETED)
+    if getter in done:
+        yield getter.result()          # 工具还在跑，先吐进度
+    else:
+        getter.cancel()                # 工具先结束，取消 getter 不丢更新
+        with contextlib.suppress(asyncio.CancelledError):
+            await getter
+while not queue.empty():               # 排空尾部更新
+    yield queue.get_nowait()
+yield task.result()                    # 必以恰好一个 AgentToolResult 收尾
+```
 > Design note: 这段"进度桥接"是 loop.py 最精巧的部分，也是 Rust `tau-rs` 用 channel +
 > `tokio::select!` 实现 `ToolExecutionUpdateEvent` 流时所对应的逻辑。把同步的 `on_update`
 > 回调桥接进异步事件流，是为了让工具进度以统一的 `AgentEvent` 形式对外广播——前端无论用
@@ -120,6 +163,18 @@ description: loop.py 纯循环 / harness.py 有状态大脑
 
 **运行入口**：
 - **`prompt(content, *, custom_type, details)`**：先 `_ensure_not_running()`，再
+
+```python
+# harness.py:184 — 入口：防重入 → 修中断 → 追加用户消息 → 跑循环
+def prompt(self, content, *, custom_type=None, details=None):
+    self._ensure_not_running()
+    self._append_interrupted_tool_results()
+    self._running = True
+    message = UserMessage(content=content, custom_type=custom_type, details=details)
+    self._messages.append(message)
+    return self._run(prompt_message=message)
+```
+
   `_append_interrupted_tool_results()`，置 `_running=True`，append 一个
   `UserMessage`（可带 `custom_type`/`details` 展示元数据），调用 `_run`。
 - **`continue_()`**：不 append 新用户消息，直接 `_run()`——用于从持久化状态恢复后续跑。
@@ -130,6 +185,14 @@ description: loop.py 纯循环 / harness.py 有状态大脑
   时单独 append 的，需要在事件流里也体现出来）。`finally` 里：若被取消则再修一次
   中断工具结果，清空 `_current_signal`，`_running=False`。
 
+```python
+# harness.py:244 — 事件广播：同步/异步监听器都支持
+async def _notify(self, event):
+    for listener in list(self._listeners):
+        result = listener(event)
+        if isawaitable(result):
+            await result
+```
 **事件广播**：`_notify(event)` 遍历 `_listeners`，`listener` 若是 awaitable 就 `await`。
 这是扩展/UI 观测 `AgentEvent` 的钩子（对应 `tau_coding` 里扩展 attach 到
 `session._harness.subscribe`）。
@@ -139,6 +202,23 @@ description: loop.py 纯循环 / harness.py 有状态大脑
 分别由 `_drain_steering_messages`/`_drain_follow_up_messages` 提供，正是传给 loop 的
 `get_*` 回调。
 
+```python
+# harness.py:280 — 中断修复：补上"助手调了工具却无结果"的半截 transcript
+def _append_interrupted_tool_results(self):
+    returned_ids = {m.tool_call_id for m in self._messages
+                    if isinstance(m, ToolResultMessage)}
+    for message in tuple(self._messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        for tool_call in message.tool_calls:
+            if tool_call.id in returned_ids:
+                continue
+            returned_ids.add(tool_call.id)
+            self._messages.append(ToolResultMessage(
+                tool_call_id=tool_call.id, name=tool_call.name,
+                content="Tool call interrupted by user", ok=False,
+                error="Tool call interrupted by user"))
+```
 **中断修复**：`append_interrupted_tool_results()` / `_append_interrupted_tool_results()`。
 原因：OpenAI 兼容 provider 会拒绝"助手调了工具但没有对应工具结果"的 transcript。若
 UI 在工具还在跑时取消 worker，正常循环可能来不及补取消结果——所以**下次请求模型前**
@@ -209,6 +289,38 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
   6. 最后 `yield AgentEndEvent()` 结束整轮运行。
 - **纯性要点**:函数本身不保存任何跨调用状态;`messages` 由调用方拥有并就地修改(使其在无状态条件下仍能与有状态 harness 协作);provider、tools、取消信号、队列拉取函数全部通过参数注入,便于用 fake provider / fake tool 做确定性测试。
 
+```python
+# loop.py:70 — 纯循环主结构（事件翻译 + transcript 就地追加）
+while max_turns is None or turn <= max_turns:
+    if signal is not None and signal.is_cancelled():
+        yield ErrorEvent(message="Agent run cancelled", recoverable=True)
+        break
+    yield TurnStartEvent(turn=turn)
+    async for provider_event in provider.stream_response(
+        model=model, system=system, messages=messages, tools=tools, signal=signal
+    ):
+        if isinstance(provider_event, ProviderResponseEndEvent):
+            assistant_message = provider_event.message
+            messages.append(assistant_message)
+            yield MessageEndEvent(message=assistant_message)
+    if not assistant_message.tool_calls:
+        yield TurnEndEvent(turn=turn)
+        if _drain_queued_messages(messages, get_steering_messages, get_queue_update):
+            turn += 1; continue
+        if _drain_queued_messages(messages, get_follow_up_messages, get_queue_update):
+            turn += 1; continue
+        break
+    async for tool_event in _execute_tool_calls(assistant_message.tool_calls,
+                                                 tool_by_name, messages, signal):
+        yield tool_event
+    yield TurnEndEvent(turn=turn)
+    turn += 1
+else:
+    yield ErrorEvent(message=f"Agent loop stopped after reaching max_turns={max_turns}",
+                      recoverable=True)
+```
+
+
 #### `_drain_queued_messages(messages, get_messages, get_queue_update) -> tuple[AgentEvent, ...]`
 
 - **作用**:把某个队列(steering 或 follow-up)中此刻可取出的消息注入 transcript,并生成对应的 `MessageStartEvent` / `MessageEndEvent` 以及可选的 `QueueUpdateEvent`(纯函数,非 async)。
@@ -221,6 +333,25 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
   6. `return tuple(events)`。
 - **与循环的关系**:由 `run_agent_loop` 在「模型无工具调用 / 工具调用完成后」调用,支持运行中动态往 transcript 注入用户消息而不打断循环。
 
+```python
+# loop.py:172 — 把队列消息注入 transcript 并生成对应事件（纯函数）
+def _drain_queued_messages(messages, get_messages, get_queue_update):
+    if get_messages is None:
+        return ()
+    queued = tuple(get_messages())
+    if not queued:
+        return ()
+    messages.extend(queued)
+    events = []
+    for message in queued:
+        events.append(MessageStartEvent(message_role=message.role))
+        events.append(MessageEndEvent(message=message))
+    if get_queue_update is not None:
+        events.append(get_queue_update())
+    return tuple(events)
+```
+
+
 #### `_execute_tool_calls(tool_calls, tool_by_name, messages, signal) -> AsyncIterator[AgentEvent]`
 
 - **作用**:顺序执行一轮中的所有 `ToolCall`,为每个调用产出 `ToolExecutionStartEvent` / 中间 `ToolExecutionUpdateEvent` / 最终 `ToolExecutionEndEvent`,并把工具结果回填 `messages`(async 生成器)。
@@ -232,6 +363,33 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
      - 否则 `produced: AgentToolResult | None = None`,`async for item in _execute_tool(tool, tool_call, signal)`:若 `item` 是 `ToolExecutionUpdateEvent` 则直接 `yield`(进度更新);否则(即最终结果)存入 `produced`。若 `produced is None`(理论上 `_execute_tool` 总会以结果结尾)则兜底用 `_cancelled_tool_result`。
   2. `messages.append(_tool_result_message(result))` 把结果消息回填 transcript;`yield ToolExecutionEndEvent(result=result)`。
 - **数据闭环**:工具结果经 `_tool_result_message` 转为 `ToolResultMessage` 并就地追加到调用方 transcript,从而下一轮 `provider.stream_response` 能看到工具结果。
+
+```python
+# loop.py:193 — 顺序执行工具调用，回填结果并广播事件
+async def _execute_tool_calls(tool_calls, tool_by_name, messages, signal):
+    for index, tool_call in enumerate(tool_calls):
+        if signal is not None and signal.is_cancelled():
+            for t in tool_calls[index:]:
+                result = _cancelled_tool_result(t)
+                messages.append(_tool_result_message(result))
+                yield ToolExecutionEndEvent(result=result)
+            yield ErrorEvent(message="Agent run cancelled", recoverable=True)
+            return
+        yield ToolExecutionStartEvent(tool_call=tool_call)
+        tool = tool_by_name.get(tool_call.name)
+        result = _unknown_tool_result(tool_call) if tool is None else None
+        if tool is not None:
+            produced = None
+            async for item in _execute_tool(tool, tool_call, signal):
+                if isinstance(item, ToolExecutionUpdateEvent):
+                    yield item
+                else:
+                    produced = item
+            result = produced or _cancelled_tool_result(tool_call)
+        messages.append(_tool_result_message(result))
+        yield ToolExecutionEndEvent(result=result)
+```
+
 
 #### `_execute_tool(tool, tool_call, signal) -> AsyncIterator[ToolExecutionUpdateEvent | AgentToolResult]`
 
@@ -247,13 +405,57 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
   6. `finally`:若 `task` 仍未完成则 `task.cancel()` 并等待(防止工具任务被孤立;即便消费方 generator 中途关闭或取消也会执行)。
 - **设计要点**:用「任务 + 队列」竞速让同步 `on_update` 与异步结果共存,保证更新顺序与「工具仍在跑」的实时性,且收尾必有一个结果。
 
+```python
+# loop.py:228 — 单工具执行：同步回调桥接为异步事件流，必以单个结果收尾
+async def _execute_tool(tool, tool_call, signal):
+    queue: asyncio.Queue = asyncio.Queue()
+    def on_update(message, data=None):
+        queue.put_nowait(ToolExecutionUpdateEvent(
+            tool_call_id=tool_call.id, message=message, data=data))
+    task = asyncio.ensure_future(_run_tool(tool, tool_call, signal, on_update))
+    try:
+        while not task.done():
+            getter = asyncio.ensure_future(queue.get())
+            done, _ = await asyncio.wait({task, getter},
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if getter in done:
+                yield getter.result()
+            else:
+                getter.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await getter
+        while not queue.empty():
+            yield queue.get_nowait()
+        yield task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+```
+
+
 #### `_run_tool(tool, tool_call, signal, on_update) -> AgentToolResult`
 
 - **作用**:真正调用工具的 `execute` 并做异常隔离,返回标准化的 `AgentToolResult`(普通 async 函数,非生成器)。
 - **关键实现步骤/数据流**:
   1. `try: result = await tool.execute(tool_call.arguments, signal=signal, on_update=on_update)`。
   2. `except Exception as exc`:返回 `AgentToolResult(tool_call_id=tool_call.id, name=tool_call.name, ok=False, content=str(exc), error=str(exc))`(工具层是隔离边界,任何异常都被吞掉并转成失败结果)。
-  3. 若 `result.tool_call_id != tool_call.id`,用 `result.model_copy(update={"tool_call_id": tool_call.id})` 修正 id 后返回;否则直接返回 `result`。
+   3. 若 `result.tool_call_id != tool_call.id`,用 `result.model_copy(update={"tool_call_id": tool_call.id})` 修正 id 后返回;否则直接返回 `result`。
+
+```python
+# loop.py:280 — 真正调用工具并隔离异常（工具是隔离边界）
+async def _run_tool(tool, tool_call, signal, on_update):
+    try:
+        result = await tool.execute(tool_call.arguments, signal=signal, on_update=on_update)
+    except Exception as exc:   # 异常不向上冒泡，转为失败结果
+        return AgentToolResult(tool_call_id=tool_call.id, name=tool_call.name,
+                               ok=False, content=str(exc), error=str(exc))
+    if result.tool_call_id != tool_call.id:
+        return result.model_copy(update={"tool_call_id": tool_call.id})
+    return result
+```
+
 
 #### `_unknown_tool_result(tool_call) -> AgentToolResult`
 
@@ -272,7 +474,21 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
   1. `data = result.data`,`content = result.content`。
   2. 若 `not result.ok and result.error and result.error not in content`:把 `content = f"{content}\n\nError: {result.error}"` 把错误信息补进内容。
   3. 若 `data is not None and not content`:`content = str(data)`(没有正文时用 data 作兜底内容)。
-  4. 返回 `ToolResultMessage(tool_call_id=, name=, content=, ok=, data=, details=, error=)`(把结果所有字段映射到消息)。
+   4. 返回 `ToolResultMessage(tool_call_id=, name=, content=, ok=, data=, details=, error=)`(把结果所有字段映射到消息)。
+
+```python
+# loop.py:324 — AgentToolResult → ToolResultMessage（失败信息并入 content）
+def _tool_result_message(result):
+    data, content = result.data, result.content
+    if not result.ok and result.error and result.error not in content:
+        content = f"{content}\n\nError: {result.error}"
+    if data is not None and not content:
+        content = str(data)
+    return ToolResultMessage(tool_call_id=result.tool_call_id, name=result.name,
+                             content=content, ok=result.ok, data=result.data,
+                             details=result.details, error=result.error)
+```
+
 
 ---
 
@@ -305,6 +521,19 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
 
 - **作用**:初始化 harness 的全部内部状态。
 - **关键实现**:`self._config = config`;`self._messages = list(messages)`(transcript,可变列表);`self._listeners: list[EventListener] = []`(订阅者);`self._current_signal: SimpleCancellationToken | None = None`(当前运行令牌);`self._running = False`;`self._steering_queue: deque[AgentMessage] = deque()` 与 `self._follow_up_queue: deque[AgentMessage] = deque()`(两个 FIFO 消息队列)。
+
+```python
+# harness.py:71 — 初始化：全部状态由 harness 持有（与纯循环解耦）
+def __init__(self, config, *, messages=()):
+    self._config = config
+    self._messages = list(messages)
+    self._listeners: list[EventListener] = []
+    self._current_signal = None
+    self._running = False
+    self._steering_queue: deque[AgentMessage] = deque()
+    self._follow_up_queue: deque[AgentMessage] = deque()
+```
+
 
 #### `messages`(property)
 
@@ -343,9 +572,28 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
 - **作用**:订阅流式事件;返回**取消订阅**回调。
 - **关键实现**:`self._listeners.append(listener)`;定义 `unsubscribe()` 用 `suppress(ValueError)` 安全 `self._listeners.remove(listener)`;`return unsubscribe`。
 
+```python
+# harness.py:125 — 订阅事件流，返回退订回调
+def subscribe(self, listener):
+    self._listeners.append(listener)
+    def unsubscribe():
+        with suppress(ValueError):
+            self._listeners.remove(listener)
+    return unsubscribe
+```
+
+
 #### `cancel(self) -> None`
 
 - **作用**:请求取消当前正在运行的 prompt(若有)。若 `self._current_signal is not None` 则 `self._current_signal.cancel()`。
+
+```python
+# harness.py:135 — 取消当前运行
+def cancel(self):
+    if self._current_signal is not None:
+        self._current_signal.cancel()
+```
+
 
 #### `steer(self, content) -> QueueUpdateEvent`
 
@@ -354,6 +602,17 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
 #### `steer_message(self, message) -> QueueUpdateEvent`
 
 - **作用**:把一条消息排入 steering 队列(在**当前轮/工具批次之后**注入)。`self._steering_queue.append(message)`;返回 `self.queue_update_event()`(让调用方立即拿到队列状态快照)。
+
+```python
+# harness.py:140 — steer / follow_up：运行中或停前注入消息
+def steer(self, content):
+    return self.steer_message(UserMessage(content=content))
+
+def steer_message(self, message):
+    self._steering_queue.append(message)
+    return self.queue_update_event()
+```
+
 
 #### `follow_up(self, content) -> QueueUpdateEvent`
 
@@ -387,7 +646,19 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
   2. `self._append_interrupted_tool_results()`(修复被中断的运行可能留下的半截工具调用)。
   3. `self._running = True`。
   4. `message = UserMessage(content=content, custom_type=custom_type, details=details)`;`self._messages.append(message)`。
-  5. `return self._run(prompt_message=message)`(进入内部运行器)。
+   5. `return self._run(prompt_message=message)`(进入内部运行器)。
+
+```python
+# harness.py:184 — prompt 入口：防重入 + 修中断 + 追加用户消息
+def prompt(self, content, *, custom_type=None, details=None):
+    self._ensure_not_running()
+    self._append_interrupted_tool_results()
+    self._running = True
+    message = UserMessage(content=content, custom_type=custom_type, details=details)
+    self._messages.append(message)
+    return self._run(prompt_message=message)
+```
+
 
 #### `continue_(self) -> AsyncIterator[AgentEvent]`
 
@@ -405,6 +676,35 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
      - 若 `pending_prompt_event is not None and event.type == "turn_start"`:补发 `MessageStartEvent(message_role="user")` 与 `MessageEndEvent(message=pending_prompt_event)`(让消费者看到刚追加的 prompt 用户消息),随后 `pending_prompt_event = None`(只在第一轮补一次)。
   3. `finally:` 若 `signal.is_cancelled()` 则再次 `self._append_interrupted_tool_results()`(确保被取消时补齐工具结果);若 `self._current_signal is signal` 则置 `None`;`self._running = False`。
 - **状态叠加点**:`self._messages` 被直接传给 loop 作为 transcript,loop 就地追加助手/工具结果消息——harness 就这样在纯循环之上透明地持有并累积跨轮会话状态。
+
+```python
+# harness.py:211 — _run：把执行委托给纯循环，转发前先广播
+async def _run(self, *, prompt_message=None):
+    signal = SimpleCancellationToken()
+    self._current_signal = signal
+    pending_prompt_event = prompt_message
+    try:
+        async for event in run_agent_loop(
+            provider=self._config.provider, model=self._config.model,
+            system=self._config.system, messages=self._messages,
+            tools=self._config.tools, max_turns=self._config.max_turns,
+            signal=signal, get_steering_messages=self._drain_steering_messages,
+            get_follow_up_messages=self._drain_follow_up_messages,
+            get_queue_update=self.queue_update_event):
+            await self._notify(event)
+            yield event
+            if pending_prompt_event is not None and event.type == "turn_start":
+                yield MessageStartEvent(message_role="user")
+                yield MessageEndEvent(message=pending_prompt_event)
+                pending_prompt_event = None
+    finally:
+        if signal.is_cancelled():
+            self._append_interrupted_tool_results()
+        if self._current_signal is signal:
+            self._current_signal = None
+        self._running = False
+```
+
 
 #### `_notify(self, event) -> None`
 
@@ -427,6 +727,19 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
 - **作用**:按 `queue_mode` 从给定队列取出消息。
 - **关键实现**:若队列空 `return ()`;若 `self._config.queue_mode == "all"`:`messages = tuple(queue)`;`queue.clear()`;`return messages`(一次性全部取出);否则 `return (queue.popleft(),)`(只取最旧一条,one_at_a_time)。
 
+```python
+# harness.py:262 — 按 queue_mode 从队列取消息
+def _drain_queue(self, queue):
+    if not queue:
+        return ()
+    if self._config.queue_mode == "all":
+        messages = tuple(queue)
+        queue.clear()
+        return messages
+    return (queue.popleft(),)
+```
+
+
 #### `append_interrupted_tool_results(self) -> int`
 
 - **作用**:对外暴露的「修复被中断运行遗留半截工具调用」方法。返回被追加的合成工具结果数量(供上层判断是否需要持久化修复)。
@@ -440,6 +753,25 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
   2. 遍历 `tuple(self._messages)`(拷贝避免迭代期修改):若非 `AssistantMessage` 跳过;否则对 `message.tool_calls` 中每个 `tool_call`:
      - 若 `tool_call.id in returned_ids` 跳过。
      - 否则 `returned_ids.add(tool_call.id)` 并 `self._messages.append(ToolResultMessage(tool_call_id=, name=, content="Tool call interrupted by user", ok=False, error="Tool call interrupted by user"))`。
+
+```python
+# harness.py:280 — 中断修复：补齐"无对应结果"的工具调用
+def _append_interrupted_tool_results(self):
+    returned_ids = {m.tool_call_id for m in self._messages
+                    if isinstance(m, ToolResultMessage)}
+    for message in tuple(self._messages):
+        if not isinstance(message, AssistantMessage):
+            continue
+        for tool_call in message.tool_calls:
+            if tool_call.id in returned_ids:
+                continue
+            returned_ids.add(tool_call.id)
+            self._messages.append(ToolResultMessage(
+                tool_call_id=tool_call.id, name=tool_call.name,
+                content="Tool call interrupted by user", ok=False,
+                error="Tool call interrupted by user"))
+```
+
 - **动机**:OpenAI 兼容 provider 会拒绝「助手工具调用缺失对应结果」的历史;此修复保证下一次模型请求合法。
 
 ---

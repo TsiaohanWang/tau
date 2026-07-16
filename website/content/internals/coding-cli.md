@@ -44,6 +44,33 @@ def main(ctx, prompt_args, prompt_option, provider, model, setup_*,
 `cli.py` 刻意作为一个 **组合根**:它了解其它每一部分,但不包含 agent 逻辑、渲染内部细节,以及除将名称
 接线到配置函数之外的任何 provider 细节。
 
+```python
+@app.callback(invoke_without_command=True)
+def main(ctx, prompt_args, prompt_option, provider, model, setup_*,
+         cwd, output, resume, new_session, auto_compact_threshold,
+         extension, no_extensions, project_extensions, version) -> None:
+    current_version = _current_version()
+    if version:
+        typer.echo(f"tau {current_version}")
+        raise typer.Exit()
+    if ctx.invoked_subcommand is not None:
+        return
+    if resume is not None and new_session:
+        raise typer.BadParameter("--resume and --new-session cannot be used together")
+    ...
+    if prompt_option is None:
+        anyio.run(run_openai_tui, model, cwd or Path.cwd(), resume, new_session,
+                  provider, auto_compact_token_threshold, initial_prompt, notice,
+                  extension_paths, not no_extensions, project_extensions)
+        raise typer.Exit()
+    ok = anyio.run(run_openai_print_mode, prompt, model, cwd or Path.cwd(), output,
+                   provider, None, extension_paths, not no_extensions, project_extensions)
+    if not ok:
+        raise typer.Exit(1)
+```
+
+`main` 作为 Typer 回调首先处理 `--version` 与子命令互斥校验,未给 `--prompt` 时以 `anyio.run(run_openai_tui, ...)` 启动交互前端,否则启动 `run_openai_print_mode` 并以返回值决定退出码。
+
 > **为何采用无逻辑的组合根?** Pi 的架构保持核心 agent 工具可移植:它绝不能依赖 CLI、TUI 或任何特定
 > provider。`cli.py` 是将那些可移植部分 *组装* 成可运行程序的唯一场所 —— 解析 argv、选择前端(TUI 还是
 > 打印模式)、并透传扩展标志。将所有决策(模型选择、会话创建、prompt 流式处理)放在 `run_openai_print_mode` /
@@ -115,6 +142,30 @@ def main(ctx, prompt_args, prompt_option, provider, model, setup_*,
 
 创建或更新一个 OpenAI-compatible provider 配置项(setup 向导)。
 
+```python
+def setup_command(*, provider_name=DEFAULT_PROVIDER_NAME, base_url=DEFAULT_OPENAI_COMPATIBLE_BASE_URL,
+                  api_key_env="OPENAI_API_KEY", model=DEFAULT_MODEL, timeout_seconds=..., max_retries=...,
+                  max_retry_delay_seconds=..., set_default=True) -> None:
+    settings = load_provider_settings()
+    provider = OpenAICompatibleProviderConfig(
+        name=provider_name,
+        base_url=base_url.rstrip("/"),
+        api_key_env=api_key_env,
+        models=(model,),
+        default_model=model,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        max_retry_delay_seconds=max_retry_delay_seconds,
+    )
+    updated = upsert_openai_compatible_provider(settings, provider, set_default=set_default)
+    path = save_provider_settings(updated)
+    typer.echo(f"Saved provider '{provider.name}' to {user_catalog_path()} and preferences to {path}")
+    if provider.api_key_env not in environ:
+        typer.echo(f"Set {provider.api_key_env} before running Tau with this provider.", err=True)
+```
+
+`setup_command` 构造 `OpenAICompatibleProviderConfig`(注意 `base_url.rstrip("/")` 去除尾部斜杠)、`upsert` 并 `save`,最后提醒用户设置 API key 环境变量。
+
 - **用途**:`tau setup` 子命令的内联处理函数。
 - **关键实现步骤**:
   1. 用 `load_provider_settings()` 读取现有 `ProviderSettings`。
@@ -160,6 +211,31 @@ Typer 的顶层回调(`@app.callback(invoke_without_command=True)`),即组合根
 
 异步:用默认 OpenAI-compatible provider 启动 Textual TUI。
 
+```python
+async def run_openai_tui(model=None, cwd=Path, session_id=None, new_session=False,
+                         provider_name=None, auto_compact_token_threshold=None,
+                         initial_prompt=None, update_notice=None, extension_paths=(),
+                         extensions_enabled=True, project_extensions_enabled=False) -> None:
+    release_notes_notice = startup_release_notes_notice(_current_version())
+    startup_notices = [
+        notice
+        for notice in (
+            release_notes_notice.message if release_notes_notice is not None else None,
+            update_notice.message if update_notice is not None else None,
+        )
+        if notice is not None
+    ]
+    await run_tui_app(
+        model=model, cwd=cwd, session_id=session_id, new_session=new_session,
+        provider_name=provider_name, auto_compact_token_threshold=auto_compact_token_threshold,
+        initial_prompt=initial_prompt, startup_notices=tuple(startup_notices),
+        extension_paths=extension_paths, extensions_enabled=extensions_enabled,
+        project_extensions_enabled=project_extensions_enabled,
+    )
+```
+
+`run_openai_tui` 汇合发布说明与更新通知后,把所有参数透传给 `run_tui_app`——它本身不含任何 TUI 渲染逻辑。
+
 - **用途**:TUI 前端的异步装配入口,被 `main` 以 `anyio.run` 调用。
 - **实现步骤**:
   1. `release_notes_notice = startup_release_notes_notice(_current_version())` 获取发布说明。
@@ -194,6 +270,21 @@ Typer 的顶层回调(`@app.callback(invoke_without_command=True)`),即组合根
 ### `export_session_command(session_ref, output_path=None, export_format=None, session_manager=None) -> Path`
 
 异步:导出某个索引 session id 或 JSONL 文件为产物。
+
+```python
+async def export_session_command(session_ref, output_path=None, export_format=None,
+                                 session_manager=None) -> Path:
+    session_path, title = _resolve_export_source(session_ref, session_manager)
+    entries = await JsonlSessionStorage(session_path).read_all()
+    normalized_format = normalize_export_format(
+        export_format or (output_path.suffix.removeprefix(".") if output_path else "html")
+    )
+    destination = _resolve_export_destination(output_path, session_path=session_path, format=normalized_format)
+    return export_session_artifact(entries, destination, title=title, source=str(session_path),
+                                   format=normalized_format)
+```
+
+`export_session_command` 把会话引用解析为路径、读取全部 `SessionEntry`、推断格式、计算目标路径,最后调用 `export_session_artifact` 产出文件并返回路径。
 
 - **用途**:`tau export` 的实际执行函数(被 `anyio.run` 调用)。
 - **实现步骤**:
@@ -300,6 +391,45 @@ Typer 的顶层回调(`@app.callback(invoke_without_command=True)`),即组合根
 ### `run_print_mode(*, prompt, model, cwd, provider, output=PrintOutputMode.text, resource_paths=None, storage=None, session_id=None, session_manager=None, provider_name=DEFAULT_PROVIDER_NAME, provider_settings=None, runtime_provider_config=None, shell_command_prefix=None, extension_paths=(), extensions_enabled=True, project_extensions_enabled=False) -> bool`
 
 异步:执行单次非交互 prompt 并打印流式事件。返回 `False` 表示 agent 发出不可恢复错误。
+
+```python
+async def run_print_mode(*, prompt, model, cwd, provider, output=PrintOutputMode.text,
+                         storage=None, session_id=None, session_manager=None,
+                         provider_name=DEFAULT_PROVIDER_NAME, provider_settings=None,
+                         runtime_provider_config=None, shell_command_prefix=None,
+                         extension_paths=(), extensions_enabled=True,
+                         project_extensions_enabled=False) -> bool:
+    session = await CodingSession.load(CodingSessionConfig(provider=provider, model=model, cwd=cwd,
+                                                           storage=storage or _MemorySessionStorage(),
+                                                           session_id=session_id, session_manager=session_manager,
+                                                           provider_name=provider_name, provider_settings=provider_settings,
+                                                           runtime_provider_config=runtime_provider_config,
+                                                           shell_command_prefix=shell_command_prefix,
+                                                           extension_paths=extension_paths,
+                                                           extensions_enabled=extensions_enabled,
+                                                           project_extensions_enabled=project_extensions_enabled))
+    session.extension_runtime.set_ui_bridge(StderrUiBridge())
+    await session.emit_pending_session_start()
+    renderer = create_event_renderer(output, custom_message_renderer=session.extension_runtime.render_custom_message)
+    try:
+        terminal_command = parse_terminal_command(prompt)
+        if terminal_command is not None:
+            result = await session.run_terminal_command(terminal_command.command,
+                                                        add_to_context=terminal_command.add_to_context)
+            typer.echo(_format_terminal_command_result(result))
+            return result.ok
+        command = session.handle_command(prompt)
+        if command.handled:
+            ...
+            return True
+        async for event in session.prompt(prompt):
+            renderer.render(event)
+        return renderer.finish()
+    finally:
+        await session.aclose()
+```
+
+`run_print_mode` 的核心逻辑:先 `CodingSession.load` 装配会话、接 `StderrUiBridge`,再依次尝试终端命令、斜杠命令,最后以 `session.prompt(prompt)` 流式渲染事件,并在 `finally` 中关闭会话。
 
 - **用途**:print 模式的核心运行逻辑(被 `run_openai_print_mode` 调用)。
 - **实现步骤**:

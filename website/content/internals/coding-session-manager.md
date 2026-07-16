@@ -54,6 +54,40 @@ description: session_manager.py
 - **`touch_session(...)`** — 更新 `model`/`provider_name`/`title` 并刷新
   `updated_at`（每次使用会话时都会调用，使其浮到 `list_sessions` 顶部）。
 
+```python
+def list_sessions(self, cwd: Path | None = None) -> list[CodingSessionRecord]:
+    records = self._read_project_records(cwd) if cwd is not None else self._read_all_records()
+    return sorted(records, key=lambda record: record.updated_at, reverse=True)
+
+def get_session(self, session_id: str) -> CodingSessionRecord | None:
+    for record in self._read_all_records():
+        if record.id == session_id:
+            return record
+    return None
+
+def create_session(self, *, cwd, model, provider_name=None, title=None, session_id=None) -> CodingSessionRecord:
+    record = self.prepare_session(cwd=cwd, model=model, provider_name=provider_name,
+                                  title=title, session_id=session_id)
+    self.index_session(record)
+    return record
+
+def touch_session(self, session_id: str, *, model=None, provider_name=None, title=None) -> CodingSessionRecord | None:
+    existing = self.get_session(session_id)
+    if existing is None:
+        return None
+    updated = CodingSessionRecord(
+        id=existing.id, path=existing.path, cwd=existing.cwd,
+        model=model or existing.model,
+        provider_name=provider_name if provider_name is not None else existing.provider_name,
+        title=title if title is not None else existing.title,
+        created_at=existing.created_at, updated_at=time(),
+    )
+    self._upsert(updated)
+    return updated
+```
+
+以上为 `SessionManager` 关键方法的精简实现：`list_sessions` 按 `updated_at` 降序排序；`get_session` 作为按 id 解析会话引用（`resolve_session_ref`）的线性扫描；`create_session` 委托 `prepare_session` + `index_session`；`touch_session` 取出旧记录、刷新元数据后 `_upsert` 就地更新（管理器无独立 `delete`，删除由重建索引时剔除对应 id 完成）。
+
 索引 I/O 辅助函数：
 
 - **`_read_index(path)`** — 把 JSONL 索引读为记录；文件缺失则返回 `[]`。

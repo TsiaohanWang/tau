@@ -20,12 +20,46 @@ description: tools / system_prompt / context / context_window / skills / resourc
   prompt_snippet/prompt_guidelines/input_schema/executor）；`to_agent_tool()` 转成
   更精简的 `AgentTool`（保留 prompt 元数据供渲染用）。
 - `_file_locks: dict[Path, asyncio.Lock]`：进程内**每路径写/改锁**，防同一文件并发
-  修改交错。
+   修改交错。
+
+```python
+@dataclass(frozen=True, slots=True)
+class ToolDefinition:
+    name: str
+    description: str
+    prompt_snippet: str
+    prompt_guidelines: tuple[str, ...]
+    input_schema: Mapping[str, JSONValue]
+    executor: ToolExecutor
+
+    def to_agent_tool(self) -> AgentTool:
+        return AgentTool(
+            name=self.name,
+            description=self.description,
+            input_schema=self.input_schema,
+            executor=self.executor,
+            prompt_snippet=self.prompt_snippet,
+            prompt_guidelines=self.prompt_guidelines,
+        )
+```
+> `ToolDefinition` 是带 prompt 元数据与 JSON Schema 的"完整定义"；`to_agent_tool()` 把它压成 provider 中立的精简 `AgentTool`，让 agent 循环只关心 `name`/`description`/`input_schema`/`executor`。
 
 ### `create_coding_tools(*, cwd, shell_command_prefix) -> list[AgentTool]`
 
 返回默认工具集，顺序固定为 `read, write, edit, bash`。`cwd` 缺省用进程 CWD；相对路径
 都相对 `cwd` 解析。
+
+```python
+def create_coding_tools(*, cwd=None, shell_command_prefix=None) -> list[AgentTool]:
+    root = Path.cwd() if cwd is None else Path(cwd)
+    return [
+        create_read_tool(cwd=root),
+        create_write_tool(cwd=root),
+        create_edit_tool(cwd=root),
+        create_bash_tool(cwd=root, shell_command_prefix=shell_command_prefix),
+    ]
+```
+> 顺序即模型看到的工具注册顺序：`read, write, edit, bash`。所有相对路径都相对同一个 `cwd` 解析，同进程内共享 `_file_locks` 串行化同文件写入。
 
 ### 四个工具的 executor（核心行为）
 
@@ -45,8 +79,30 @@ description: tools / system_prompt / context / context_window / skills / resourc
   **超时/取消时 `_kill_process_tree` 用 `os.killpg(pid, SIGKILL)` 杀整个子进程树**
   （管道/复合命令的子进程不会被遗留）——这与之前 Rust 版
   `tau-coding/src/tools.rs` 的 `.process_group(0)` + `killpg` 修复一一对应。输出经
-  `truncate_tail`（保留尾部），截断时把完整输出写临时日志文件并在 `data` 报路径。
-  结果含 exit_code、是否超时/取消/耗时等元数据；`ok = exit_code==0 且未超时 且未取消`。
+   `truncate_tail`（保留尾部），截断时把完整输出写临时日志文件并在 `data` 报路径。
+   结果含 exit_code、是否超时/取消/耗时等元数据；`ok = exit_code==0 且未超时 且未取消`。
+
+```python
+async def _communicate_with_cancellation(process, *, timeout, signal):
+    communicate = asyncio.create_task(process.communicate())
+    wait_for = {communicate}
+    if signal is not None:
+        wait_for.add(asyncio.create_task(_wait_for_cancel(signal)))
+    done, _ = await asyncio.wait(wait_for, timeout=timeout, return_when=FIRST_COMPLETED)
+    if communicate in done:
+        return (*communicate.result(), False, False)   # 命令先完成
+    cancelled = signal is not None and _wait_for_cancel_task in done
+    _kill_process_tree(process)                        # 超时/取消都杀整组
+    out, err = await communicate
+    return (out, err, not cancelled, cancelled)
+
+def _kill_process_tree(process):
+    if os.name == "posix":
+        os.killpg(process.pid, signal.SIGKILL)   # pid 即进程组 id，整组强杀
+    else:
+        process.kill()
+```
+> 这是与 Rust 版 `killpg` 修复一一对应的关键：POSIX 下因 `start_new_session=True`，`pid` 即进程组 id，`os.killpg` 能连管道/复合命令的子进程一起杀掉，不留孤儿。
 
 ### 辅助函数（工具支撑）
 
@@ -104,6 +160,50 @@ ordinary typed functions" 要求工具不是隐式魔法,而是带明确输入�
 - **`format_project_context`**：用 Pi 风格 XML 包裹项目指令文件。
 - **`format_skills_for_prompt`**：`<available_skills>` 列出每个 skill 的
   name/description/location。
+
+```python
+def build_system_prompt(options: BuildSystemPromptOptions) -> str:
+    current_date = options.current_date or date.today()
+    cwd = _format_path(options.cwd)
+    append_section = f"\n\n{options.append_system_prompt}" if options.append_system_prompt else ""
+    if options.custom_prompt is not None:
+        prompt = options.custom_prompt
+        prompt += append_section
+        prompt += format_project_context(options.context_files)
+        if _has_tool(options.tools, "read"):
+            prompt += format_skills_for_prompt(options.skills)
+        prompt += f"\nCurrent date: {current_date.isoformat()}"
+        prompt += f"\nCurrent working directory: {cwd}"
+        return prompt
+    prompt = (
+        "You are an expert coding assistant operating inside Tau, a coding agent harness. ..."
+        f"\n\nAvailable tools:\n{format_available_tools(options.tools)}"
+        f"\n\nGuidelines:\n{format_guidelines(options.tools, options.extra_guidelines)}"
+    )
+    prompt += append_section
+    prompt += format_project_context(options.context_files)
+    if _has_tool(options.tools, "read"):   # 仅在 read 存在时才加 skills
+        prompt += format_skills_for_prompt(options.skills)
+    prompt += f"\nCurrent date: {current_date.isoformat()}"
+    prompt += f"\nCurrent working directory: {cwd}"
+    return prompt
+
+def collect_prompt_guidelines(tools, extra_guidelines=()):
+    names = {tool.name for tool in tools}
+    has_bash = "bash" in names
+    has_exploration = bool({"grep", "find", "ls"} & names)
+    guidelines = []
+    if has_bash and not has_exploration:
+        guidelines.append("Use bash for file operations like ls, rg, find")
+    elif has_bash and has_exploration:
+        guidelines.append("Prefer grep/find/ls tools over bash for file exploration")
+    for tool in tools:
+        guidelines.extend(tool.prompt_guidelines)
+    guidelines.extend(extra_guidelines)
+    guidelines += ["Be concise in your responses", "Show file paths clearly when working with files"]
+    return _dedup(guidelines)
+```
+> `build_system_prompt` 是确定性纯函数：输出只由 `BuildSystemPromptOptions` 决定；工具清单直接派生自注入的 `tools`，skills 仅在 `read` 工具存在时才加，保证模型看到的能力与实际可调用的工具严格一致。
 
 ---
 
@@ -276,6 +376,19 @@ Part 3a 让"抽象 agent"变成"会读文件、会跑命令的编程助手"：
 ### to_agent_tool(self) -> AgentTool
 
 (行 82-90)构造并返回 `tau_agent.tools.AgentTool`，把 `name`、`description`、`input_schema`、`executor`、以及 prompt 元数据 `prompt_snippet`/`prompt_guidelines` 一并透传。注意 `tool_call_id` 不在此设置(留空字符串在 `AgentToolResult` 中由执行器填写)。
+
+```python
+def to_agent_tool(self) -> AgentTool:
+    return AgentTool(
+        name=self.name,
+        description=self.description,
+        input_schema=self.input_schema,
+        executor=self.executor,
+        prompt_snippet=self.prompt_snippet,
+        prompt_guidelines=self.prompt_guidelines,
+    )
+```
+> 深究：provider 中立的 `AgentTool` 不关心 prompt 元数据如何生成，它只透传——`prompt_snippet`/`prompt_guidelines` 留给前端渲染工具指引，内核循环只用 `name`/`executor`。
 
 ---
 
@@ -553,7 +666,30 @@ Part 3a 让"抽象 agent"变成"会读文件、会跑命令的编程助手"：
 6. `if new_content == normalized_content` 抛 `_no_change_error`(替换后无变化)。
 7. 返回 `(normalized_content, new_content)`。
 
-注意:源码无"模糊匹配",`oldText` 必须是精确子串且唯一——"模糊"在任务描述里是指归一化(行尾/BOM)层面的容差,并非近似匹配。
+ 注意:源码无"模糊匹配",`oldText` 必须是精确子串且唯一——"模糊"在任务描述里是指归一化(行尾/BOM)层面的容差,并非近似匹配。
+
+```python
+def apply_edits_to_normalized_content(normalized_content, edits, path) -> tuple[str, str]:
+    matches = []
+    for edit in edits:
+        if not edit["oldText"]:
+            raise _empty_old_text_error(path, ...)
+        occurrences = _count_occurrences(normalized_content, edit["oldText"])
+        if occurrences == 0:
+            raise _not_found_error(path, ...)
+        if occurrences > 1:
+            raise _duplicate_error(path, ...)        # 必须唯一
+        start = normalized_content.index(edit["oldText"])
+        matches.append((start, start + len(edit["oldText"]), edit["newText"]))
+    _validate_non_overlapping(matches)               # 区间互不相交
+    new_content = normalized_content
+    for start, end, new_text in sorted(matches, reverse=True):  # 倒序替换保索引
+        new_content = new_content[:start] + new_text + new_content[end:]
+    if new_content == normalized_content:
+        raise _no_change_error(path, ...)            # 替换后须有变化
+    return (normalized_content, new_content)
+```
+> 深究：所有校验（非空、唯一、不重叠、确有变化）在写盘前完成，任一失败抛 `ToolInputError`，文件保持未改动；倒序替换保证前面的区间索引不被前面的替换改变。
 
 ---
 
@@ -736,6 +872,21 @@ Part 3a 让"抽象 agent"变成"会读文件、会跑命令的编程助手"：
 ### _kill_process_tree(process: asyncio.subprocess.Process) -> None
 
 (行 1016-1026)杀掉子进程及其子树:POSIX 下 `os.killpg(process.pid, signal.SIGKILL)`(因 `start_new_session=True`,pid 即进程组 id,整组强杀,覆盖管道/复合命令的子进程);捕获 `ProcessLookupError` 直接返回。非 POSIX 下 `process.kill()`(仅直接子进程),同样容错 `ProcessLookupError`。被 `_communicate_with_cancellation` 在超时/取消时调用。
+
+```python
+def _kill_process_tree(process):
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)   # start_new_session=True 使 pid 即进程组 id
+        except ProcessLookupError:
+            return
+    else:
+        try:
+            process.kill()                           # 非 POSIX 仅杀直接子进程
+        except ProcessLookupError:
+            return
+```
+> 深究：POSIX 上用 `start_new_session=True` 创建新会话，于是 `process.pid` 就是进程组 leader 的 id，`os.killpg` 对整个进程组发 SIGKILL，管道/复合命令（`a | b`、`x && y`）的子进程一并被杀，不留孤儿。
 
 ---
 

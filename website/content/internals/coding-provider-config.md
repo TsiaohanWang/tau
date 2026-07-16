@@ -139,6 +139,38 @@ A resolved `provider` + `model` pair for one run.
   subclass based on `entry.kind`. `_default_api_for_kind` maps a kind to its
   default wire API.
 
+```python
+def provider_config_from_entry(entry: ProviderCatalogEntry) -> ProviderConfig:
+    """Create a durable provider config from a catalog entry."""
+    context_windows = dict(entry.context_windows or {})
+    model_metadata = _provider_model_metadata_from_catalog(entry.model_metadata)
+    if entry.kind == "anthropic":
+        return AnthropicProviderConfig(
+            name=entry.name, base_url=entry.base_url,
+            api=_default_api_for_kind(entry.kind), ... thinking_defaults={},
+        )
+    if entry.kind == "openai-codex":
+        return OpenAICodexProviderConfig(  # no compat/headers/model_metadata
+            name=entry.name, base_url=entry.base_url, ... thinking_defaults={},
+        )
+    return OpenAICompatibleProviderConfig(
+        name=entry.name, base_url=entry.base_url,
+        api=entry.api or _default_api_for_kind(entry.kind), ... thinking_defaults={},
+    )
+
+def _default_api_for_kind(kind: str) -> ProviderApi:
+    if kind == "anthropic":
+        return "anthropic-messages"
+    if kind == "openai-codex":
+        return "openai-codex-responses"
+    if kind == "google-generative-ai":
+        return "google-generative-ai"
+    if kind == "mistral-conversations":
+        return "mistral-conversations"
+    return "openai-completions"
+```
+> 上面的代码展示了 catalog → config 的单向翻译：依据 `entry.kind` 分派到对应 frozen 子类，`thinking_defaults` 始终初始化为空（用户偏好是后来叠加的）。
+
 ### Loading & saving `providers.json`
 
 - `provider_settings_path(paths)` — `paths.home / "providers.json"`.
@@ -152,6 +184,31 @@ A resolved `provider` + `model` pair for one run.
 - `save_default_provider_model`, `save_provider_thinking_level`,
   `toggle_saved_scoped_model`, `upsert_saved_provider` — convenience writers
   that load, mutate, and save.
+
+```python
+def load_provider_settings(paths: TauPaths | None = None) -> ProviderSettings:
+    resolved_paths = paths or TauPaths()
+    path = provider_settings_path(resolved_paths)
+    if not path.exists():
+        return ProviderSettings(providers=_effective_provider_configs(resolved_paths))
+    raw = loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ProviderConfigError("Provider settings must be a JSON object")
+    settings = provider_settings_from_json(raw, paths=resolved_paths)
+    return _with_builtin_catalog_models(settings, paths=resolved_paths)
+
+def save_provider_settings(settings: ProviderSettings, paths=None) -> Path:
+    resolved_paths = paths or TauPaths()
+    _save_provider_definitions_to_catalog(settings, paths=resolved_paths)
+    path = provider_settings_path(resolved_paths)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        with suppress(OSError):
+            copy2(path, path.with_suffix(path.suffix + ".bak"))
+    _atomic_write_text(path, dumps(settings.to_json(), indent=2, sort_keys=True) + "\n")
+    return path
+```
+> `load` 在文件缺失时只回退到 effective catalog 配置；存在则解析后把最新 catalog 合并进来。`save` 先落盘自定义 provider 定义，再经临时文件原子替换，写前备份 `.bak`。
 
 ### Merging & preference application
 
@@ -169,6 +226,40 @@ A resolved `provider` + `model` pair for one run.
   `_append_catalog_providers` — combine built-in and user-catalog providers;
   user-catalog providers are always appended, built-ins only when they have
   usable credentials (`provider_has_usable_credentials`).
+
+```python
+def _merge_openai_compatible_provider(existing, incoming) -> OpenAICompatibleProviderConfig:
+    models = _unique_strings((*incoming.models, *existing.models))
+    return replace(
+        incoming,
+        models=models,
+        default_model=existing.default_model if existing.default_model in models else incoming.default_model,
+        headers={**incoming.headers, **existing.headers},   # 本地覆盖
+        compat={**incoming.compat, **existing.compat},
+        model_metadata=_merge_provider_model_metadata(incoming.model_metadata, existing.model_metadata),
+        timeout_seconds=existing.timeout_seconds,           # 超时/重试全取本地
+        max_retries=existing.max_retries,
+        max_retry_delay_seconds=existing.max_retry_delay_seconds,
+        context_windows={**incoming.context_windows, **existing.context_windows},
+        thinking_levels=existing.thinking_levels if existing.thinking_levels is not None else incoming.thinking_levels,
+        thinking_defaults=existing.thinking_defaults,        # 本地优先
+    )
+
+def _append_catalog_providers(providers, catalog_configs, *, paths):
+    credential_store = FileCredentialStore(credentials_path(paths) if paths else None)
+    builtin_names = {entry.name for entry in BUILTIN_PROVIDER_CATALOG}
+    appended = list(providers)
+    for provider in catalog_configs.values():
+        if provider.name in {p.name for p in providers}:
+            continue
+        # 用户 catalog 来源的总是追加；内建者须有可用凭据才追加
+        if provider.name not in builtin_names or provider_has_usable_credentials(
+            provider, credential_reader=credential_store
+        ):
+            appended.append(provider)
+    return tuple(appended)
+```
+> 合并语义是"本地优先"：本地配置的值（头、compat、超时、thinking_defaults）覆盖 catalog 的 incoming 值，避免 catalog 刷新抹掉用户自定义。
 
 ### Parsing JSON (`provider_settings_from_json` and friends)
 
@@ -200,6 +291,30 @@ supports and how a `ThinkingLevel` maps to a wire value:
 - `_levels_from_thinking_map`, `_metadata_supports_thinking_level`,
   `_thinking_level_map_supports` — map/level math.
 
+```python
+def provider_thinking_levels(provider, *, model=None) -> tuple[ThinkingLevel, ...]:
+    selected_model = model or provider.default_model
+    metadata = _metadata_for_model(provider, selected_model)
+    if metadata is not None and metadata.reasoning is False:
+        return ()
+    if provider.thinking_levels is None:
+        if metadata is None or metadata.reasoning is not True:
+            return ()
+        return _levels_from_thinking_map(metadata.thinking_level_map)
+    if provider.thinking_models and selected_model not in provider.thinking_models:
+        return ()
+    return tuple(
+        level for level in provider.thinking_levels
+        if metadata is None or _metadata_supports_thinking_level(metadata, level)
+    )
+
+def _thinking_level_map_supports(thinking_level_map, level) -> bool:
+    if level in thinking_level_map:
+        return thinking_level_map[level] is not None   # 显式 None 表示禁用
+    return level != "xhigh"                             # 默认除 xhigh 外都支持
+```
+> 思考级别的可用性由两层决定：provider 是否声明了 `thinking_levels`，以及 per-model 的 `thinking_level_map` 是否把该级别映射到非空 wire 值。
+
 ### Building runtime config (the `tau_ai` glue)
 
 以下是 `provider_runtime.py` 所调用的函数：
@@ -221,6 +336,46 @@ supports and how a `ThinkingLevel` maps to a wire value:
   `_provider_api`, `_model_base_url`, `_model_headers`, `_model_compat`,
   `_model_max_tokens` — small accessors that consult both provider-level and
   model-level metadata, with sensible fallbacks.
+
+```python
+def openai_compatible_config_from_provider(provider, *, credential_reader=None,
+        model=None, thinking_level=None) -> OpenAICompatibleConfig:
+    api_key = _api_key_from_provider(provider, credential_reader=credential_reader)
+    selected_model = model or provider.default_model
+    base_url = _model_base_url(provider, selected_model)
+    if provider.name == DEFAULT_PROVIDER_NAME and provider.api_key_env == "OPENAI_API_KEY":
+        base_url = environ.get("OPENAI_BASE_URL", base_url)   # 默认 provider 支持 OPENAI_BASE_URL 覆盖
+    reasoning_effort = _reasoning_effort_from_provider(
+        provider, model=selected_model, thinking_level=thinking_level)
+    compat = _model_compat(provider, selected_model)
+    return OpenAICompatibleConfig(
+        api_key=api_key,
+        api=str(_provider_api(provider, selected_model)),
+        base_url=base_url.rstrip("/"),
+        headers=_model_headers(provider, selected_model),
+        reasoning_effort=reasoning_effort,
+        reasoning_effort_parameter=provider.thinking_parameter or "reasoning_effort",
+        thinking_format=_thinking_format(provider, selected_model),
+        compat=compat,
+        include_reasoning_effort_none=_include_reasoning_effort_none(
+            provider, model=selected_model, thinking_level=thinking_level),
+    )
+
+def _detected_compat(provider, model) -> dict[str, Any]:
+    base_url = _model_base_url(provider, model)
+    is_deepseek = provider.name == "deepseek" or "deepseek.com" in base_url
+    is_zai = provider.name == "zai" or "api.z.ai" in base_url
+    is_moonshot = provider.name in {"moonshotai", "moonshotai-cn"} or "moonshot." in base_url
+    use_max_tokens = is_moonshot or provider.name == "together" or "api.together.ai" in base_url
+    return {
+        "supportsStore": not (is_cerebras or is_grok or is_together or is_deepseek or is_zai or is_moonshot),
+        "supportsReasoningEffort": not (is_grok or is_zai or is_moonshot or is_together),
+        "maxTokensField": "max_tokens" if use_max_tokens else "max_completion_tokens",
+        "thinkingFormat": "deepseek" if is_deepseek else "zai" if is_zai else "openai",
+        # ...supportsStrictMode / supportsLongCacheRetention 等亦按厂商翻转
+    }
+```
+> `openai_compatible_config_from_provider` 是"纯翻译"的收口：把持久化设置 + 环境（`OPENAI_BASE_URL`、凭据、thinking 映射）拼成 `tau_ai.OpenAICompatibleConfig`，全程不触网。
 
 > **Why this module never touches a model.** `provider_config.py` is a pure
 > translation layer: catalog data + user preferences + environment in, typed
@@ -261,7 +416,42 @@ supports and how a `ThinkingLevel` maps to a wire value:
       `anthropic-messages`/`google-generative-ai`/`mistral-conversations`，
       则返回对应的专用 provider；否则返回普通的 `OpenAICompatibleProvider`。
       OAuth 凭据的注入方式与 Anthropic 相同。
-4. 对于不支持的配置 / 缺失的 OAuth，抛 `ProviderConfigError`。
+ 4. 对于不支持的配置 / 缺失的 OAuth，抛 `ProviderConfigError`。
+
+```python
+def create_model_provider(provider, *, credential_store=None,
+        model=None, thinking_level=None) -> ClosableModelProvider:
+    if model is not None:
+        validate_provider_model(provider, model)
+    credentials = credential_store or FileCredentialStore()
+    if isinstance(provider, AnthropicProviderConfig):
+        credential = _oauth_credential(provider, credentials)
+        config = anthropic_config_from_provider(
+            provider, credential_reader=credentials, model=model, thinking_level=thinking_level)
+        if credential is not None:
+            runtime_auth = _required_oauth_provider(provider.name).runtime_auth(credential)
+            config = replace(config, api_key=runtime_auth.api_key, bearer_auth=True,
+                headers={**dict(config.headers or {}), **dict(runtime_auth.headers or {})},
+                oauth_system_prompt="You are Claude Code, Anthropic's official CLI for Claude.",
+                credential_resolver=OAuthRuntimeCredentialResolver(provider, credential_store=credentials))
+        return AnthropicProvider(config)
+    if isinstance(provider, OpenAICodexProviderConfig):
+        return OpenAICodexProvider(OpenAICodexConfig(
+            credential_resolver=OpenAICodexCredentialResolver(provider, credential_store=credentials),
+            base_url=provider.base_url, ...))
+    if isinstance(provider, OpenAICompatibleProviderConfig):
+        compatible_config = openai_compatible_config_from_provider(provider, ...)
+        selected_api = compatible_config.api
+        if selected_api == "anthropic-messages":
+            return AnthropicProvider(AnthropicConfig(...))   # 须有 OAuth
+        if selected_api == "google-generative-ai":
+            return GoogleGenerativeAIProvider(compatible_config)
+        if selected_api == "mistral-conversations":
+            return MistralConversationsProvider(compatible_config)
+        return OpenAICompatibleProvider(compatible_config)
+    raise ProviderConfigError(f"Unsupported provider config: {provider.name}")
+```
+> `create_model_provider` 是真正"触网边界"：它把 `provider_config` 翻译出的 `tau_ai` config 包进 `ModelProvider`，并按 `api` 身份分派到专用 provider；OAuth 凭据通过 `OAuthRuntimeCredentialResolver` 在每次请求前刷新。
 
 ### `OpenAICodexCredentialResolver`
 
@@ -277,6 +467,25 @@ supports and how a `ThinkingLevel` maps to a wire value:
 用于 Anthropic 风格 OAuth provider 的中立解析器。每次调用时它会读取 OAuth 凭据，
 刷新之（并持久化刷新后的副本），向 OAuth provider 请求运行时鉴权，并返回
 `RuntimeProviderAuth(api_key, base_url, headers)`。
+
+```python
+class OAuthRuntimeCredentialResolver:
+    """Refresh provider-neutral OAuth credentials immediately before a request."""
+    async def __call__(self) -> RuntimeProviderAuth:
+        credential_name = self._provider.credential_name
+        if credential_name is None:
+            raise RuntimeError(f"Provider {self._provider.name} has no credential name")
+        credential = self._credential_store.get_oauth(credential_name)
+        if credential is None:
+            raise RuntimeError(f"Missing OAuth credentials for {self._provider.name}. Run /login {self._provider.name}.")
+        oauth_provider = _required_oauth_provider(self._provider.name)
+        refreshed = await oauth_provider.refresh(credential)          # 每次请求前刷新
+        if refreshed != credential:
+            self._credential_store.set_oauth(credential_name, refreshed)
+        auth = oauth_provider.runtime_auth(refreshed)
+        return RuntimeProviderAuth(api_key=auth.api_key, base_url=auth.base_url, headers=auth.headers)
+```
+> 该中立解析器与具体 provider 解耦：只负责"取 OAuth 凭据 → 刷新 → 向 OAuth provider 请求运行时鉴权"，返回的 `RuntimeProviderAuth` 注入到 `tau_ai` 的 provider config 中。
 
 ### 辅助函数
 
@@ -398,6 +607,26 @@ supports and how a `ThinkingLevel` maps to a wire value:
 ### provider_config_from_entry(entry: ProviderCatalogEntry) -> ProviderConfig
 从单个 catalog entry 构造对应的持久化 provider 配置。先 `context_windows = dict(entry.context_windows or {})`、`model_metadata = _provider_model_metadata_from_catalog(entry.model_metadata)`。按 `entry.kind` 分支:`"anthropic"` → `AnthropicProviderConfig`(api 用 `_default_api_for_kind`);`"openai-codex"` → `OpenAICodexProviderConfig`(无 compat/headers/model_metadata);其余 → `OpenAICompatibleProviderConfig`(api 用 `entry.api or _default_api_for_kind`)。所有 thinking 字段来自 entry,`thinking_defaults={}`。
 
+```python
+def provider_config_from_entry(entry: ProviderCatalogEntry) -> ProviderConfig:
+    context_windows = dict(entry.context_windows or {})
+    model_metadata = _provider_model_metadata_from_catalog(entry.model_metadata)
+    if entry.kind == "anthropic":
+        return AnthropicProviderConfig(
+            name=entry.name, base_url=entry.base_url,
+            api=_default_api_for_kind(entry.kind), ... thinking_defaults={},
+        )
+    if entry.kind == "openai-codex":
+        return OpenAICodexProviderConfig(  # 无 compat/headers/model_metadata
+            name=entry.name, base_url=entry.base_url, ... thinking_defaults={},
+        )
+    return OpenAICompatibleProviderConfig(
+        name=entry.name, base_url=entry.base_url,
+        api=entry.api or _default_api_for_kind(entry.kind), ... thinking_defaults={},
+    )
+```
+> 深究：catalog entry 只携带"出厂定义"，`thinking_defaults` 永远是空 dict，用户记住的级别是之后经 `set_provider_thinking_level` 叠加进来的。
+
 ### _default_api_for_kind(kind: str) -> ProviderApi
 将 catalog kind 映射为默认 `ProviderApi`。分支:`anthropic`→`"anthropic-messages"`、`openai-codex`→`"openai-codex-responses"`、`google-generative-ai`→`"google-generative-ai"`、`mistral-conversations`→`"mistral-conversations"`、其他→`"openai-completions"`。
 
@@ -442,6 +671,26 @@ supports and how a `ThinkingLevel` maps to a wire value:
 
 ### upsert_provider(settings, provider, *, set_default=False) -> ProviderSettings
 返回添加或替换一个 provider 的新 settings。先 `providers_by_name = {item.name: item for item in settings.providers}`、`builtin_names = {entry.name for entry in BUILTIN_PROVIDER_CATALOG}`。若 `provider.name` 同时存在于已有与内建集合,则用 `_merge_provider_config(providers_by_name[provider.name], provider)` 合并(保留本地自定义);否则直接覆盖。更新 `providers_by_name[name]`;`default_provider = provider.name if set_default else settings.default_provider`;按名称排序重建 providers 元组;构造 `ProviderSettings`(保留 scoped_models)并调用 `updated.get_provider(default_provider)` 触发未知校验。
+
+```python
+def upsert_provider(settings, provider, *, set_default=False) -> ProviderSettings:
+    providers_by_name = {item.name: item for item in settings.providers}
+    builtin_names = {entry.name for entry in BUILTIN_PROVIDER_CATALOG}
+    if provider.name in providers_by_name and provider.name in builtin_names:
+        # 替换内建时合并，保留用户本地自定义
+        provider = _merge_provider_config(providers_by_name[provider.name], provider)
+    providers_by_name[provider.name] = provider
+    default_provider = provider.name if set_default else settings.default_provider
+    providers = tuple(providers_by_name[name] for name in sorted(providers_by_name))
+    updated = ProviderSettings(
+        default_provider=default_provider,
+        providers=providers,
+        scoped_models=settings.scoped_models,
+    )
+    updated.get_provider(default_provider)   # 触发未知校验
+    return updated
+```
+> 深究：合并只在"替换一个内建 provider"时发生（参数 `provider` 是 incoming 的 catalog 侧），本地旧值优先；非内建 provider 则直接覆盖、不合并。
 
 ### _with_builtin_catalog_models(settings, *, paths=None) -> ProviderSettings
 把当前 provider catalog 合并进 settings(用于 load 后吸收 catalog 变更)。`catalog_configs = {config.name: config for config in _effective_provider_configs(paths)}`;对每个已有 provider,若其名在 catalog 中则 `_merge_provider_config(provider, catalog_configs[provider.name])`(catalog 为 incoming,本地为 existing,保留本地覆盖);然后 `_append_catalog_providers` 追加 catalog 中有但 settings 没有的 provider;若 `default_provider` 不在最终 providers 中则回退到 `providers[0].name` 或 `DEFAULT_PROVIDER_NAME`;构造新 `ProviderSettings`。
@@ -550,6 +799,35 @@ supports and how a `ThinkingLevel` maps to a wire value:
 
 ### openai_compatible_config_from_provider(provider, *, credential_reader=None, model=None, thinking_level=None) -> OpenAICompatibleConfig
 由持久化设置构造 OpenAI 兼容运行时 `OpenAICompatibleConfig`。流程:`api_key = _api_key_from_provider(...)`;`selected_model = model or provider.default_model`;`base_url = _model_base_url(...)`,且当 provider 是默认 OpenAI(`name==DEFAULT_PROVIDER_NAME and api_key_env=="OPENAI_API_KEY"`)时用 `environ.get("OPENAI_BASE_URL", base_url)` 覆盖;`reasoning_effort = _reasoning_effort_from_provider(...)`;`compat = _model_compat(...)`;最后构造 `OpenAICompatibleConfig`,含 `api=str(_provider_api(...))`、`base_url.rstrip("/")`、`headers=_model_headers`、`timeout/retries/delay`、`reasoning_effort`、`reasoning_effort_parameter=provider.thinking_parameter or "reasoning_effort"`、`thinking_format=_thinking_format(...)`、`compat`、`include_reasoning_effort_none=_include_reasoning_effort_none(...)`。
+
+```python
+def openai_compatible_config_from_provider(provider, *, credential_reader=None,
+        model=None, thinking_level=None) -> OpenAICompatibleConfig:
+    api_key = _api_key_from_provider(provider, credential_reader=credential_reader)
+    selected_model = model or provider.default_model
+    base_url = _model_base_url(provider, selected_model)
+    if provider.name == DEFAULT_PROVIDER_NAME and provider.api_key_env == "OPENAI_API_KEY":
+        base_url = environ.get("OPENAI_BASE_URL", base_url)   # 默认 provider 允许环境变量覆盖 base URL
+    reasoning_effort = _reasoning_effort_from_provider(
+        provider, model=selected_model, thinking_level=thinking_level)
+    compat = _model_compat(provider, selected_model)
+    return OpenAICompatibleConfig(
+        api_key=api_key,
+        api=str(_provider_api(provider, selected_model)),
+        base_url=base_url.rstrip("/"),
+        headers=_model_headers(provider, selected_model),
+        timeout_seconds=provider.timeout_seconds,
+        max_retries=provider.max_retries,
+        max_retry_delay_seconds=provider.max_retry_delay_seconds,
+        reasoning_effort=reasoning_effort,
+        reasoning_effort_parameter=provider.thinking_parameter or "reasoning_effort",
+        thinking_format=_thinking_format(provider, selected_model),
+        compat=compat,
+        include_reasoning_effort_none=_include_reasoning_effort_none(
+            provider, model=selected_model, thinking_level=thinking_level),
+    )
+```
+> 深究：这是 `provider_config.py` 与 `tau_ai` 的唯一接缝——所有凭据、base URL、thinking 映射都已在此解析成普通值，下游 `OpenAICompatibleConfig` 不再需要任何 Tau 专属逻辑。
 
 ### anthropic_config_from_provider(provider, *, credential_reader=None, model=None, thinking_level=None) -> AnthropicConfig
 由持久化设置构造 Anthropic 运行时 `AnthropicConfig`。`api_key = _api_key_from_provider(...)`;`selected_model`;`thinking_budget_tokens = _anthropic_thinking_budget_from_provider(...)`;构造 `AnthropicConfig`,含 `base_url=_normalize_anthropic_base_url(_model_base_url(...))`(确保以 /v1 结尾)、`headers=_model_headers`、`timeout/retries/delay`、`thinking_budget_tokens`、`thinking_effort=_reasoning_effort_from_anthropic_provider(...)`、`thinking_mode=_anthropic_thinking_mode(...)`。
