@@ -5,14 +5,13 @@ description: commands.py
 
 ## `tau_coding/commands.py` — slash commands
 
-This file registers the slash commands (`/help`, `/login`, `/model`, `/new`,
-`/clear`, `/compact`, etc.) that a user can type at the prompt instead of a
-normal message.
+本文件注册用户在提示符处可输入、以替代普通消息的斜杠命令（`/help`、`/login`、
+`/model`、`/new`、`/clear`、`/compact` 等）。
 
 ### `LOGIN_PROVIDER_ALIASES`
 
-A module-level `dict[str, tuple[str, str]]` mapping a friendly alias to a pair
-`(provider_name, login_method)`. Its two real entries are:
+模块级 `dict[str, tuple[str, str]]`，把友好的别名映射到一对
+`(provider_name, login_method)`（provider 名、登录方式）。它实际有两项：
 
 ```python
 LOGIN_PROVIDER_ALIASES = {
@@ -21,58 +20,50 @@ LOGIN_PROVIDER_ALIASES = {
 }
 ```
 
-So typing `/login anthropic-api` resolves to the `anthropic` provider with the
-API-key method, and `/login anthropic-subscription` to the subscription (OAuth)
-method. There is **no** `huggingface`/`hf` alias. The constant exists so the
-command layer and the catalog stay in sync without the command layer hardcoding
-provider names; the `(provider, method)` pair is unpacked in the login command.
+因此输入 `/login anthropic-api` 会解析为使用 API key 方式的 `anthropic` provider，
+而 `/login anthropic-subscription` 则对应订阅（OAuth）方式。这里**没有**
+`huggingface`/`hf` 别名。该常量存在的意义是让命令层与 provider 目录保持同步，
+而无需在命令层里硬编码 provider 名称；login 命令中会解包出 `(provider, method)` 这一对值。
 
 ### `CommandRegistry`
 
-The central object that *owns* the available commands.
+持有可用命令的核心对象。
 
-- **Constructor** — builds a mapping of command name → `SlashCommand`. A
-  `SlashCommand` bundles the name, description, usage, handler
-  (`(CommandContext) -> CommandResult`), aliases, and search terms.
-- **`register(command: SlashCommand)`** — add or override a command (raises
-  `ValueError` on a duplicate name).
-- **`get(name)`** — return the `SlashCommand` for a name (or alias), or `None`.
-- **`list_commands()`** — return the `tuple[SlashCommand, ...]` sorted by name,
-  used by the TUI autocomplete and the `/help` listing.
+- **构造函数** — 构建命令名 → `SlashCommand` 的映射。一个 `SlashCommand` 封装了
+  名称、描述、用法、处理函数（`(CommandContext) -> CommandResult`）、别名与搜索关键字。
+- **`register(command: SlashCommand)`** — 添加或覆盖一条命令（重名时抛
+  `ValueError`）。
+- **`get(name)`** — 按名称（或别名）返回对应的 `SlashCommand`，找不到则返回 `None`。
+- **`list_commands()`** — 返回按名称排序的 `tuple[SlashCommand, ...]`，供 TUI
+  自动补全与 `/help` 列表使用。
 
-The registry holds no per-command behavior: it does not know what each command
-does. That keeps the application wiring (which commands exist) separate from the
-`CodingSession` logic (what each command changes in the session). Adding a new
-slash command means registering it here; the `CodingSession` methods it calls
-were built in Part 3b.
+注册表不持有任何逐命令的行为：它并不知道每条命令具体做什么。这样就把应用装配
+（存在哪些命令）与 `CodingSession` 的逻辑（每条命令在会话中改变什么）分离开来。
+新增一条斜杠命令只需在此注册；它所调用的 `CodingSession` 方法已在第 3b 部分实现。
 
-> **Why the registry is behavior-free.** This follows Tau's layering rule —
-> `AgentHarness = reusable agent brain`, `CodingSession = coding-agent
-> environment`, `TUI = one possible frontend`. The command set is part of a
-> *frontend*: it decides which `/`-verbs exist and parses them, but it never
-> mutates durable state. The `CodingSession` is the environment that actually
-> changes state, and it is the only layer that writes to the append-only
-> session log. The registry is the thin adapter between the two, so a different
-> frontend (print-mode CLI, a future GUI) can reuse the exact same
-> `CodingSession` without inheriting any command-parsing assumptions. This is
-> the official principle "Small layers beat magic" applied to command dispatch.
+> **为什么注册表是无行为的。** 这遵循 Tau 的分层规则 ——
+> `AgentHarness = 可复用的 agent 大脑`、`CodingSession = 编码 agent 环境`、
+> `TUI = 可选的前端之一`。命令集合属于*前端*：它决定存在哪些 `/` 动词并解析它们，
+> 但从不修改持久状态。`CodingSession` 才是真正改变状态的环境，也是唯一写入
+> append-only 会话日志的层。注册表是连接二者的薄适配器，因此不同的前端
+> （print 模式 CLI、未来的 GUI）都能复用完全相同的 `CodingSession`，
+> 而不会继承任何命令解析假设。这正是官方原则 “Small layers beat magic”
+> （小分层胜过魔法）在命令分发上的应用。
 
-### Command dispatch flow
+### 命令分发流程
 
-1. The TUI (or print-mode CLI) reads a line starting with `/`.
-2. It splits off the command name and the rest of the line as arguments.
-3. It asks `CommandRegistry.get(name)`; if found, it calls the command's handler.
-4. The handler calls into `CodingSession` (e.g. `set_model`,
-   `branch_to_entry`, `compact`, `new_session`) — all of which we covered in
-   Part 3b — and returns a `CommandResult` describing what to print back.
-5. If the name is not registered, the line is treated as an unknown command and
-   a help hint is shown.
+1. TUI（或 print 模式 CLI）读取一行以 `/` 开头的输入。
+2. 从中切分出命令名与剩余的参数部分。
+3. 它询问 `CommandRegistry.get(name)`；若找到则调用该命令的处理函数。
+4. 处理函数转而调用 `CodingSession`（例如 `set_model`、`branch_to_entry`、
+   `compact`、`new_session`）—— 这些都在第 3b 部分讲过 —— 并返回描述要回显内容的
+   `CommandResult`。
+5. 若名称未注册，则该行被视为未知命令，并给出帮助提示。
 
-Net effect: commands are thin wrappers. All durable state change lives in
-`CodingSession`; all command *discovery* lives in `CommandRegistry`. Most
-handlers do not even call `CodingSession` directly — they return a
-`CommandResult` whose `*_requested` flags tell the frontend which action to
-drive — which keeps the parse/dispatch layer free of any session semantics.
+最终效果：命令是薄包装。所有持久状态变更都发生在 `CodingSession` 中；
+所有命令的*发现*都发生在 `CommandRegistry` 中。绝大多数处理函数甚至不直接调用
+`CodingSession` —— 它们返回一个 `CommandResult`，用其中的 `*_requested` 标志
+告知前端应驱动哪个动作 —— 从而让解析/分发层完全不沾染任何会话语义。
 
 ---
 

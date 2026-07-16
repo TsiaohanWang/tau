@@ -3,165 +3,87 @@ title: tau_coding · 渲染层
 description: rendering/ 包全貌
 ---
 
-## `tau_coding/rendering/base.py` — shared rendering primitives
+## `tau_coding/rendering/base.py` — 共享的渲染原语
 
-The contract shared by every non-interactive output renderer. It is tiny on
-purpose: print mode, JSON mode, and transcript mode all implement the same two
-methods.
+每个非交互式输出渲染器所共享的契约。它刻意保持微小：print 模式、JSON 模式和 transcript 模式都实现相同的两个方法。
 
-- **`PrintOutputMode(StrEnum)`** — the output modes for non-interactive print
-  mode:
-  - `text = "text"` — streamed human-readable assistant text + tool activity.
-  - `json = "json"` — one JSON object per agent event (machine-readable).
-  - `transcript = "transcript"` — a structured transcript (events + session
-    framing) for archival/replay.
-- **`EventRenderer(Protocol)`** — the renderer interface every mode satisfies:
-  - `render(self, event: AgentEvent) -> None` — consume and emit one event.
-  - `finish(self) -> bool` — finalize and report whether the run *succeeded*
-    (so the CLI can choose the process exit code).
+- **`PrintOutputMode(StrEnum)`** — 非交互式 print 模式的输出模式：
+  - `text = "text"` — 流式、人类可读的助手文本 + 工具活动。
+  - `json = "json"` — 每个 agent 事件一个 JSON 对象（机器可读）。
+  - `transcript = "transcript"` — 用于归档/重放的结构化转录（事件 + 会话框定）。
+- **`EventRenderer(Protocol)`** — 每个模式都满足的渲染器接口：
+  - `render(self, event: AgentEvent) -> None` — 消费并发送一个事件。
+  - `finish(self) -> bool` — 收尾并报告本次运行是否*成功*（以便 CLI 选择进程退出码）。
 
-> Design note: by defining the renderer as a Protocol with exactly two methods,
-> Tau can swap output formats (text / json / transcript) without touching the
-> agent loop or `CodingSession`. The loop just calls `render(event)` for each
-> event; the renderer decides what to print. This is the same event-consumer
-> boundary the TUI uses (Part 3d), just on stdout/stderr instead of widgets. The
-> design directly realizes two Tau README principles: "Events are the contract"
-> — the `AgentEvent` union is the stable interface every frontend depends on —
-> and "Small layers beat magic" — the renderer is a narrow, single-purpose layer
-> with no knowledge of the harness internals. Because the agent loop never
-> imports a concrete renderer, the portable core stays free of stdout/JSON
-> formatting concerns.
+> 设计说明（Design note）：通过把渲染器定义为恰好两个方法的 Protocol，Tau 可以在不触碰 agent 循环或 `CodingSession` 的情况下切换输出格式（text / json / transcript）。循环只是对每个事件调用 `render(event)`；由渲染器决定要打印什么。这与 TUI 所使用的事件消费者边界（3d 部分）相同，只是落在 stdout/stderr 而非 widget 上。该设计直接实现了 Tau README 的两项原则："事件即契约（Events are the contract）"——`AgentEvent` 联合类型是每个前端所依赖的稳定接口——以及"薄层胜过魔法（Small layers beat magic）"——渲染器是一个窄的、单一目的的层，对 harness 内部一无所知。因为 agent 循环从不导入一个具体的渲染器，可移植核心得以摆脱 stdout/JSON 格式化的关注点。
 
 ---
 
-## `tau_coding/rendering/transcript.py` — streaming transcript renderer
+## `tau_coding/rendering/transcript.py` — 流式转录渲染器
 
-`TranscriptRenderer` is the concrete `EventRenderer` for `PrintOutputMode.text`.
-It streams assistant text to **stdout** and tool/status activity to **stderr**,
-so the model's raw output stays cleanly separable from Tau's own chatter (you can
-pipe stdout to a file and still watch progress on stderr).
+`TranscriptRenderer` 是 `PrintOutputMode.text` 的具体 `EventRenderer`。它把助手文本流式写入 **stdout**，把工具/状态活动写入 **stderr**，从而让模型的原始输出与 Tau 自身的杂项输出干净地分离（你可以把 stdout 管道到文件，同时在 stderr 上仍能观察进度）。
 
-- **Constructor:** `custom_message_renderer: CustomMessageMarkup | None` — an
-  optional hook (from `extensions/api.py`) letting extensions render their own
-  custom messages; `Console(stderr=True, highlight=False)` for status lines;
-  flags `_assistant_started` / `_assistant_ended` / `_failed` track stream state.
-- **`render(event)`** — an `isinstance` dispatch over the `AgentEvent` hierarchy:
-  - `MessageStartEvent` — reset the per-message started/ended flags (a fresh
-    assistant turn).
-  - `MessageDeltaEvent` — set `_assistant_started` and `typer.echo(event.delta,
-    nl=False)` to stdout (no trailing newline, so tokens concatenate).
-  - `ToolExecutionStartEvent` — `_ensure_assistant_newline()` then print the
-    cyan `format_tool_call_block(event.tool_call)` (a `tui/state.py` helper, so
-    print mode reuses the TUI's tool-call formatting).
-  - `ToolExecutionUpdateEvent` — print `… <message>` in `bright_black` (status
-    like "editing file").
-  - `RetryEvent` — same `… <message>` dim style (agent-layer retries, e.g. after
-    a recoverable provider error).
-  - `ToolExecutionEndEvent` — print `✓`/`✗` in green/red plus the tool name; if
-    the result has content, `_print_tool_content` indents each line in white.
-  - `ErrorEvent` — if `not recoverable`, set `_failed = True`; print
-    `Error: <message>` in red.
-  - `MessageEndEvent` — render any extension custom message
-    (`_render_custom_message`), then ensure a final newline.
-  - `AgentEndEvent` — ensure a final newline.
-- **`_render_custom_message(event)`** — only acts on `role == "user"` messages
-  with a `custom_type`; asks the registered `CustomMessageMarkup` for markup and
-  renders it via `Text.from_markup`, falling back to plain `Text(markup)` if the
-  markup is malformed (a bad extension string must never crash print mode).
-- **`finish() -> bool`** — returns `not self._failed`; the CLI uses this for the
-  exit code.
-- **`_ensure_assistant_newline(*, final)`** — the newline bookkeeping: if
-  assistant text was streamed but not yet terminated, emit one newline and mark
-  ended; on `final` with no text started, just mark ended so subsequent
-  tool/error lines begin on a fresh line. This keeps stdout/stderr interleaving
-  visually correct.
-- **`_print_tool_line` / `_print_tool_content`** — low-level styled printers for
-  tool status rows.
+- **构造函数：** `custom_message_renderer: CustomMessageMarkup | None` — 一个可选钩子（来自 `extensions/api.py`），让扩展渲染它们自己的自定义消息；`Console(stderr=True, highlight=False)` 用于状态行；标志位 `_assistant_started` / `_assistant_ended` / `_failed` 追踪流状态。
+- **`render(event)`** — 对 `AgentEvent` 继承体系的 `isinstance` 分发：
+  - `MessageStartEvent` — 重置每条消息的 started/ended 标志（一次新的 assistant 轮次）。
+  - `MessageDeltaEvent` — 设置 `_assistant_started` 并用 `typer.echo(event.delta, nl=False)` 写到 stdout（无尾随换行，以便 token 拼接）。
+  - `ToolExecutionStartEvent` — `_ensure_assistant_newline()` 然后以青色打印 `format_tool_call_block(event.tool_call)`（这是 `tui/state.py` 的辅助函数，因此 print 模式复用了 TUI 的工具调用格式化）。
+  - `ToolExecutionUpdateEvent` — 以 `bright_black` 打印 `… <message>`（诸如 "editing file" 的状态）。
+  - `RetryEvent` — 同样的 `… <message>` 暗淡样式（agent 层重试，例如在一次可恢复的 provider 错误之后）。
+  - `ToolExecutionEndEvent` — 以绿/红打印 `✓`/`✗` 加工具名；若结果有内容，`_print_tool_content` 以白色缩进每行。
+  - `ErrorEvent` — 若 `not recoverable`，设置 `_failed = True`；以红色打印
+    `Error: <message>`。
+  - `MessageEndEvent` — 渲染任何扩展自定义消息
+    （`_render_custom_message`），然后确保一个最后的换行。
+  - `AgentEndEvent` — 确保一个最后的换行。
+- **`_render_custom_message(event)`** — 仅作用于带 `custom_type` 的 `role == "user"` 消息；
+  向已注册的 `CustomMessageMarkup` 索取 markup 并经由 `Text.from_markup` 渲染，若 markup 格式有误则回退到纯 `Text(markup)`（一段坏的扩展字符串绝不能让 print 模式崩溃）。
+- **`finish() -> bool`** — 返回 `not self._failed`；CLI 用它决定退出码。
+- **`_ensure_assistant_newline(*, final)`** — 换行簿记：若助手文本已被流式输出但尚未结束，则发出一个换行并标记为已结束；在 `final` 且尚无文本开始时，仅标记为已结束，以便后续的工具/错误行从新行开始。这让 stdout/stderr 交错在视觉上保持正确。
+- **`_print_tool_line` / `_print_tool_content`** — 用于工具状态行的底层带样式打印机。
 
-> Design note: the split between stdout (model text) and stderr (Tau's tool
-> status) is a deliberate Unix-friendly choice — `tau … > out.txt` captures only
-> the assistant's words, while progress still appears on the terminal. Reusing
-> `format_tool_call_block` from `tui/state.py` means print mode and the TUI show
-> *identical* tool formatting from a single source of truth, so the two
-> frontends cannot drift apart in how a tool call is labeled. The renderer holds
-> no UI framework dependency (it uses only `typer`/`rich`), which keeps it within
-> the "core stays portable" boundary and lets the same formatting primitives
-> serve both the interactive and non-interactive paths.
+> 设计说明（Design note）：stdout（模型文本）与 stderr（Tau 的工具状态）之间的分离是一个刻意的、对 Unix 友好的选择——`tau … > out.txt` 只捕获助手的文字，而进度仍出现在终端上。复用来自 `tui/state.py` 的 `format_tool_call_block` 意味着 print 模式与 TUI 从同一个真相源展示*完全一致*的工具格式化，因此两个前端在"如何标注一次工具调用"上不会分叉。该渲染器不持有任何 UI 框架依赖（只用 `typer`/`rich`），这使它处于"核心保持可移植"的边界之内，并让相同的格式化原语同时服务于交互式与非交互式路径。
 
 ---
 
-## `tau_coding/rendering/json.py` — JSONL event renderer
+## `tau_coding/rendering/json.py` — JSONL 事件渲染器
 
-`JsonEventRenderer` is the `PrintOutputMode.json` renderer: the machine-readable
-path for piping/automation.
+`JsonEventRenderer` 是 `PrintOutputMode.json` 的渲染器：用于管道/自动化的机器可读路径。
 
-- **`render(event)`** — emits `event.model_dump_json()` as one JSON object per
-  line (JSONL). On a non-recoverable `ErrorEvent` it sets `_failed = True` (but
-  still prints the error event, so the stream stays complete).
-- **`finish() -> bool`** — `not self._failed`.
+- **`render(event)`** — 把 `event.model_dump_json()` 作为每行一个 JSON 对象（JSONL）发出。在遇到不可恢复的 `ErrorEvent` 时设置 `_failed = True`（但仍会打印该错误事件，从而流保持完整）。
+- **`finish() -> bool`** — `not self._failed`。
 
-> Design note: because every `AgentEvent` is a pydantic model, dumping to JSON is
-> a one-liner — JSON mode gets full event fidelity for free, with no custom
-> serialization. This also makes the JSONL stream a faithful, lossless record of
-> the same `AgentEvent` union the TUI consumes, so downstream tools and the
-> interactive frontend observe identical events ("Events are the contract"). The
-> renderer never re-shapes the event, preserving the wire format end-to-end.
+> 设计说明（Design note）：因为每个 `AgentEvent` 都是 pydantic 模型，dump 成 JSON 只需一行——JSON 模式免费获得完整的事件保真度，无需自定义序列化。这也让 JSONL 流成为 TUI 所消费的同一个 `AgentEvent` 联合类型的忠实、无损记录，从而下游工具和交互式前端观察到的是相同的事件（"事件即契约"）。该渲染器从不重塑事件，端到端保留了线格式（wire format）。
 
-## `tau_coding/rendering/plain.py` — Pi-style final-text renderer
+## `tau_coding/rendering/plain.py` — Pi 风格的最终文本渲染器
 
-`FinalTextRenderer` is the `PrintOutputMode.text` renderer, matching Pi's
-behavior: it discards streaming noise and prints **only the final assistant
-message** (or errors) once the run ends.
+`FinalTextRenderer` 是 `PrintOutputMode.text` 的渲染器，匹配 Pi 的行为：它丢弃流式噪声，在运行结束后只打印**最后的助手消息**（或错误）。
 
-- **`render(event)`** — records `_last_assistant_text` from each
-  `MessageEndEvent` (so the *last* turn wins), and appends non-recoverable error
-  messages to `_error_messages` while setting `_failed`.
-- **`finish() -> bool`** — if failed, echoes each `Error: <message>` to **stderr**
-  and returns `False`; otherwise echoes the last assistant text to stdout and
-  returns `True`.
+- **`render(event)`** — 从每个
+  `MessageEndEvent` 记录 `_last_assistant_text`（因此*最后*一轮胜出），并把不可恢复的错误消息追加进 `_error_messages`，同时设置 `_failed`。
+- **`finish() -> bool`** — 若失败，把每条 `Error: <message>` 回显到 **stderr** 并返回 `False`；否则把最后的助手文本回显到 stdout 并返回 `True`。
 
-> Design note: this is the most "silent" renderer — no tool calls, no progress.
-> It exists for users who want only the agent's final answer, Pi-style, treating
-> the agent as a text-generation function (for piping or capture). The renderer
-> buffers state during the run and emits exactly one write in `finish()`,
-> satisfying the same `EventRenderer` contract as the streaming renderers while
-> discarding all intermediate events.
+> 设计说明（Design note）：这是最"安静"的渲染器——没有工具调用，没有进度。它服务于只想要 agent 最终答案（Pi 风格）、把 agent 当作文本生成函数来用的用户（用于管道或捕获）。该渲染器在运行期间缓冲状态，并在 `finish()` 中恰好发出一次写入，满足与流式渲染器相同的 `EventRenderer` 契约，同时丢弃所有中间事件。
 
-## `tau_coding/rendering/__init__.py` — package boundary
+## `tau_coding/rendering/__init__.py` — 包边界
 
-Ties the renderers together and provides the factory:
+把各渲染器绑定在一起并提供工厂：
 
-- Re-exports `EventRenderer`, `PrintOutputMode`, `TranscriptRenderer`,
-  `JsonEventRenderer`, `FinalTextRenderer`.
-- **`create_event_renderer(mode, *, custom_message_renderer=None)`** — the single
-  switch: `PrintOutputMode.text` → `FinalTextRenderer()`,
-  `PrintOutputMode.json` → `JsonEventRenderer()`, and any other mode
-  (`transcript`) → `TranscriptRenderer(custom_message_renderer=…)`. The CLI calls
-  this to pick the output path by flag.
+- 重新导出 `EventRenderer`、`PrintOutputMode`、`TranscriptRenderer`、
+  `JsonEventRenderer`、`FinalTextRenderer`。
+- **`create_event_renderer(mode, *, custom_message_renderer=None)`** — 唯一的开关：`PrintOutputMode.text` → `FinalTextRenderer()`、
+  `PrintOutputMode.json` → `JsonEventRenderer()`，以及其他任何模式
+  （`transcript`）→ `TranscriptRenderer(custom_message_renderer=…)`。CLI 调用它按 flag 选择输出路径。
 
-> Design note: `create_event_renderer` is the only place that hard-codes the
-> mode→renderer mapping. Adding a fourth output mode means editing this one
-> factory plus one new `EventRenderer`, and nothing else in the call chain
-> changes. Centralizing the mapping behind a single factory keeps the
-> "Small layers beat magic" principle: callers depend only on the `EventRenderer`
-> Protocol, never on a concrete renderer, so the wiring surface stays minimal and
-> the agent loop remains unaware of which output mode is active.
+> 设计说明（Design note）：`create_event_renderer` 是唯一硬编码 模式→渲染器 映射的地方。增加第四种输出模式意味着只需修改这一个工厂加一个新的 `EventRenderer`，调用链中其他任何东西都不变。把映射集中在一个工厂之后，保持了"薄层胜过魔法"原则：调用方只依赖 `EventRenderer` Protocol，绝不依赖某个具体渲染器，从而接线面保持最小，agent 循环也始终不知道当前激活的是哪种输出模式。
 
-## How 3g fits the picture
+## 3g 部分如何契合整体
 
-- `rendering/base.py` — the `EventRenderer` Protocol + `PrintOutputMode` enum
-  that let output format be a runtime choice, not a code change.
-- `rendering/transcript.py` — the concrete text renderer: streams assistant
-  tokens to stdout, tool/status to stderr, and honors extension custom messages.
+- `rendering/base.py` — `EventRenderer` Protocol + `PrintOutputMode` 枚举，
+  让输出格式成为运行时选择，而非代码改动。
+- `rendering/transcript.py` — 具体的文本渲染器：把助手 token 流式写入 stdout，工具/状态写入 stderr，并尊重扩展自定义消息。
 
-With Part 3g the tutorial has now dissected **every** module across
-`tau_ai → tau_agent → tau_coding`, bottom-up and file-by-file, including the
-modules that were previously uncovered: the provider catalog loader, branch
-summaries, diagnostics, prompt templates, reload summary, session export, shell
-config, thinking primitives, the update check, the version helper, and the
-rendering layer. The only path from the original gap audit that does *not* exist
-in the source is `extensions/base.py` (the extension system lives in
-`extensions/{api,loader,runtime,__init__}.py`, covered in Part 3e).
+到 3g 部分为止，本教程已自底向上、逐文件地剖析了 `tau_ai → tau_agent → tau_coding` 中的**每一个**模块，包括此前未被覆盖的模块：provider 目录加载器、分支摘要、诊断、提示模板、重载摘要、会话导出、shell 配置、思考原语、更新检查、版本辅助，以及渲染层。最初缺口审计中唯一在源码里*不存在*的路径是 `extensions/base.py`（扩展系统位于 `extensions/{api,loader,runtime,__init__}.py`，在 3e 部分讲解）。
 
 ## 逐方法深度剖析（rendering/*）
 

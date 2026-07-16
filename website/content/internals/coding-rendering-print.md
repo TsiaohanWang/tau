@@ -3,56 +3,44 @@ title: tau_coding · 渲染层(print/json)
 description: rendering/plain.py / rendering/json.py
 ---
 
-## `tau_coding/rendering/plain.py` — print-mode final text
+## `tau_coding/rendering/plain.py` — print 模式的最终文本
 
-`FinalTextRenderer` is the simplest output backend, used in `--no-tui` /
-print mode.
+`FinalTextRenderer` 是最简单的输出后端，用于 `--no-tui` / print 模式。
 
-- It listens for `MessageEndEvent` and remembers the last assistant text.
-- It collects `ErrorEvent`s; non-recoverable ones mark the run as failed.
-- `finish()` prints the final assistant text (or each error to stderr) and
-  returns whether the run succeeded.
+- 它监听 `MessageEndEvent` 并记住最后的助手文本。
+- 它收集 `ErrorEvent`；不可恢复的会把运行标记为失败。
+- `finish()` 打印最终的助手文本（或把每个错误打印到 stderr）并返回运行是否成功。
 
-So in print mode, the terminal shows *only* the model's final answer, not the
-streaming intermediate events.
+因此在 print 模式下，终端只显示模型的*最终答案*，而非流式的那些中间事件。
 
-## `tau_coding/rendering/json.py` — JSONL event stream
+## `tau_coding/rendering/json.py` — JSONL 事件流
 
-`JsonEventRenderer` is the machine-readable backend (used for scripting/CI).
+`JsonEventRenderer` 是机器可读的后端（用于脚本/CI）。
 
-- `render(event)` — writes `event.model_dump_json()` as one line per event,
-  flagging non-recoverable errors as failure.
-- `finish()` — returns whether the run succeeded.
+- `render(event)` — 把 `event.model_dump_json()` 写成每行一个事件，
+  并把不可恢复的错误标记为失败。
+- `finish()` — 返回运行是否成功。
 
-Every `AgentEvent` (defined in Part 2a) becomes one JSON object per line,
-which is exactly the stream the TUI and downstream tools can parse.
+每个 `AgentEvent`（在 2a 部分定义）都会变成每行一个 JSON 对象，
+这正是 TUI 和下游工具可以解析的那条流。
 
-> Design note: both renderers consume the *same* `AgentEvent` union the agent
-> loop emits. This is the AGENTS.md boundary in action and a direct expression
-> of the Tau README principle "Events are the contract": the harness emits
-> events and stays portable, while each frontend (TUI, plain, json) consumes
-> them independently. Because the event stream is the stable interface, the
-> print and JSON backends can be added or changed without modifying
-> `tau_agent`; the agent core has no knowledge of which frontend is attached.
+> 设计说明（Design note）：这两个渲染器消费的都是 agent 循环发出的*同一个* `AgentEvent` 联合类型。这正是 AGENTS.md 边界在起作用，也是 Tau README 原则"事件即契约（Events are the contract）"的直接体现：harness 发出事件并保持可移植，而每个前端（TUI、plain、json）独立地消费它们。因为事件流是稳定接口，print 和 JSON 后端可以在不修改 `tau_agent` 的情况下被添加或更改；agent 核心对当前挂载的是哪个前端一无所知。
 
 ---
 
-## How 3c fits the whole picture
+## 3c 部分如何契合整体
 
-- `commands.py` adapts user input (`/model`, `/new`, …) to `CodingSession`
-  methods (Part 3b).
-- `session_manager.py` indexes every `CodingSession` so the CLI can list and
-  resume across runs.
-- `provider_catalog.py` (static reference) → `provider_config.py` (durable,
-  user-customizable, validated) → `provider_runtime.py` (live `tau_ai`
-  provider). This three-step pipeline is how Tau goes from "provider name" to
-  "streaming connection."
-- `rendering/*` are the non-TUI output backends that turn agent events into
-  text or JSONL.
+- `commands.py` 把用户输入（`/model`、`/new`、……）适配到 `CodingSession`
+  的方法（3b 部分）。
+- `session_manager.py` 为每一个 `CodingSession` 建立索引，以便 CLI 能跨运行列出和恢复。
+- `provider_catalog.py`（静态参考）→ `provider_config.py`（持久化、
+  用户可定制、已校验）→ `provider_runtime.py`（活动的 `tau_ai`
+  provider）。这个三步流水线就是 Tau 从"provider 名"走到"流式连接"的方式。
+- `rendering/*` 是把 agent 事件转换为文本或 JSONL 的非 TUI 输出后端。
 
-Next: **Part 3d** covers the Textual TUI (`tui/state.py`, `tui/adapter.py`,
-`tui/app.py`, `tui/config.py`, `tui/autocomplete.py`) — the richest frontend
-and the last major piece before the auth/CLI/extensions layer in **Part 3e**.
+接下来：**Part 3d** 讲解 Textual TUI（`tui/state.py`、`tui/adapter.py`、
+`tui/app.py`、`tui/config.py`、`tui/autocomplete.py`）——最丰富的前端，
+也是 **Part 3e** 中 auth/CLI/extensions 层之前的最后一大块。
 
 <!-- NAV -->
 [← tau_coding · Provider 配置]({{< relref "./coding-provider-config.md" >}})

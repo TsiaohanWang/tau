@@ -5,10 +5,9 @@ description: cli.py —— Typer 命令行
 
 ## 4. `cli.py` — the Typer entry point
 
-This is the user-facing binary (`tau`). It is built on **Typer** and composes the
-whole stack. At import it even calls `_force_utf8_streams()` to reconfigure
-stdout/stderr to UTF-8 on platforms (Windows) whose console codepage would
-otherwise raise on non-ASCII model output.
+这是面向用户的二进制(`tau`)。它基于 **Typer** 构建并编排整个技术栈。导入时它甚至会调用
+`_force_utf8_streams()` 将 stdout/stderr 重新配置为 UTF-8,以免在某些平台(Windows)上,控制台代码页
+在遇到非 ASCII 模型输出时抛出错误。
 
 ```python
 app = typer.Typer(name="tau", add_completion=False,
@@ -21,50 +20,35 @@ def main(ctx, prompt_args, prompt_option, provider, model, setup_*,
          extension, no_extensions, project_extensions, version) -> None: ...
 ```
 
-What `main` does:
+`main` 的职责如下:
 
-1. **Version / subcommand dispatch.** `--version` prints `tau <version>`. If a
-   real subcommand was invoked it returns early. Simple verb commands are handled
-   positionally: `tau sessions` lists sessions, `tau providers` lists configured
-   providers (`providers_command`), `tau setup` creates/updates an
-   OpenAI-compatible provider (`setup_command` → `upsert_openai_compatible_provider`
-   + `save_provider_settings`), and `tau export <ref> [--format html|jsonl] [out]`
-   exports a session (`export_session_command`).
-2. **TUI vs print mode.** If no `--prompt`/`-p` is given, it runs
-   `run_openai_tui` (→ `run_tui_app` from `tui`, 3d), passing model, cwd, resume,
-   new-session, provider, auto-compact threshold, initial prompt, startup
-   notices, and the extension flags. If `--prompt` is given, it runs
-   `run_openai_print_mode` (→ `run_print_mode`), which uses the plain/JSON
-   `EventRenderer`s from `rendering` (3c).
-3. **Provider + session setup (print mode).** `run_openai_print_mode` loads
-   `ProviderSettings`, resolves the selection (`resolve_provider_selection`),
-   builds the `ModelProvider` via `create_model_provider`
-   (`provider_runtime.py`, 3c) with `DEFAULT_THINKING_LEVEL`, creates a
-   `CodingSessionRecord` via `SessionManager`, and drives `run_print_mode`.
-4. **`run_print_mode`** is the non-interactive workhorse: it builds a
-   `CodingSession` via `CodingSession.load(CodingSessionConfig(...))`, installs a
-   `StderrUiBridge` for extensions, emits pending `session_start`, picks an
-   `EventRenderer`, then either runs a slash command / terminal command or streams
-   `session.prompt(prompt)` through the renderer. It returns `False` on a
-   non-recoverable error so the CLI can exit non-zero.
-5. **Extension flags** `--extension/-x` (repeatable explicit paths),
-   `--no-extensions` (disable directory discovery; explicit `-x` still load), and
-   `--project-extensions` (also load `<cwd>/.tau/extensions`) are threaded through
-   to both frontends.
+1. **版本 / 子命令分派。** `--version` 打印 `tau <version>`。若调用了真正的子命令则提前返回。简单的动词命令按位置参数处理:`tau sessions` 列出会话,`tau providers` 列出已配置的 provider
+   (`providers_command`),`tau setup` 创建/更新一个 OpenAI 兼容 provider
+   (`setup_command` → `upsert_openai_compatible_provider` + `save_provider_settings`),
+   而 `tau export <ref> [--format html|jsonl] [out]` 导出会话(`export_session_command`)。
+2. **TUI 与打印模式。** 若未给定 `--prompt`/`-p`,则运行 `run_openai_tui`(→ 来自 `tui` 的
+   `run_tui_app`,3d),传入 model、cwd、resume、new-session、provider、auto-compact 阈值、初始 prompt、
+   启动通知以及扩展标志。若给定了 `--prompt`,则运行 `run_openai_print_mode`(→ `run_print_mode`),
+   它使用 `rendering`(3c)中的 plain/JSON `EventRenderer`。
+3. **Provider 与会话设置(打印模式)。** `run_openai_print_mode` 加载 `ProviderSettings`,解析选择
+   (`resolve_provider_selection`),通过 `create_model_provider`(`provider_runtime.py`,3c)以
+   `DEFAULT_THINKING_LEVEL` 构建 `ModelProvider`,经由 `SessionManager` 创建 `CodingSessionRecord`,
+   并驱动 `run_print_mode`。
+4. **`run_print_mode`** 是非交互的主力:它通过 `CodingSession.load(CodingSessionConfig(...))` 构建
+   `CodingSession`,为扩展安装 `StderrUiBridge`,发出待处理的 `session_start`,挑选一个 `EventRenderer`,
+   然后要么运行斜杠命令/终端命令,要么通过渲染器流式处理 `session.prompt(prompt)`。遇到不可恢复的错误时
+   它返回 `False`,以便 CLI 以非零状态退出。
+5. **扩展标志** `--extension/-x`(可重复的显式路径)、`--no-extensions`(禁用目录发现;显式 `-x` 仍会加载),
+   以及 `--project-extensions`(同时加载 `<cwd>/.tau/extensions`)会透传给两个前端。
 
-`cli.py` is intentionally a **composition root**: it knows about every other
-piece but contains no agent logic, no rendering internals, and no provider
-specifics beyond wiring names to config functions.
+`cli.py` 刻意作为一个 **组合根**:它了解其它每一部分,但不包含 agent 逻辑、渲染内部细节,以及除将名称
+接线到配置函数之外的任何 provider 细节。
 
-> **Why a composition root with no logic?** Pi's architecture keeps the core
-> agent harness portable: it must not depend on a CLI, a TUI, or any specific
-> provider. `cli.py` is the one place that *assembles* those portable pieces into
-> a running program — parsing argv, choosing the frontend (TUI vs print mode),
-> and threading extension flags through. Keeping all decision-making (model
-> selection, session creation, prompt streaming) inside `run_openai_print_mode` /
-> `run_print_mode` rather than in `main` means the harness stays testable and
-> reusable: the README's "The core stays portable" guarantee holds because the
-> only non-portable wiring lives here, behind the entry point.
+> **为何采用无逻辑的组合根?** Pi 的架构保持核心 agent 工具可移植:它绝不能依赖 CLI、TUI 或任何特定
+> provider。`cli.py` 是将那些可移植部分 *组装* 成可运行程序的唯一场所 —— 解析 argv、选择前端(TUI 还是
+> 打印模式)、并透传扩展标志。将所有决策(模型选择、会话创建、prompt 流式处理)放在 `run_openai_print_mode` /
+> `run_print_mode` 中而非 `main` 里,意味着工具保持可测试与可复用:README 中"核心保持可移植"的保证得以成立,
+> 因为唯一不可移植的接线就位于入口点之后的此处。
 
 ---
 

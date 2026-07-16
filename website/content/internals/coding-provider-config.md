@@ -3,66 +3,62 @@ title: tau_coding · Provider 配置
 description: provider_catalog / provider_config / provider_runtime
 ---
 
-## `tau_coding/provider_catalog.py` — the built-in provider catalog
+## `tau_coding/provider_catalog.py` — 内建 provider 目录
 
-This file defines the *static* description of providers Tau knows about out of
-the box (their names, base URLs, auth env vars, models, thinking levels,
-cost tiers). It is data, not behavior.
+本文件定义了 Tau 开箱即知（out of the box）的 provider 的*静态*描述（名称、base URL、
+鉴权环境变量、模型、思考级别、成本档位）。它是数据，而非行为。
 
 ### Type aliases
 
 - `ProviderKind` — `"openai-compatible" | "anthropic" | "openai-codex" |
-  "google-generative-ai" | "mistral-conversations"`.
-- `ProviderApi` — the wire protocol: `"openai-completions"`,
-  `"openai-responses"`, `"anthropic-messages"`, `"openai-codex-responses"`,
-  `"google-generative-ai"`, `"mistral-conversations"`.
-- `ModelInput` — `"text" | "image"`.
-- `ThinkingLevelMap` — `dict[ThinkingLevel, str | None]`: maps a thinking level
-  to the provider-specific wire value (or `None` if unsupported).
-- `AuthMethod` — `"api_key" | "oauth"`.
+  "google-generative-ai" | "mistral-conversations"`。
+- `ProviderApi` — 线协议（wire protocol）：`"openai-completions"`、
+  `"openai-responses"`、`"anthropic-messages"`、`"openai-codex-responses"`、
+  `"google-generative-ai"`、`"mistral-conversations"`。
+- `ModelInput` — `"text" | "image"`。
+- `ThinkingLevelMap` — `dict[ThinkingLevel, str | None]`：把思考级别映射到
+  provider 特定的线值（不支持时为 `None`）。
+- `AuthMethod` — `"api_key" | "oauth"`。
 
 ### `ModelCostTier` (frozen)
 
-A cost row that applies up to an optional `max_input_tokens` limit. The last
-tier in a sequence must omit `max_input_tokens` (a sentinel meaning "and
-above"). Used for token-count-dependent pricing.
+一条成本行，适用于可选的 `max_input_tokens` 上限内。序列中最后一层必须省略
+`max_input_tokens`（一个表示 “以及以上” 的哨兵值）。用于与 token 数量相关的计价。
 
 ### `ModelCatalogMetadata` (frozen)
 
-Per-model catalog data: `name`, `api`, `base_url`, `reasoning`, `input`,
-`cost`, `cost_tiers`, `context_window`, `max_tokens`, `headers`, `compat`, and
-`thinking_level_map`. This is the *catalog* counterpart to the runtime
-`ProviderModelMetadata` in `provider_config.py`.
+逐模型的目录数据：`name`、`api`、`base_url`、`reasoning`、`input`、
+`cost`、`cost_tiers`、`context_window`、`max_tokens`、`headers`、`compat`、
+`thinking_level_map`。它是 `provider_config.py` 中运行时 `ProviderModelMetadata`
+的*目录*对应物。
 
 ### `model_cost_for_input_tokens(metadata, input_tokens)`
 
-Returns the rate dict for a given input size. It walks `cost_tiers` in order;
-the first tier whose `max_input_tokens` is `None` or `>= input_tokens` wins.
-Falls back to the flat `cost`. Raises `ValueError` on a bad token count.
+返回给定输入规模对应的费率字典。它按顺序遍历 `cost_tiers`；第一个
+`max_input_tokens` 为 `None` 或 `>= input_tokens` 的层胜出。回退到扁平的 `cost`。
+token 数量非法时抛 `ValueError`。
 
 ### `ProviderCatalogEntry` (frozen)
 
-One built-in provider Tau can present during login/setup:
+Tau 在登录/设置时可呈现的一个内建 provider：
 
-- `name`, `display_name`, `kind`, `base_url`, `api_key_env`,
-  `credential_name`, `models`, `default_model`, `docs_url`.
-- Optional: `api`, `context_windows`, `headers`, `compat`,
-  `model_metadata`, `thinking_levels`, `thinking_models`,
-  `thinking_default`, `thinking_parameter`, `auth_methods`.
+- `name`、`display_name`、`kind`、`base_url`、`api_key_env`、
+  `credential_name`、`models`、`default_model`、`docs_url`。
+- 可选：`api`、`context_windows`、`headers`、`compat`、
+  `model_metadata`、`thinking_levels`、`thinking_models`、
+  `thinking_default`、`thinking_parameter`、`auth_methods`。
 
-This is the *catalog* counterpart to the durable `ProviderConfig` dataclasses
-in `provider_config.py`.
+这是 `provider_config.py` 中持久化 `ProviderConfig` 数据类的*目录*对应物。
 
 ### `BUILTIN_PROVIDER_CATALOG` and `_load_builtin_catalog()`
 
-`_load_builtin_catalog()` lazily imports `builtin_catalog` from
-`tau_coding.catalog_loader` (avoiding a circular import, since
-`catalog_loader` imports `ProviderCatalogEntry` from this module). The result
-is frozen into `BUILTIN_PROVIDER_CATALOG` at import time.
+`_load_builtin_catalog()` 惰性地从 `tau_coding.catalog_loader` 导入 `builtin_catalog`
+（以避免循环导入，因为 `catalog_loader` 会从本模块导入 `ProviderCatalogEntry`）。
+结果在导入时即冻结进 `BUILTIN_PROVIDER_CATALOG`。
 
 ### `builtin_provider_entry(name)`
 
-Linear lookup of a catalog entry by provider name.
+按 provider 名称做线性查找，返回一个目录条目。
 
 > **Why catalog and config are separate files with a one-way dependency.** The
 > *catalog* (this file) is static reference data — the providers Tau ships with.
@@ -76,11 +72,10 @@ Linear lookup of a catalog entry by provider name.
 
 ---
 
-## `tau_coding/provider_config.py` — durable provider configuration
+## `tau_coding/provider_config.py` — 持久化的 provider 配置
 
-This is the largest file in the tutorial. It turns catalog data + user
-preferences + environment into the durable `ProviderConfig` objects that
-`provider_runtime.py` later turns into live `tau_ai` providers.
+这是本教程中最大的文件。它把目录数据 + 用户偏好 + 环境，转化为持久的 `ProviderConfig`
+对象，随后由 `provider_runtime.py` 将其转换为真正可用的 `tau_ai` provider。
 
 ### Constants & error type
 
@@ -96,7 +91,7 @@ on a durable provider config. Has a `to_json()` method for serialization.
 
 ### `OpenAICompatibleProviderConfig` / `AnthropicProviderConfig` / `OpenAICodexProviderConfig`
 
-Three frozen dataclasses, one per provider kind. They share fields:
+三个 frozen 数据类，每种 provider 类型各一个。它们共享以下字段：
 
 - identity: `name`, `base_url`, `api`, `api_key_env`, `credential_name`.
 - `models`, `default_model`, `context_windows`, `headers`, `compat`,
@@ -177,7 +172,7 @@ A resolved `provider` + `model` pair for one run.
 
 ### Parsing JSON (`provider_settings_from_json` and friends)
 
-The file supports two on-disk shapes:
+本文件支持两种磁盘形态：
 
 1. **New shape** — `default_provider` + `provider_preferences` (a map of
    provider name → runtime overrides like `default_model`, `headers`,
@@ -207,7 +202,7 @@ supports and how a `ThinkingLevel` maps to a wire value:
 
 ### Building runtime config (the `tau_ai` glue)
 
-These are the functions `provider_runtime.py` calls:
+以下是 `provider_runtime.py` 所调用的函数：
 
 - `openai_compatible_config_from_provider(provider, *, credential_reader,
   model, thinking_level) -> OpenAICompatibleConfig` — assembles the live
@@ -239,63 +234,56 @@ These are the functions `provider_runtime.py` calls:
 
 ---
 
-## `tau_coding/provider_runtime.py` — live provider construction
+## `tau_coding/provider_runtime.py` — 实时 provider 构造
 
-This file turns a durable `ProviderConfig` into an actual `tau_ai`
-`ModelProvider` instance, wiring up credentials and OAuth refresh.
+本文件把一个持久的 `ProviderConfig` 转换为一个真正的 `tau_ai`
+`ModelProvider` 实例，并接好凭据与 OAuth 刷新。
 
-### `ClosableModelProvider` (Protocol)
+### `ClosableModelProvider`（Protocol）
 
-`ModelProvider` plus an async `aclose()` — Tau owns the provider and must be
-able to release its resources at the end of a run.
+`ModelProvider` 外加一个异步 `aclose()` —— Tau 拥有这个 provider，并且必须能在
+一次运行结束时释放其资源。
 
 ### `create_model_provider(provider, *, credential_store, model, thinking_level)`
 
-The main factory. It:
+主工厂函数。它：
 
-1. Validates the model against the provider.
-2. Loads `FileCredentialStore` (or a default).
-3. Branches on provider type:
-   - **Anthropic** — builds an `AnthropicConfig`. If an OAuth credential exists,
-     it calls the OAuth provider's `runtime_auth` to inject the live API key,
-     bearer auth, extra headers, a system prompt, and a
-     `OAuthRuntimeCredentialResolver` that refreshes the token per request.
-     Returns `AnthropicProvider`.
-   - **OpenAI Codex** — returns `OpenAICodexProvider` with an
-     `OpenAICodexCredentialResolver` and an optional `reasoning_effort`.
-   - **OpenAI-compatible** — builds an `OpenAICompatibleConfig`. If the selected
-     `api` is `anthropic-messages`/`google-generative-ai`/`mistral-conversations`,
-     it returns the matching specialized provider; otherwise a plain
-     `OpenAICompatibleProvider`. OAuth credentials are injected the same way as
-     Anthropic.
-4. Raises `ProviderConfigError` for unsupported configs / missing OAuth.
+1. 针对 provider 校验该模型。
+2. 加载 `FileCredentialStore`（或默认实现）。
+3. 按 provider 类型分派：
+    - **Anthropic** — 构造一个 `AnthropicConfig`。若存在 OAuth 凭据，它会调用该
+      OAuth provider 的 `runtime_auth` 来注入实时的 API key、bearer 鉴权、
+      额外请求头、一个 system prompt，以及一个每次请求都刷新 token 的
+      `OAuthRuntimeCredentialResolver`。返回 `AnthropicProvider`。
+    - **OpenAI Codex** — 返回带 `OpenAICodexCredentialResolver` 与可选
+      `reasoning_effort` 的 `OpenAICodexProvider`。
+    - **OpenAI 兼容** — 构造一个 `OpenAICompatibleConfig`。若所选 `api` 为
+      `anthropic-messages`/`google-generative-ai`/`mistral-conversations`，
+      则返回对应的专用 provider；否则返回普通的 `OpenAICompatibleProvider`。
+      OAuth 凭据的注入方式与 Anthropic 相同。
+4. 对于不支持的配置 / 缺失的 OAuth，抛 `ProviderConfigError`。
 
 ### `OpenAICodexCredentialResolver`
 
-Callable that returns `OpenAICodexCredentials` (access token + account id) for
-each request:
+每次请求都返回 `OpenAICodexCredentials`（访问令牌 + 账户 id）的可调用对象：
 
-- Reads the OAuth credential by name; refreshes it if expired.
-- Falls back to the `api_key_env` env var (which must be a Codex access JWT; it
-  extracts `account_id` from the JWT).
-- Raises a clear "run /login" error if neither is present.
+- 按名称读取 OAuth 凭据；若已过期则刷新。
+- 回退到 `api_key_env` 环境变量（必须为 Codex 访问 JWT；它会从 JWT 中提取
+  `account_id`）。
+- 若两者皆无，则抛出清晰的 “运行 /login” 错误。
 
 ### `OAuthRuntimeCredentialResolver`
 
-Provider-neutral resolver used for Anthropic-style OAuth providers. On each
-call it reads the OAuth credential, refreshes it (persisting the refreshed
-copy), asks the OAuth provider for runtime auth, and returns
-`RuntimeProviderAuth(api_key, base_url, headers)`.
+用于 Anthropic 风格 OAuth provider 的中立解析器。每次调用时它会读取 OAuth 凭据，
+刷新之（并持久化刷新后的副本），向 OAuth provider 请求运行时鉴权，并返回
+`RuntimeProviderAuth(api_key, base_url, headers)`。
 
-### Helpers
+### 辅助函数
 
-- `_codex_reasoning_effort(...)` — maps a `ThinkingLevel` to a Codex
-  reasoning-effort string (`off` → `None`, `minimal` → `"low"`, else the
-  normalized effort).
-- `_oauth_credential(provider, store)` — fetches the OAuth credential if the
-  provider has one registered.
-- `_required_oauth_provider(name)` — returns the registered `OAuthProvider`,
-  raising if none.
+- `_codex_reasoning_effort(...)` — 把 `ThinkingLevel` 映射为 Codex 的
+  reasoning-effort 字符串（`off` → `None`、`minimal` → `"low"`，其余为归一化的力度）。
+- `_oauth_credential(provider, store)` — 若 provider 注册了 OAuth 凭据则取之。
+- `_required_oauth_provider(name)` — 返回已注册的 `OAuthProvider`，没有则抛错。
 
 > **Why runtime construction is its own layer.** This file is where Tau finally
 > calls into `tau_ai`: everything above it is data translation, and this file

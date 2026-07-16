@@ -5,19 +5,14 @@ description: credentials.py
 
 ## 1. `credentials.py` — the credential store
 
-This module is the single source of truth for *how Tau persists authentication
-material*. It defines two frozen credential dataclasses plus a small JSON-backed
-store. Secrets live in `<Tau home>/credentials.json`, never in `providers.json`.
+本模块是关于 *Tau 如何持久化认证资料* 的唯一事实来源。它定义了两个冻结的凭证 dataclass 以及一个基于 JSON 的小型存储。密钥存放在 `<Tau home>/credentials.json` 中,绝不放在 `providers.json`。
 
-> **Why separate `credentials.json` from `providers.json`?** `providers.json`
-> holds static *configuration* (base URL, model list, client id, timeouts) that
-> is safe to commit, sync across machines, and edit by hand. `credentials.json`
-> holds *secrets* (access/refresh tokens, API keys) that must never travel with
-> configuration. Separating the two enforces a clear security boundary: the
-> configuration file can be version-controlled or shared, while the credential
-> file stays private (`0o600`), can be git-ignored, and is the only artifact
-> whose exposure is a breach. A single merged file would force users to treat
-> every config edit as a secret-handling operation.
+> **为何要将 `credentials.json` 与 `providers.json` 分离?** `providers.json`
+> 保存的是静态 *配置*(base URL、模型列表、client id、超时时间),这些可以安全地提交、
+> 跨机器同步以及手动编辑。`credentials.json` 保存的是 *密钥*(access/refresh 令牌、
+> API key),绝不能随配置一起传播。将二者分离可强制划出清晰的安全边界:配置文件可以纳入
+> 版本控制或共享,而凭证文件保持私有(`0o600`)、可被 git 忽略,并且是唯一一旦泄露即构成
+> 安全事件的产物。若合并为单一文件,会迫使用户把每次配置编辑都当作密钥处理操作。
 
 ### 1.1 The credential types
 
@@ -36,15 +31,13 @@ class ApiKeyCredential:
     key: str
 ```
 
-- `OAuthCredential` is what every OAuth flow produces and what refresh returns.
-  Note the field names: `access`/`refresh` (not `access_token`/`refresh_token`),
-  and `expires` is an **int in milliseconds** (not a float epoch-seconds
-  `expires_at`). `account_id` is optional so legacy Codex credentials and
-  device-code providers alike can be stored; provider-specific non-secret values
-  (e.g. a GitHub Enterprise domain) live in `metadata`.
-- `ApiKeyCredential` is the trivial case: a single `key` string. (There is also
-  a raw-string form of credential, used for plain API keys stored directly by
-  name — see `FileCredentialStore` below.)
+- `OAuthCredential`(OAuth 凭证)是每种 OAuth 流程产出的结果,也是刷新返回的对象。
+  注意字段命名:`access`/`refresh`(而非 `access_token`/`refresh_token`),且
+  `expires` 是 **毫秒精度的 int**(不是浮点 epoch 秒的 `expires_at`)。`account_id`
+  为可选,以便旧的 Codex 凭证与设备码类 provider 都能被存储;provider 专属的非机密值
+  (如 GitHub Enterprise 域名)存放在 `metadata` 中。
+- `ApiKeyCredential`(API key 凭证)是最简单的情况:仅一个 `key` 字符串。(此外还有一种
+  原始字符串形式的凭证,用于直接按名称存储的纯 API key —— 见下方的 `FileCredentialStore`。)
 
 ### 1.2 `FileCredentialStore`
 
@@ -61,35 +54,28 @@ class FileCredentialStore:
     def delete(self, name: str) -> None: ...
 ```
 
-- The constructor defaults its path to `credentials_path()`, which resolves
-  `<TauPaths().home>/credentials.json`. (`TauPaths` lives in `paths.py`; the
-  older `TauResourcePaths` from `resources.py` is the richer resource layout
-  used by sessions/skills/extensions — credentials use the simpler `TauPaths`.)
-- Storage is a JSON object keyed by **provider/credential name**. A value is
-  either a raw string (a plain API key) or an object tagged `"type": "api_key"`
-  / `"oauth"`. `_credential_from_json` validates on load; malformed JSON, wrong
-  types, empty tokens, or non-positive `expires` all raise `CredentialStoreError`
-  (a `ValueError` subclass).
-- `set`/`set_api_key` store a raw string; `set_oauth`/`get_oauth` store and
-  retrieve an `OAuthCredential` (with `_validate_oauth_credential` enforcing
-  non-empty tokens, optional `account_id`, and JSON-safe `metadata`).
-- Writes are **atomic and private**: the store writes to a temp file in the same
-  directory with `0o600`, then `rename`s into place and chmods the final file
-  `0o600`. This limits credential exposure to the owning user.
-- There is **no encryption**: like Pi, Tau relies on OS file permissions. The
-  `0o600` chmod is the only confidentiality mechanism. This is a deliberate
-  decision: at-rest encryption of a local credential file would require a
-  keystore or passphrase prompt, adding friction without meaningfully raising
-  the bar above OS-level protection of the user's home directory. The threat
-  model is a non-owner reading the file, which `0o600` already defeats.
+- 构造函数默认路径为 `credentials_path()`,它会解析为 `<TauPaths().home>/credentials.json`。
+  (`TauPaths` 位于 `paths.py`;较旧的 `TauResourcePaths` 来自 `resources.py`,是供
+  sessions/skills/extensions 使用的更丰富的资源布局 —— 凭证使用更简单的 `TauPaths`。)
+- 存储是一个以 **provider/凭证名** 为键的 JSON 对象。其值要么是原始字符串(纯 API key),
+  要么是带 `"type": "api_key"` / `"oauth"` 标记的 object。`_credential_from_json` 在加载时
+  进行校验;格式错误的 JSON、类型错误、空令牌或 `expires` 非正数都会抛出
+  `CredentialStoreError`(一个 `ValueError` 子类)。
+- `set`/`set_api_key` 存储原始字符串;`set_oauth`/`get_oauth` 存储并取回一个
+  `OAuthCredential`(由 `_validate_oauth_credential` 强制要求非空令牌、可选 `account_id`
+  以及 JSON 安全的 `metadata`)。
+- 写入是 **原子的且私有的**:存储先以 `0o600` 权限写入同目录下的临时文件,然后 `rename` 到位,
+  并将最终文件 chmod 为 `0o600`。这将凭证暴露面限制为属主用户。
+- **没有加密**:与 Pi 一样,Tau 依赖操作系统文件权限。`0o600` 的 chmod 是唯一保密机制。这是
+  一个刻意的决策:对本地凭证文件做静态加密需要密钥库或口令提示,在用户家目录的 OS 级保护之上
+  并不会显著提升安全门槛,却增加了摩擦。威胁模型是"非属主读取该文件",而这已被 `0o600` 挫败。
 
 ### 1.3 How it connects
 
-`provider_config.py` (3c) and `provider_runtime.py` (3c) are the *consumers*:
-`/login` writes an `OAuthCredential` here via `set_oauth`, and
-`create_model_provider` reads it back (via the `CredentialReader` protocol) when
-building a live `ModelProvider`. Refresh flows (`oauth*.py`) return a fresh
-`OAuthCredential` that the runtime persists back through `set_oauth`.
+`provider_config.py`(3c)与 `provider_runtime.py`(3c)是 *消费方*:`/login` 通过 `set_oauth`
+在此写入一个 `OAuthCredential`,而 `create_model_provider` 在构建活动的 `ModelProvider` 时
+(经由 `CredentialReader` 协议)将其读回。刷新流程(`oauth*.py`)返回一个新的 `OAuthCredential`,
+由运行时通过 `set_oauth` 持久化回去。
 
 ---
 

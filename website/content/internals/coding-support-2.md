@@ -5,233 +5,158 @@ description: prompt_templates / reload / session_export / shell_config / update_
 
 ## `tau_coding/prompt_templates.py` — Markdown prompt templates
 
-Lets users author reusable prompt snippets as `*.md` files (in Tau's resource
-dirs or a project's `.agents/`) and invoke them as `/name [arguments]`.
+允许用户把可复用的提示片段写成 `*.md` 文件(放在 Tau 的资源目录或项目的 `.agents/` 中),并以 `/name [arguments]` 的形式调用它们。
 
-- **`_TEMPLATE_VARIABLE_RE`** — matches `{{ variable }}` placeholders.
-  `_ARGUMENT_TEMPLATE_VARIABLES = {"arguments", "args"}` — the two names that
-  expose the invocation's trailing arguments.
-- **`PromptTemplate`** (frozen, slots) — `name`, `path`, `content`,
-  `description` (from front-matter or derived from the first line).
-- **`load_prompt_templates(paths)`** — loads from every `prompts_dir`, keyed by
-  stem, last-write wins; raises `ResourceError` on any diagnostic.
-- **`load_prompt_templates_with_diagnostics(paths)`** — the non-fatal variant
-  returning `(templates, diagnostics)`; records override and duplicate-name
-  diagnostics instead of raising.
-- **`render_prompt_template(template, variables, *, missing=None)`** — substitutes
-  `{{ var }}`; by default a missing var raises `ResourceError`; pass `missing` to
-  substitute a fallback string instead (for user-facing shortcuts).
-- **`expand_prompt_template_command(text, templates)`** — the `/name args` entry
-  point: rejects `/` (slash commands), `//` (comment), and `/skill:` (skills);
-  parses name+args; renders with `arguments`/`args`; if the template has no
-  argument placeholder, the args are appended after a blank line.
-- **`_template_references_arguments`**, **`_find_prompt_template`** (case/space
-  insensitive stem match), **`_parse_prompt_template_command`** (splits on first
-  space).
-- **`_load_prompt_templates_from_dir*`** — globs `*.md`, dedupes by stem,
-  captures read/decode errors as `ResourceDiagnostic` (severity "error"), and
-  parses each file via `resources.parse_markdown_resource`.
+- **`_TEMPLATE_VARIABLE_RE`** —— 匹配 `{{ variable }}` 占位符。
+  `_ARGUMENT_TEMPLATE_VARIABLES = {"arguments", "args"}` —— 暴露调用时尾随参数的两个变量名。
+- **`PromptTemplate`**(frozen,slots)—— `name`、`path`、`content`、
+  `description`(来自 front-matter 或由首行派生)。
+- **`load_prompt_templates(paths)`** —— 从每个 `prompts_dir` 加载,以 stem 为键,后写入者优先;出现任何诊断时抛出 `ResourceError`。
+- **`load_prompt_templates_with_diagnostics(paths)`** —— 非致命变体,
+  返回 `(templates, diagnostics)`;记录覆盖与重名诊断,而不是抛出异常。
+- **`render_prompt_template(template, variables, *, missing=None)`** —— 替换
+  `{{ var }}`;默认情况下缺失变量会抛出 `ResourceError`;传入 `missing` 则用一个兜底字符串替代(用于面向用户的简写)。
+- **`expand_prompt_template_command(text, templates)`** —— `/name args` 的入口:
+  拒绝 `/`(斜杠命令)、`//`(注释)和 `/skill:`(技能);
+  解析 name+args;用 `arguments`/`args` 渲染;若模板没有参数占位符,则把 args 追加在空行之后。
+- **`_template_references_arguments`**、**`_find_prompt_template`**(大小写/空白
+  不敏感的 stem 匹配)、**`_parse_prompt_template_command`**(在第一个空格处切分)。
+- **`_load_prompt_templates_from_dir*`** —— 用 glob 匹配 `*.md`,按 stem 去重,
+  把读取/解码错误捕获为 `ResourceDiagnostic`(严重级别 "error"),并
+  通过 `resources.parse_markdown_resource` 解析每个文件。
 
-> **Why this design.** Prompt templates are a *resource discovery* concern, kept
-> apart from the command registry. They reuse the same `TauResourcePaths`
-> precedence (last-write-wins across built-in, user, and project dirs) as
-> skills/context files, so a project can ship its own `/prompts` alongside its
-> `.agents/` skills. Keeping discovery separate from the command registry means a
-> template is just another discovered resource — adding one never requires editing
-> the command table or wiring up a new slash command.
+> **设计缘由。** 提示模板是一个*资源发现*问题,与命令注册表分开。它们复用与技能/上下文文件相同的 `TauResourcePaths` 优先级(在内置、用户、项目目录间后写入者优先),因此一个项目可以把它自己的 `/prompts` 与 `.agents/` 技能一起发布。把发现与命令注册表分离,意味着模板只是另一种被发现的资源——新增一个模板永远不需要改动命令表,也不需要接入一个新的斜杠命令。
 
 ---
 
 ## `tau_coding/reload.py` — reload summary types
 
-Defines the before/after summary dataclasses returned by a local resource
-reload (`/reload`), so the UI can report exactly what changed.
+定义本地资源重载(`/reload`)返回的"前后对比"摘要数据类,以便 UI 能精确报告发生了哪些变化。
 
-- **`ReloadCategorySummary`** (frozen, slots) — `before`, `after`, `changed`,
-  with a `delta` property (`after - before`).
-- **`CodingReloadSummary`** (frozen, slots) — groups one
-  `ReloadCategorySummary` per category: `skills`, `prompt_templates`,
-  `context_files`, `extensions`, `diagnostics`, plus a `system_prompt_rebuilt`
-  flag.
+- **`ReloadCategorySummary`**(frozen,slots)—— `before`、`after`、`changed`,
+  并带一个 `delta` 属性(`after - before`)。
+- **`CodingReloadSummary`**(frozen,slots)—— 每一类聚合一个
+  `ReloadCategorySummary`:`skills`、`prompt_templates`、
+  `context_files`、`extensions`、`diagnostics`,外加一个 `system_prompt_rebuilt`
+  标志。
 
-> **Why this design.** A reload touches several independent resource systems
-> (skills, prompt templates, context files, extensions, diagnostics). Bundling
-> their before/after counts into one `CodingReloadSummary` lets the `/reload`
-> command print a single, scannable "reloaded N skills, M prompts, …" line without
-> coupling to each subsystem's internals. Each subsystem only has to report its
-> `ReloadCategorySummary` (`before`, `after`, `changed`); the command layer
-> aggregates and formats them, so adding a new reloadable resource means adding one
-> field rather than rewriting the report.
+> **设计缘由。** 一次重载会触及多个相互独立的资源系统(技能、提示模板、上下文文件、扩展、诊断)。把它们的前后计数打包进一个 `CodingReloadSummary`,使 `/reload` 命令能打印一行可快速浏览的"已重载 N 个技能、M 个提示……",而无需耦合到各子系统的内部实现。每个子系统只需报告它自己的 `ReloadCategorySummary`(`before`、`after`、`changed`);命令层负责聚合与格式化,因此新增一种可重载资源只需加一个字段,而不必重写报告逻辑。
 
 ---
 
 ## `tau_coding/session_export.py` — HTML/JSONL transcript export
 
-Renders a session tree + transcript into a self-contained HTML file (or JSONL),
-used by `tau export` and the TUI export command.
+把会话树 + 对话记录渲染为自包含的 HTML 文件(或 JSONL),供 `tau export` 与 TUI 导出命令使用。
 
-- **Errors/paths:** `SessionExportError(ValueError)`;
-  `default_session_export_path` (`<session>.html`);
-  `default_session_export_artifact_path` (in a destination dir).
-- **Writers:** `export_session_jsonl` (raw `model_dump_json` per line),
-  `export_session_html`, and `export_session_artifact` (picks format by
-  `format` arg or suffix). `normalize_export_format` accepts `html`/`htm`/`jsonl`
-  (case-insensitive, leading dot stripped); `_export_suffix` maps back.
-- **`render_session_html`** — the centerpiece: a full standalone HTML document
-  with inline `<style>` (light/dark via `prefers-color-scheme` and a
-  `data-theme` toggle persisted to `localStorage`), a sticky sidebar session
-  tree, and a transcript stream. It computes `_active_leaf_id` (last `LeafEntry`,
-  else last entry), `_active_path_ids` (via `tau_agent.session.path_to_entry`,
-  falling back to the leaf on `SessionTreeError`), and `_visible_entries`
-  (drops `LeafEntry` plumbing rows — that info is already shown by active-path
-  styling).
-- **Tree rendering:** `_render_tree` builds `children_by_parent`, finds roots,
-  and `_render_tree_chain` deliberately *flattens single-child chains* into
-  sibling `<li>`s, only nesting an `<ol>` where history actually forks — so a
-  straight-line session doesn't render one nested level per entry. Dangling
-  (unreachable) entries are grouped under an "Unreachable entries" node.
-- **Entry rendering:** `_render_entry_details` → `_render_entry_detail` (index,
-  id, parent link, timestamp, active-path/leaf badges) → `_render_entry_body`,
-  which `isinstance`-dispatches over every `SessionEntry` subtype (`MessageEntry`
-  → `_render_message_entry` with role icon, tool-call list, optional `data`/
-  `details` JSON blocks; `ModelChangeEntry`, `ThinkingLevelChangeEntry`,
-  `CompactionEntry`, `BranchSummaryEntry`, `LabelEntry`, `LeafEntry`,
-  `SessionInfoEntry`, `CustomEntry`). `_render_json_block` syntax-highlights
-  JSON via Pygments (`JsonLexer` + `HtmlFormatter`, nowrap) with a safe escaped
-  fallback.
-- **Icons:** inline SVG constants `_ICON_USER`/`_ASSISTANT`/`_TOOL`/`_BRANCH`/
-  `_LABEL`/`_INFO`/`_MODEL`/`_GENERIC`/`_SUN`/`_MOON`, chosen by `_entry_icon`
-  per entry type.
-- **Helpers:** `_entry_title`, `_entry_summary` (<=92-char single-line summary via
-  `_summarize_text`), `_entry_parent_html`, `_format_timestamp` (UTC), `_escape`
-  (`quote=False`) and `_attr` (`quote=True`) for HTML/text escaping.
+- **错误/路径:** `SessionExportError(ValueError)`;
+  `default_session_export_path`(`<session>.html`);
+  `default_session_export_artifact_path`(位于目标目录中)。
+- **写入器:** `export_session_jsonl`(每行原始 `model_dump_json`)、
+  `export_session_html`,以及 `export_session_artifact`(按
+  `format` 参数或后缀选择格式)。`normalize_export_format` 接受 `html`/`htm`/`jsonl`
+  (大小写不敏感,去掉前导点);`_export_suffix` 反向映射。
+- **`render_session_html`** —— 核心:一份完整的独立 HTML 文档,内联 `<style>`
+  (通过 `prefers-color-scheme` 与持久化到 `localStorage` 的 `data-theme` 切换实现亮/暗主题)、一个吸顶侧边栏会话树,以及一段对话流。它会计算 `_active_leaf_id`(最后一个 `LeafEntry`,否则最后一个条目)、`_active_path_ids`(通过 `tau_agent.session.path_to_entry`,在 `SessionTreeError` 时回退为叶节点),以及 `_visible_entries`
+  (丢弃 `LeafEntry` 的指针行——该信息已由活动路径样式展示)。
+- **树渲染:** `_render_tree` 构建 `children_by_parent`,找出根节点,
+  而 `_render_tree_chain` 刻意把*单一子节点链*展平为同级的 `<li>`,只在历史真正分叉时才嵌套 `<ol>`——这样一条直线式会话不会为每个条目都渲染一层嵌套。悬空(不可达)的条目被归到 "Unreachable entries" 节点下。
+- **条目渲染:** `_render_entry_details` → `_render_entry_detail`(序号、
+  id、父链接、时间戳、活动路径/叶徽标)→ `_render_entry_body`,
+  它对每个 `SessionEntry` 子类型做 `isinstance` 分发(`MessageEntry`
+  → `_render_message_entry`,含角色图标、工具调用列表、可选的 `data`/
+  `details` JSON 块;`ModelChangeEntry`、`ThinkingLevelChangeEntry`、
+  `CompactionEntry`、`BranchSummaryEntry`、`LabelEntry`、`LeafEntry`、
+  `SessionInfoEntry`、`CustomEntry`)。`_render_json_block` 通过 Pygments(`JsonLexer` + `HtmlFormatter`,nowrap)对 JSON 做语法高亮,并带安全的转义回退。
+- **图标:** 内联 SVG 常量 `_ICON_USER`/`_ASSISTANT`/`_TOOL`/`_BRANCH`/
+  `_LABEL`/`_INFO`/`_MODEL`/`_GENERIC`/`_SUN`/`_MOON`,由 `_entry_icon`
+  按条目类型选取。
+- **辅助函数:** `_entry_title`、`_entry_summary`(通过
+  `_summarize_text` 生成 ≤92 字符的单行摘要)、`_entry_parent_html`、`_format_timestamp`(UTC)、`_escape`
+  (`quote=False`) 与 `_attr`(`quote=True`),用于 HTML/文本转义。
 
-> **Why this design.** The export is a *pure function of immutable `SessionEntry`s*
-> — no `CodingSession` needed. This aligns with Tau's "Sessions are durable and
-> inspectable" principle: a session transcript is a plain, durable artifact that
-> remains readable by hand, so it can be re-rendered at any time without the
-> runtime that produced it. Both HTML and JSONL outputs are emitted — JSONL
-> preserves the raw, line-per-entry transcript (hand-inspectable and machine-
-> parseable), while HTML wraps the same entries in a self-contained, styled viewer
-> for human sharing. Purity makes the renderer trivially testable and lets
-> `tau export` run on any saved `.jsonl` offline.
+> **设计缘由。** 导出是一个*不可变 `SessionEntry` 的纯函数*——无需 `CodingSession`。这与 Tau 的"会话是持久且可检查的"(Sessions are durable and inspectable)原则一致:会话记录是一份普通、持久的产物,仍可手工阅读,因此可以在没有生成它的运行时的情况下随时重新渲染。两种输出都会生成——JSONL 保留原始的逐条记录对话(可手工检查、也可被机器解析),而 HTML 把同样的条目包进一个自包含、带样式的查看器中,便于人工分享。纯函数特性使渲染器易于测试,并让 `tau export` 能离线处理任何已保存的 `.jsonl` 文件。
 
 ---
 
 ## `tau_coding/shell_config.py` — durable shell settings
 
-Loads the single durable shell setting (a command prefix prepended to every
-shell command the agent runs) from `~/.tau/settings.json`.
+从 `~/.tau/settings.json` 加载唯一一项持久化 shell 设置(在每个 agent 运行的 shell 命令前插入的命令前缀)。
 
-- **`ShellConfigError(ValueError)`**.
-- **`ShellSettings`** (frozen, slots) — `shell_command_prefix: str | None`;
-  `to_json()` emits `{"shellCommandPrefix": …}` or `{}` when unset.
-- **`shell_settings_path`** — `~/.tau/settings.json`.
-- **`load_shell_settings`** — returns defaults if missing; raises
-  `ShellConfigError` on invalid JSON or a non-object.
-- **`shell_settings_from_json`** — accepts *either* `shellCommandPrefix` or
-  `shell_command_prefix` (never both), rejects unknown fields, and normalizes a
-  whitespace-only prefix to `None`. (The dual-name support lets older/newer
-  tooling interop; the exclusivity check prevents ambiguous configs.)
+- **`ShellConfigError(ValueError)`** —— 配置错误类型。
+- **`ShellSettings`**(frozen,slots)—— `shell_command_prefix: str | None`;
+  `to_json()` 在设置时输出 `{"shellCommandPrefix": …}`,未设置时输出 `{}`。
+- **`shell_settings_path`** —— `~/.tau/settings.json`。
+- **`load_shell_settings`** —— 文件缺失时返回默认值;JSON 非法或非对象时
+  抛出 `ShellConfigError`。
+- **`shell_settings_from_json`** —— 接受 `shellCommandPrefix` *或*
+  `shell_command_prefix` 其中之一(不能同时),拒绝未知字段,并把纯空白前缀规范化为 `None`。(双命名支持让新旧工具能互操作;排他性检查防止出现歧义配置。)
 
-> **Why this design.** Only one durable shell setting exists today, but the
-> `ShellSettings` dataclass plus the symmetric `from_json` / `to_json` shape means
-> new settings slot in as additional fields without changing callers. Persistence
-> lives in a single `~/.tau/settings.json` so the schema stays small and explicit;
-> the dual `shellCommandPrefix` / `shell_command_prefix` spelling is accepted only
-> one-at-a-time to let older and newer tooling interop without ambiguous configs.
+> **设计缘由。** 目前只有一项持久化 shell 设置,但 `ShellSettings` 数据类加上对称的 `from_json` / `to_json` 形态,意味着新增设置可以作为额外字段插入,而不必改动调用方。持久化集中存放在单个 `~/.tau/settings.json`,使 schema 保持精简且明确;`shellCommandPrefix` / `shell_command_prefix` 两种拼写每次只接受其一,以便新旧工具互操作,同时避免歧义配置。
 
 ---
 
 ## `tau_coding/update_check.py` — best-effort PyPI update check
 
-On startup, Tau may tell the user a newer version exists or surface release
-notes — but *only* as a best-effort, never-blocking notice.
+在启动时,Tau 可能会告知用户存在更新的版本或展示发布说明——但*仅*作为尽力而为、绝不阻塞的通知。
 
-- **Constants:** `PYPI_PACKAGE_NAME = "tau-ai"` (note: the published dist is
-  `tau-ai`, not `tau_coding`), `PYPI_JSON_URL`, `UPDATE_CHECK_INTERVAL =
-  timedelta(days=1)`, `UPDATE_CHECK_TIMEOUT_SECONDS = 1.5`,
-  `TAU_NO_UPDATE_CHECK` env disable, and the bundled
-  `data/release-notes/releases.json` path. `Fetcher` / `Clock` type aliases make
-  the network + time injectable for tests.
-- **Dataclasses:** `UpdateNotice` (current/latest + `message` property with the
-  `uv tool upgrade` command), `UpdateCheckResult` (cached `checked_at` +
-  `latest_version`), `ReleaseNoteSection` / `ReleaseNotesEntry` (with
-  `transcript_items` flattening), `ReleaseNotesNotice` (previous→current, with
-  `notes` and a `message` Markdown block).
+- **常量:** `PYPI_PACKAGE_NAME = "tau-ai"`(注意:发布的发行包名是
+  `tau-ai`,而非 `tau_coding`)、`PYPI_JSON_URL`、`UPDATE_CHECK_INTERVAL =
+  timedelta(days=1)`、`UPDATE_CHECK_TIMEOUT_SECONDS = 1.5`、
+  `TAU_NO_UPDATE_CHECK` 环境变量禁用开关,以及内置的
+  `data/release-notes/releases.json` 路径。`Fetcher` / `Clock` 类型别名使
+  网络与时间可注入,便于测试。
+- **数据类:** `UpdateNotice`(当前/最新版本 + 带 `uv tool upgrade` 命令的
+  `message` 属性)、`UpdateCheckResult`(缓存的 `checked_at` +
+  `latest_version`)、`ReleaseNoteSection` / `ReleaseNotesEntry`(含
+  `transcript_items` 扁平化)、`ReleaseNotesNotice`(上一版本→当前版本,含
+  `notes` 与一条 `message` Markdown 块)。
 - **`startup_update_notice(current_version, *, fetcher, cache_path, now, env)`**
-  — returns an `UpdateNotice` only if PyPI has a strictly newer *stable* version.
-  Skips when disabled (`_update_check_disabled`: `TAU_NO_UPDATE_CHECK` truthy or
-  `CI` set), uses a 1-day cache, swallows *all* network/JSON/version errors
-  (every failure path is a quiet `None`/`return None`) so startup never blocks.
+  —— 仅当 PyPI 存在严格更新的*稳定*版本时才返回 `UpdateNotice`。
+  禁用时跳过(`_update_check_disabled`:`TAU_NO_UPDATE_CHECK` 为真或
+  设置了 `CI`),使用 1 天缓存,吞掉*所有*网络/JSON/版本错误
+  (每个失败路径都安静地返回 `None`),因此启动永不阻塞。
 - **`startup_release_notes_notice(current_version, *, state_path, release_notes)`**
-  — on the first run it only records the version (no banner on fresh install);
-  on later runs it diffs against the stored `last_seen_version` and returns
-  `ReleaseNotesNotice` for entries between the two versions. All I/O failures are
-  quiet no-ops.
-- **`load_release_notes` / `release_notes_between`** — parse the bundled JSON
-  and select entries with `previous < parsed <= current` (sorted).
-- **`fetch_latest_pypi_version(*, fetcher)`** — prefers the max *stable* version
-  from the `releases` map (skipping prereleases/devreleases and empty file
-  lists), falling back to `info.version` when filtered out.
-- **Cache/state I/O:** `_cached_update_check_result` (honors the 1-day interval),
-  `_write_update_check_cache` / `_write_release_notes_state` (mkdir + write,
-  `OSError` swallowed), `_read_last_seen_version`. `_stable_release_versions`
-  filters pre/dev releases; `_httpx_fetch_json` wraps `tau_ai.http.get_json`.
-- **`_update_check_disabled(env)`** — treats any non-empty, non-false
-  `TAU_NO_UPDATE_CHECK` as disabled, and always disables under `CI`.
-- **`_utc_now`** — injectable clock default.
+  —— 首次运行时只记录版本(新装不弹横幅);
+  后续运行时与存储的 `last_seen_version` 做差,并返回介于两个版本之间的
+  `ReleaseNotesNotice`。所有 I/O 失败都是安静的无操作。
+- **`load_release_notes` / `release_notes_between`** —— 解析内置 JSON,
+  并选取满足 `previous < parsed <= current` 的条目(已排序)。
+- **`fetch_latest_pypi_version(*, fetcher)`** —— 优先取 `releases` 映射中最大的*稳定*版本(跳过预发布/dev 发布及空文件列表),过滤后为空时回退到 `info.version`。
+- **缓存/状态 I/O:** `_cached_update_check_result`(遵守 1 天间隔)、
+  `_write_update_check_cache` / `_write_release_notes_state`(建目录 + 写入,
+  `OSError` 被吞掉)、`_read_last_seen_version`。`_stable_release_versions`
+  过滤预/dev 发布;`_httpx_fetch_json` 封装 `tau_ai.http.get_json`。
+- **`_update_check_disabled(env)`** —— 把任何非空、非假的
+  `TAU_NO_UPDATE_CHECK` 视为已禁用,并且在 `CI` 下始终禁用。
+- **`_utc_now`** —— 可注入的时钟默认值。
 
-> **Why this design.** The *entire* module is written so that any failure
-> (network error, cache corruption, bad version string, missing file) degrades to
-> "say nothing" — every failure path returns `None` quietly. This is the only
-> acceptable behavior for a startup-time network call: an update check must never
-> block startup, slow down launch, or surface errors to the user when the network
-> or PyPI is unavailable. The 1-day cache and the `TAU_NO_UPDATE_CHECK` / `CI`
-> disable switches keep the network touch rare and fully opt-out, reinforcing the
-> best-effort contract.
+> **设计缘由。** 整个模块被写成:任何失败(网络错误、缓存损坏、版本字符串非法、文件缺失)都会降级为"什么都不说"——每个失败路径都安静地返回 `None`。这是启动期网络调用唯一可接受的行为:更新检查绝不能在启动时阻塞、拖慢启动,或在网络或 PyPI 不可用时向用户暴露错误。1 天缓存以及 `TAU_NO_UPDATE_CHECK` / `CI` 禁用开关,使网络触碰变得罕见且完全可退出,从而强化了尽力而为的契约。
 
 ---
 
 ## `tau_coding/version.py` — version helper
 
-A four-line module, but worth naming explicitly since everything above imports
-it.
+一个只有四行的模块,但值得显式命名,因为上面所有模块都导入它。
 
-- **`_DISTRIBUTION_NAME = "tau-ai"`** — the *published* distribution name (the
-  `tau_coding` import package is not what `importlib.metadata` reports).
-- **`_UNKNOWN_VERSION = "0+unknown"`**.
-- **`current_version()`** — returns `version("tau-ai")` from package metadata,
-  or `_UNKNOWN_VERSION` if the distribution isn't installed (e.g. running from a
-  source checkout). Used by `update_check.py` and the CLI `--version`.
+- **`_DISTRIBUTION_NAME = "tau-ai"`** —— *已发布*的发行包名(`tau_coding` 导入包并不是 `importlib.metadata` 报告的对象)。
+- **`_UNKNOWN_VERSION = "0+unknown"`** —— 未安装时的兜底版本。
+- **`current_version()`** —— 从包元数据返回 `version("tau-ai")`;若发行包未安装(例如从源码 checkout 运行),则返回 `_UNKNOWN_VERSION`。被 `update_check.py` 与 CLI 的 `--version` 使用。
 
-> **Why this design.** Centralizing the distribution name (`tau-ai`) and the
-> `_UNKNOWN_VERSION` fallback here means the update checker, the CLI, and any
-> "about" UI all report one consistent version string. The installed distribution
-> is `tau-ai` (not the `tau_coding` import package), so an uninstalled source
-> checkout reports `0+unknown` instead of crashing — `current_version()` is the
-> single source of the version that `update_check.py` compares against.
+> **设计缘由。** 在此处集中管理发行包名(`tau-ai`)与 `_UNKNOWN_VERSION` 兜底值,意味着更新检查器、CLI 以及任何"关于"UI 都报告同一个一致的版本字符串。已安装的发行包是 `tau-ai`(而非 `tau_coding` 导入包),因此未安装的源码 checkout 会报告 `0+unknown` 而不是崩溃——`current_version()` 是 `update_check.py` 用来比较的版本唯一来源。
 
 ---
 
 ## How 3f fits the picture
 
-- `thinking.py` — the shared vocabulary every provider/catalog/session layer
-  uses for reasoning effort.
-- `catalog_loader.py` — turns TOML data into validated `ProviderCatalogEntry`s;
-  the source of truth for which providers/models exist.
-- `branch_summary.py` — model-assisted context recovery when switching branches.
-- `diagnostics.py` / `version.py` / `update_check.py` — operational
-  observability + self-update, all best-effort and secret-free.
-- `prompt_templates.py` / `reload.py` / `shell_config.py` — user-facing resource
-  and settings systems, discovered through `TauResourcePaths` / `TauPaths`.
-- `session_export.py` — a pure renderer from immutable `SessionEntry`s to shareable
-  HTML/JSONL.
+- `thinking.py` —— 每个 provider/catalog/session 层都用来表达推理强度的共享词汇表。
+- `catalog_loader.py` —— 把 TOML 数据转换为经校验的 `ProviderCatalogEntry`s;是哪些 provider/model 存在的唯一事实来源。
+- `branch_summary.py` —— 分支切换时由模型辅助的上下文恢复。
+- `diagnostics.py` / `version.py` / `update_check.py` —— 运行可观测性 + 自我更新,全部为尽力而为、且无密钥。
+- `prompt_templates.py` / `reload.py` / `shell_config.py` —— 面向用户的资源与设置系统,通过 `TauResourcePaths` / `TauPaths` 发现。
+- `session_export.py` —— 从不可变 `SessionEntry`s 到可分享 HTML/JSONL 的纯渲染器。
 
-Next: **Part 3g** covers the rendering layer (`rendering/base.py`,
-`rendering/transcript.py`) and the extension base (`extensions/base.py`) — the
-pieces that turn session state into screen output and let third-party code plug
-into Tau.
+下一步:**第 3g 部分** 将涵盖渲染层(`rendering/base.py`、
+`rendering/transcript.py`)与扩展基类(`extensions/base.py`)——它们把会话状态转换为屏幕输出,并让第三方代码接入 Tau。
 
 ## 逐方法深度剖析（prompt_templates / reload / session_export / shell_config / update_check / version）
 

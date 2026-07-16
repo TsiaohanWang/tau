@@ -3,9 +3,7 @@ title: Architecture overview
 description: How Tau is split into three layers — and why that boundary is the whole point.
 ---
 
-Tau is deliberately small and layered. The most important design idea is a
-**boundary**: the reusable agent "brain" knows nothing about terminals, file
-paths, or rendering. Everything app-specific wraps around it.
+Tau 在设计上有意保持精简且分层。最重要的设计理念是一道**边界**:可复用的智能体"大脑"对终端、文件路径或渲染一无所知。所有与应用相关的部分都包裹在它外围。
 
 ## Three packages
 
@@ -15,29 +13,22 @@ tau_coding  →  tau_agent  →  tau_ai
 
 ### `tau_ai` — talking to models
 
-Owns provider-specific model streaming. It translates each provider's API
-(OpenAI, Anthropic, …) into Tau's **provider-neutral event stream**, so nothing
-above it has to care which model vendor is in use.
+负责与提供方相关的模型流式传输。它把各提供方(OpenAI、Anthropic 等)的 API 转换为 Tau 的**提供方无关事件流**,因而其上层无需关心当前使用的是哪家模型厂商。
 
 ### `tau_agent` — the portable brain
 
-Owns the reusable agent core: messages, tools, events, the
-[agent loop]({{< relref "./agent-loop.md" >}}), the harness, and session primitives. This package
-must **not** import CLI, Rich, Textual, or resource-loading code. That's what
-keeps it portable.
+负责可复用的智能体核心:消息、工具、事件、[agent loop]({{< relref "./agent-loop.md" >}})、harness 与会话原语。该包**禁止**引入 CLI、Rich、Textual 或资源加载代码。这正是它保持可移植的原因。
 
 ### `tau_coding` — the coding application
 
-Owns everything that makes Tau a *coding agent you run*: the CLI, the built-in
-[tools]({{< relref "../reference/tools.md" >}}), [project instructions]({{< relref "../guides/project-instructions.md" >}}),
-[skills and prompts]({{< relref "../guides/skills-and-prompts.md" >}}),
-[sessions on disk]({{< relref "../guides/sessions.md" >}}), provider configuration, and the
-Textual TUI.
+负责让 Tau 成为"你运行的编码智能体"的一切:CLI、内置[工具]({{< relref "../reference/tools.md" >}})、[项目指令]({{< relref "../guides/project-instructions.md" >}})、
+[技能与提示]({{< relref "../guides/skills-and-prompts.md" >}})、
+[磁盘上的会话]({{< relref "../guides/sessions.md" >}})、提供方配置,以及
+Textual TUI。
 
 ## Dependency direction
 
-Dependencies only point one way: `tau_coding → tau_agent → tau_ai`. UI code
-*consumes* events; the core never reaches up to render anything. In one line:
+依赖只指向一个方向:`tau_coding → tau_agent → tau_ai`。UI 代码*消费*事件;核心绝不向上伸手去渲染任何东西。简言之:
 
 ```text
 AgentHarness = reusable brain
@@ -47,41 +38,27 @@ TUI = one possible frontend
 
 ## Why the boundary matters
 
-Because the core is UI-free, the same agent can drive print mode, the Textual
-TUI, or a frontend you build yourself — all by consuming the same event stream.
-That's also what makes Tau readable: each layer answers one question, and you can
-study it without untangling the others.
+因为核心是 UI 无关的,同一个智能体可以驱动打印模式、Textual TUI,或你自己构建的前端——全都通过消费同一条事件流实现。这也正是 Tau 易于阅读的原因:每一层只回答一个问题,你可以单独研究它而无需理清其他层。
 
-These are not incidental choices. The project states its design principles
-explicitly in the repository README, and they are the contract every layer below
-obeys:
+这些并非偶然的选择。项目在仓库 README 中明确列出了其设计原则,它们是下层每一层都必须遵守的契约:
 
-> - **Small layers beat magic.** Each package has one job and can be read alone.
-> - **Events are the contract.** Providers, renderers, the TUI, and custom
->   frontends meet at a typed event stream.
-> - **The core stays portable.** The reusable harness does not depend on the CLI,
->   Textual, Rich, or Tau's file layout.
-> - **Tools are ordinary typed functions.** A tool is a schema plus an async
->   executor returning a structured result.
-> - **Sessions are durable and inspectable.** History is append-only JSONL;
->   active context can be compacted without rewriting the record.
+> - **小层胜于魔法。** 每个包只做一件事,且可单独阅读。
+> - **事件即契约。** 提供方、渲染器、TUI 与自定义前端在一个有类型的事件流处相遇。
+> - **核心保持可移植。** 可复用的 harness 不依赖 CLI、Textual、Rich 或 Tau 的文件布局。
+> - **工具就是普通的类型化函数。** 一个工具是一份 schema 加上一个返回结构化结果的异步执行器。
+> - **会话持久且可检视。** 历史是只追加的 JSONL;活动上下文可以被压缩而无须重写记录。
 >
-> — Tau README, "Design principles"
+> — Tau README,"Design principles"
 
-This is why `tau_agent` is forbidden from importing Textual or Rich, why the
-provider stream is a *neutral* event vocabulary rather than vendor-shaped
-objects, and why `CodingSession` (not `AgentHarness`) is where slash commands and
-file tools live. The boundary is the feature; everything else is its consequence.
+这正是 `tau_agent` 被禁止引入 Textual 或 Rich 的原因,也是提供方流是一套*中性*事件词汇而非厂商形态对象的原因,更是 `CodingSession`(而非 `AgentHarness`)承载斜杠命令与文件工具的原因。边界本身就是特性;其余一切都是它的结果。
 
  → Next: [The agent loop & events]({{< relref "./agent-loop.md" >}}) ·
  [Design principles]({{< relref "./design-principles.md" >}}) ·
  [Build your own frontend]({{< relref "./custom-frontend.md" >}})
 
- For a file-by-file, bottom-up dissection of every module (derived from reading
- the source), start at the
- [Source code walkthrough]({{< relref "./source-walkthrough.md" >}}).
+ 若想对每个模块进行逐文件、自下而上的剖析(基于阅读源码得出),请从
+ [Source code walkthrough]({{< relref "./source-walkthrough.md" >}}) 开始。
 
 {{% note title="Going deeper" %}}
-The phase-by-phase build journals, design docs, and ADRs live in the repo under
-`dev-notes/` (not on this site). See [Contributing]({{< relref "../contributing.md" >}}).
+逐阶段的构建日志、设计文档与 ADR 存放在仓库的 `dev-notes/` 目录下(不在本网站)。参见 [Contributing]({{< relref "../contributing.md" >}})。
 {{% /note %}}

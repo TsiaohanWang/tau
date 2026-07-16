@@ -3,189 +3,121 @@ title: tau_coding · TUI 状态与适配
 description: tui/state / adapter / config / autocomplete
 ---
 
-## `tui/state.py` — the transcript model
+## `tui/state.py` — transcript（转录/对话流）模型
 
 ### `ChatItemRole`
 
-A `Literal` of the kinds of block the transcript can show: `user`, `assistant`,
-`tool`, `error`, `status`, `thinking`, `skill`, `branch_summary`,
-`compaction_summary`, `custom`. Each is rendered with a role-specific border
-color (see `config.py` themes).
+一个 `Literal`（字面量类型别名），枚举转录区（transcript）能展示的各类块：`user`、`assistant`、`tool`、`error`、`status`、`thinking`、`skill`、`branch_summary`、`compaction_summary`、`custom`。每种角色都以专属的边框颜色渲染（颜色见 `config.py` 中的主题定义）。
 
-### Constants
+### 常量（Constants）
 
-Preview/UX tunables: `TOOL_RESULT_PREVIEW_LINES`, `TOOL_PATCH_PREVIEW_LINES`,
-`TOOL_RESULT_PREVIEW_CHARS`, `TERMINAL_COMMAND_OUTPUT_PREVIEW_LINES`, the
-`TOOL_SPINNER_FRAMES` (braille spinner), `_INVOCATION_MARKERS` (`"→ "`, `"▸ "`)
-the spinner temporarily replaces, and `TOOL_TIMER_MIN_SECONDS` (don't flash a
-`(0s)` timer on instant tool calls).
+用于预览/交互体验的微调参数：`TOOL_RESULT_PREVIEW_LINES`、`TOOL_PATCH_PREVIEW_LINES`、`TOOL_RESULT_PREVIEW_CHARS`、`TERMINAL_COMMAND_OUTPUT_PREVIEW_LINES`、`TOOL_SPINNER_FRAMES`（盲文旋转动画帧），以及 `_INVOCATION_MARKERS`（`"→ "`、`"▸ "`，工具执行时会被旋转帧临时替换），还有 `TOOL_TIMER_MIN_SECONDS`（避免对瞬时完成的工具调用闪烁 `(0s)` 计时器）。
 
-### `ChatItem` (dataclass, `slots=True`)
+### `ChatItem`（dataclass 数据类，`slots=True`）
 
-One rendered transcript row. Key fields:
+一条可渲染的转录行。关键字段如下：
 
-- `role`, `text` — the block kind and primary text.
-- `tool_call_id` — links a tool call to its result/updates.
-- `tool_result_text`, `tool_result` — the formatted result *and* the raw
-  `AgentToolResult`, kept so a registered `render_result` can re-format lazily.
-- `update_text` — live progress while a tool runs.
-- `tool_name`, `tool_arguments` — for the `render_call` hook.
-- `started_at` — monotonic timestamp (for the elapsed timer).
-- `always_show_tool_result`, `custom_type`, `details`.
+- `role`、`text` — 块类型与主要文本。
+- `tool_call_id` — 把一次工具调用与其结果/更新关联起来。
+- `tool_result_text`、`tool_result` — 格式化后的结果*与*原始 `AgentToolResult` 对象，二者都保留，以便已注册的 `render_result` 能进行懒格式化。
+- `update_text` — 工具运行期间的实时进度。
+- `tool_name`、`tool_arguments` — 供 `render_call` 钩子使用。
+- `started_at` — 单调时间戳（用于经过时长计时器）。
+- `always_show_tool_result`、`custom_type`、`details`。
 
-### `TuiState` (dataclass, `slots=True`)
+### `TuiState`（dataclass 数据类，`slots=True`）
 
-The mutable display state for one TUI session:
+单个 TUI 会话的可变展示状态：
 
-- `items: list[ChatItem]`, `assistant_buffer` (accumulates streamed text before
-  it is flushed into a final `assistant` item).
-- `running`, `error`, `show_tool_results`, `show_thinking`.
-- `queued_steering`, `queued_follow_up` — pending messages (from
-  `QueueUpdateEvent`).
-- `skills` — for presentation-only path matching (a `read` of a skill file is
-  shown as a "skill" item).
-- custom/tool renderers (`custom_renderer`, `tool_call_renderer`,
-  `tool_result_renderer`) — installed by the extension runtime.
-- `tool_spinner` — current spinner frame.
+- `items: list[ChatItem]`、`assistant_buffer`（流式文本在刷入最终 `assistant` 条目之前的累积缓冲）。
+- `running`、`error`、`show_tool_results`、`show_thinking`。
+- `queued_steering`、`queued_follow_up` — 待处理消息（来自 `QueueUpdateEvent`）。
+- `skills` — 仅供展示用的路径匹配（读取某个技能文件会显示为一个 "skill" 条目）。
+- 自定义/工具渲染器（`custom_renderer`、`tool_call_renderer`、`tool_result_renderer`）— 由扩展运行时安装。
+- `tool_spinner` — 当前的旋转动画帧。
 
-Important methods:
+重要方法：
 
-- `add_item`, `add_user_message` — `add_user_message` is smart: it recognizes
-  branch-summary and compaction-summary payloads (via `_parse_branch_summary_message`
-  / `_parse_compaction_summary_message`) and skill invocations, storing them as
-  their own item kinds so they render specially (and stay collapsible).
-- `add_tool_call` — appends a collapsed tool-call item, or a `skill` item when
-  the `read` targets a loaded skill path (`_read_skill_name`).
-- `record_tool_update` / `record_tool_result` — attach progress / results to
-  the matching tool item by `tool_call_id`, or append an orphan result.
-- `add_thinking_delta` — append reasoning fragments to a `thinking` block.
+- `add_item`、`add_user_message` — `add_user_message` 很智能：它能识别分支摘要和压缩摘要载荷（通过 `_parse_branch_summary_message` / `_parse_compaction_summary_message`）以及技能调用，把它们作为各自独立的条目类型存储，从而以特殊方式渲染（并且保持可折叠）。
+- `add_tool_call` — 追加一个折叠的工具调用条目；或者当 `read` 指向某个已加载的技能路径（`_read_skill_name`）时，追加一个 `skill` 条目。
+- `record_tool_update` / `record_tool_result` — 通过 `tool_call_id` 把进度/结果挂到匹配的工具条目上，否则追加一个孤儿（orphan）结果。
+- `add_thinking_delta` — 把推理碎片追加到一个 `thinking` 块中。
 - `resolve_tool_invocation` / `resolve_tool_result` / `resolve_custom_markup` —
-  lazily call the installed renderers at draw time; while a tool is still
-  running (`tool_spinner` set), the spinner frame replaces the static marker and
-  an elapsed time is shown after `TOOL_TIMER_MIN_SECONDS`.
-- `toggle_tool_results`, `toggle_thinking`, `update_queue`, `queued_message_count`,
-  `clear`, `set_skills`, `load_messages` (rebuild the transcript from restored
-  `AgentMessage`s), `find_tool_item`.
+  在绘制时懒调用已安装的渲染器；当工具仍在运行（`tool_spinner` 已设置）时，旋转帧会替换静态标记，并在超过 `TOOL_TIMER_MIN_SECONDS` 后显示经过时长。
+- `toggle_tool_results`、`toggle_thinking`、`update_queue`、`queued_message_count`、`clear`、`set_skills`、`load_messages`（从恢复的 `AgentMessage` 重建转录）、`find_tool_item`。
 
-### Formatting helpers
+### 格式化辅助函数
 
-- `format_elapsed` — terse `23s` / `1m 23s` / `1h 2m`.
-- `apply_tool_spinner`, `format_tool_call_block` / `format_tool_call_invocation`
-  — terse, tool-specific invocations (`read path:1-20`, `$ command`,
-  `edit path`). `bash` shows `$ command` without the `→` marker.
-- `format_tool_result_block` / `format_tool_result_summary` — renders the result,
-  with a collapsed preview (`_preview_text`) and an edit-patch preview
-  (`_result_patch`).
-- `format_terminal_command_result_block` — formats `!!` terminal-command output
-  for the transcript.
+- `format_elapsed` — 紧凑时长 `23s` / `1m 23s` / `1h 2m`。
+- `apply_tool_spinner`、`format_tool_call_block` / `format_tool_call_invocation`
+  — 紧凑、工具专属的调用串（`read path:1-20`、`$ command`、`edit path`）。`bash` 显示 `$ command` 时不含 `→` 标记。
+- `format_tool_result_block` / `format_tool_result_summary` — 渲染结果，带折叠预览（`_preview_text`）和编辑补丁预览（`_result_patch`）。
+- `format_terminal_command_result_block` — 为转录区格式化 `!!` 终端命令输出。
 
-> Design note: the state module is pure data + formatting, with no Textual
-> imports. This is deliberate, not incidental — it keeps the model independent of
-> any UI framework so it can be unit-tested and reused from any frontend. The
-> boundary also enforces Tau's layering rule that the portable core must not
-> depend on Textual or Rich: `state.py` describes *what to display*, and only
-> `app.py` knows about the widget layer. Because the view is a read-only
-> projection of this model (see the widgets page), re-rendering on every event
-> never duplicates formatting logic. This mirrors the Tau README design
-> principles — "The core stays portable" and "Events are the contract": the
-> event stream mutates `TuiState`, and views consume that state rather than the
-> events directly.
+> 设计说明（Design note）：state 模块是纯数据 + 格式化，不导入任何 Textual。这是刻意为之，而非偶然——它让模型独立于任何 UI 框架，从而能被单元测试、也能被任意前端复用。这个边界同时强制执行了 Tau 的分层规则：可移植核心不得依赖 Textual 或 Rich：`state.py` 只描述"要显示什么"，只有 `app.py` 才了解 widget 层。因为视图是这个模型的只读投影（见 widgets 页面），每次事件都重新渲染、却从不重复格式化逻辑。这也印证了 Tau README 的设计原则——"核心保持可移植（The core stays portable）"与"事件即契约（Events are the contract）"：事件流修改 `TuiState`，而视图消费的是这个状态，而非事件本身。
 
 ---
 
-## `tui/adapter.py` — events → state
+## `tui/adapter.py` — 事件 → 状态
 
-`TuiEventAdapter` is the sole boundary that maps `AgentEvent`s onto `TuiState`.
-Its `apply(event)` is a single `isinstance` dispatch over the event hierarchy:
+`TuiEventAdapter` 是把 `AgentEvent` 映射到 `TuiState` 的唯一边界。它的 `apply(event)` 是对事件继承体系的一次 `isinstance` 分发：
 
-- `AgentStartEvent` → `running = True`, clear error.
-- `AgentEndEvent` → flush assistant buffer, `running = False`.
-- `MessageStartEvent` → reset `assistant_buffer` for an assistant turn.
-- `MessageDeltaEvent` → append to `assistant_buffer`.
-- `ThinkingDeltaEvent` → `add_thinking_delta`.
-- `QueueUpdateEvent` → `update_queue`.
-- `MessageEndEvent` → if `user`, `add_user_message`; if `tool`, ignore (the
-  harness already recorded it via `ToolExecutionEndEvent`); otherwise flush the
-  assistant buffer into an `assistant` item.
-- `ToolExecutionStartEvent` → flush buffer, `add_tool_call`.
-- `ToolExecutionUpdateEvent` → `record_tool_update`.
-- `RetryEvent` → a transient `status` item.
-- `ToolExecutionEndEvent` → `record_tool_result`.
-- `ErrorEvent` → flush, mark error/cancellation; non-recoverable stops `running`.
+- `AgentStartEvent` → `running = True`，清空错误。
+- `AgentEndEvent` → 刷新 assistant 缓冲区，`running = False`。
+- `MessageStartEvent` → 为一次 assistant 轮次重置 `assistant_buffer`。
+- `MessageDeltaEvent` → 追加到 `assistant_buffer`。
+- `ThinkingDeltaEvent` → `add_thinking_delta`。
+- `QueueUpdateEvent` → `update_queue`。
+- `MessageEndEvent` → 若为 `user`，则 `add_user_message`；若为 `tool`，则忽略（harness 已通过 `ToolExecutionEndEvent` 记录过它）；否则把 assistant 缓冲区刷入一个 `assistant` 条目。
+- `ToolExecutionStartEvent` → 刷新缓冲区，`add_tool_call`。
+- `ToolExecutionUpdateEvent` → `record_tool_update`。
+- `RetryEvent` → 一个瞬时的 `status` 条目。
+- `ToolExecutionEndEvent` → `record_tool_result`。
+- `ErrorEvent` → 刷新、标记错误/取消；不可恢复的会停止 `running`。
 
-`_flush_assistant_buffer` pushes any accumulated streamed text into a final
-assistant item. This separation means the *same* adapter could feed any view;
-only `app.py` knows about Textual. The adapter is the single boundary that maps
-`tau_agent`'s portable `AgentEvent` stream onto `TuiState`, so the event→state
-translation is fully decoupled from any rendering concern ("Small layers beat
-magic" — the adapter does one job and does it behind a narrow interface).
+`_flush_assistant_buffer` 把任何已累积的流式文本推进一个最终的 assistant 条目。这种分离意味着*同一个*适配器可以驱动任意视图；只有 `app.py` 才了解 Textual。适配器是把 `tau_agent` 可移植的 `AgentEvent` 流映射到 `TuiState` 的唯一边界，因此事件→状态的翻译与任何渲染关注点完全解耦（"薄层胜过魔法（Small layers beat magic）"——适配器只做一件事，且在一个窄接口背后完成）。
 
 ---
 
-## `tui/config.py` — durable TUI settings
+## `tui/config.py` — 持久化的 TUI 设置
 
-### `TuiKeybindings` (frozen)
+### `TuiKeybindings`（frozen 冻结）
 
-Every key the TUI uses, with defaults: `cancel=escape`, `command_palette=ctrl+k`,
-`session_picker=ctrl+r`, `queue_follow_up=alt+enter`, `accept_completion=tab`,
-`thinking_cycle=shift+tab`, `model_cycle=ctrl+p`, `toggle_thinking=ctrl+t`,
-`toggle_tool_results=ctrl+o`, `copy_message=ctrl+c`, `quit=ctrl+d`, plus
-`completion_next/previous` (up/down). `to_json` serializes them.
+TUI 使用的每一个按键及其默认值：`cancel=escape`、`command_palette=ctrl+k`、`session_picker=ctrl+r`、`queue_follow_up=alt+enter`、`accept_completion=tab`、`thinking_cycle=shift+tab`、`model_cycle=ctrl+p`、`toggle_thinking=ctrl+t`、`toggle_tool_results=ctrl+o`、`copy_message=ctrl+c`、`quit=ctrl+d`，外加 `completion_next/previous`（上/下）。`to_json` 将其序列化。
 
-### `TuiThemeName` and `TuiRoleStyle`
+### `TuiThemeName` 与 `TuiRoleStyle`
 
-`TuiThemeName = "tau-dark" | "tau-light" | "high-contrast"`. `TuiRoleStyle`
-is just `border` + `body` colors for one transcript role.
+`TuiThemeName = "tau-dark" | "tau-light" | "high-contrast"`。`TuiRoleStyle` 只是一个角色的 `border`（边框）色 + `body`（正文）色。
 
-### `TuiTheme` (frozen)
+### `TuiTheme`（frozen 冻结）
 
-A fully-resolved palette: screen/chrome/sidebar/transcript/prompt colors,
-autocomplete, accent, markdown colors, completion colors, `syntax_theme`, and
-`role_styles` (one `TuiRoleStyle` per role). Three concrete instances are
-defined: `TAU_DARK_THEME`, `TAU_LIGHT_THEME`, `HIGH_CONTRAST_THEME`, collected
-in `_THEMES` and exposed via `get_tui_theme` / `BUILTIN_TUI_THEME_NAMES`.
+一个完全解析好的调色板：屏幕/边框/侧栏/转录区/提示框 颜色，自动补全色、强调色、markdown 颜色、补全色、`syntax_theme` 语法主题，以及 `role_styles`（每个角色一个 `TuiRoleStyle`）。定义了三个具体实例：`TAU_DARK_THEME`、`TAU_LIGHT_THEME`、`HIGH_CONTRAST_THEME`，收集在 `_THEMES` 中，并通过 `get_tui_theme` / `BUILTIN_TUI_THEME_NAMES` 暴露。
 
-### `TuiSettings` (frozen)
+### `TuiSettings`（frozen 冻结）
 
-`keybindings`, `theme` (name, resolved via `resolved_theme`),
-`auto_copy_selection`, `sidebar_position` (`left`/`right`/`off`). Persisted at
-`tui.json` via `load_tui_settings` / `save_tui_settings` /
-`tui_settings_from_json`. Parsing validates allowed fields, rejects duplicate
-keybindings (`_reject_duplicate_keys`), and rejects unknown themes.
+`keybindings`、`theme`（主题名，经 `resolved_theme` 解析）、`auto_copy_selection`（选中自动复制）、`sidebar_position`（`left`/`right`/`off`）。经 `load_tui_settings` / `save_tui_settings` / `tui_settings_from_json` 持久化到 `tui.json`。解析时会校验允许的字段、拒绝重复的键位绑定（`_reject_duplicate_keys`）、并拒绝未知主题。
 
 ---
 
-## `tui/autocomplete.py` — prompt completions
+## `tui/autocomplete.py` — 提示符自动补全
 
-### Data types
+### 数据类型
 
-- `CompletionOption(value, description)` — an argument value.
+- `CompletionOption(value, description)` — 一个参数值。
 - `CompletionItem(display, replacement, start, end, description, category)` —
-  one suggestion; `apply(text)` splices `replacement` into the prompt.
-- `CompletionState(items, selected_index)` — the current suggestion set with
-  `select_next` / `select_previous` (wrapping) and a `selected` property.
+  一条建议；`apply(text)` 把 `replacement` 拼接到提示文本中。
+- `CompletionState(items, selected_index)` — 当前建议集合，带 `select_next` / `select_previous`（环形）以及 `selected` 属性。
 
 ### `build_completion_state(text, ...)`
 
-The entry point. Given the current prompt text and the universe of commands,
-skills, prompt templates, model/provider/thinking/theme/session names, and the
-cwd, it returns the relevant `CompletionState`:
+入口函数。给定当前提示文本，以及全部命令、技能、提示模板、模型/provider/思考级别/主题/会话名，还有 cwd，它返回相关的 `CompletionState`：
 
-- If the text is not a `/` command (and not `//`), it offers file-reference
-  (`@path`) completions and, inside a `!`/`!!` shell command, shell path
-  completions (`_shell_path_completions`). Ignored dirs
-  (`IGNORED_FILE_COMPLETION_DIRS`) and `MAX_FILE_COMPLETIONS` bound the scan.
-- For `/skill:…` it completes skill names.
-- For a known command with an argument, `_command_argument_completions` supplies
-  values: `/model` & `/scoped-models` → model names; `/login` & `/logout` →
-  provider names; `/resume` → session ids; `/theme` → theme names.
-- Otherwise it completes command names (`_command_completions`) and prompt
-  template names, sorted by prefix match.
+- 若文本不是 `/` 命令（也不是 `//`），它提供文件引用（`@path`）补全；在 `!`/`!!` shell 命令内部时，提供 shell 路径补全（`_shell_path_completions`）。忽略的目录（`IGNORED_FILE_COMPLETION_DIRS`）与 `MAX_FILE_COMPLETIONS` 限制了扫描范围。
+- 对 `/skill:…`，补全技能名。
+- 对带参数的已知命令，`_command_argument_completions` 提供取值：`/model` 与 `/scoped-models` → 模型名；`/login` 与 `/logout` → provider 名；`/resume` → 会话 id；`/theme` → 主题名。
+- 否则补全命令名（`_command_completions`）与提示模板名，按前缀匹配排序。
 
-The remaining helpers (`_file_reference_completions`, `_shell_path_completions`,
-`_command_alias_completions`, `_value_completions`, `_completion_options`,
-`*_token_end`) are pure string logic; the function returns an immutable
-`CompletionState` the app renders.
+其余辅助函数（`_file_reference_completions`、`_shell_path_completions`、`_command_alias_completions`、`_value_completions`、`_completion_options`、`*_token_end`）都是纯字符串逻辑；该函数返回一个不可变的 `CompletionState` 供 app 渲染。
 
 ---
 

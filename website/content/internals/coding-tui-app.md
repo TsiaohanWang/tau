@@ -3,321 +3,208 @@ title: tau_coding · TUI 界面与控件
 description: tui/app / widgets / terminal_title
 ---
 
-## `tui/app.py` — the Textual app
+## `tui/app.py` — Textual 应用
 
-This is the largest file in `tau_coding` (5741 lines). It contains the
-`TauTuiApp` class plus a fleet of `ModalScreen` subclasses for every picker and
-dialog. It imports and orchestrates two substantial sibling modules covered
-separately (see `tui/widgets.py` and `tui/terminal_title.py` below). `app.py` is
-covered in layers.
+这是 `tau_coding` 中最大的文件（5741 行）。它包含 `TauTuiApp` 类，以及一大堆用于各种选择器和对话框的 `ModalScreen`（模态屏幕）子类。它还导入并编排两个较大的兄弟模块（分别在下面的 `tui/widgets.py` 与 `tui/terminal_title.py` 中单独讲解）。`app.py` 按层次讲解。
 
-### Module constants & small classes
+### 模块常量与小类
 
-- `LoginRequiredProvider` — a stub `ModelProvider` used so the TUI can open
-  *before* any credentials exist; its `stream_response` immediately yields a
-  `ProviderErrorEvent` prompting login.
-- `RESERVED_EXTENSION_INTERCEPTOR_KEYS = {"ctrl+c", "ctrl+d"}` — keys an
-  extension key interceptor is never consulted for, so a buggy interceptor
-  cannot swallow the hard quit/interrupt reflexes.
+- `LoginRequiredProvider` — 一个桩（stub）`ModelProvider`，用于在*任何凭据都不存在之前*就能打开 TUI；它的 `stream_response` 会立即产出一条 `ProviderErrorEvent` 以提示登录。
+- `RESERVED_EXTENSION_INTERCEPTOR_KEYS = {"ctrl+c", "ctrl+d"}` — 扩展按键拦截器永远不会被咨询的按键，这样即使拦截器有 bug，也无法吞掉硬退出/中断的本能反应。
 
-### `_TuiExtensionUiBridge` and the component seam
+### `_TuiExtensionUiBridge` 与组件接缝（component seam）
 
-`_TuiExtensionUiBridge` implements the extension `UiBridge` protocol against the
-live app: `notify`, `select`/`confirm`/`input` (each pushing a modal
-`Extension*Screen` and awaiting dismissal via `_run_dialog`), `set_slot_widget`
-(`_set_extension_slot_widget`), `open_main_view` (`_open_extension_main_view`),
-`register_key_interceptor` (`_register_extension_key_interceptor`),
-`request_render`, `clear_components`, and `get_prompt_text`. `_run_dialog`
-uses `push_screen(screen, callback)` + an `asyncio.Future` so it works from any
-coroutine (not just a Textual worker).
+`_TuiExtensionUiBridge` 针对正在运行的应用实现了扩展的 `UiBridge` 协议：`notify`，`select`/`confirm`/`input`（每个都推入一个模态 `Extension*Screen` 并通过 `_run_dialog` 等待关闭），`set_slot_widget`（`_set_extension_slot_widget`），`open_main_view`（`_open_extension_main_view`），`register_key_interceptor`（`_register_extension_key_interceptor`），`request_render`、`clear_components`，以及 `get_prompt_text`。`_run_dialog` 使用 `push_screen(screen, callback)` + 一个 `asyncio.Future`，从而能在任意协程（而不只是 Textual worker）中工作。
 
-`_MainViewHandle` / `_DeadMainViewHandle` manage an extension-owned main-area
-view: `close(result)` is idempotent and resolves `wait()` exactly once; every
-other teardown path (reload, quarantine, superseded view) resolves `wait()`
-with `None` so an awaiting extension task never hangs.
+`_MainViewHandle` / `_DeadMainViewHandle` 管理一个由扩展拥有的主区域视图：`close(result)` 是幂等的，且恰好把 `wait()` 解析一次；所有其他拆除路径（重载、隔离、被取代的视图）都以 `None` 解析 `wait()`，从而让等待中的扩展任务永不挂起。
 
-The "component seam" is the host-side machinery for mounting extension widgets
-into fixed slots (`#above-prompt-slot`, `#below-prompt-slot`, `#main-slot`):
-`_set_extension_slot_widget` → `_reconcile_slot`, `_open_extension_main_view` →
-`_reconcile_main_view`, `_close_extension_main_view`, `_refresh_extension_components`,
-`_clear_extension_components`, and `_quarantine_extension_widget` (which
-isolates a crashing extension widget so it can't take down the TUI, recording a
-per-component failure once via `_record_extension_component_failure`). Swaps run
-on serialized async continuations (`_schedule_extension_swap`) so same-id
-mounts/unmounts never collide with `DuplicateIds`.
+"组件接缝"是把扩展 widget 挂载到固定槽位（`#above-prompt-slot`、`#below-prompt-slot`、`#main-slot`）的主机侧机制：`_set_extension_slot_widget` → `_reconcile_slot`，`_open_extension_main_view` → `_reconcile_main_view`，`_close_extension_main_view`，`_refresh_extension_components`，`_clear_extension_components`，以及 `_quarantine_extension_widget`（它会隔离一个正在崩溃的扩展 widget，使其无法拖垮整个 TUI，并通过 `_record_extension_component_failure` 对每个组件只记录一次失败）。槽位的交换运行在串行化的异步延续（`_schedule_extension_swap`）上，因此相同 id 的挂载/卸载永远不会与 `DuplicateIds` 冲突。
 
-### `PromptInput` (TextArea subclass)
+### `PromptInput`（`TextArea` 子类）
 
-The multiline prompt editor. It:
+多行提示编辑器。它：
 
-- Applies prompt bindings from `TuiKeybindings`, switching footer mode between
-  `normal` / `completion` / `running`.
-- Defines `value`/`cursor_position` compatibility aliases over `TextArea`.
-- Routes submission/cancellation/completion keys in `on_key`, delegating to the
-  app via `_completion_target()` (the `CompletionActionTarget` protocol).
-- Handles large pastes by showing a compact placeholder and storing the real
-  text (`_show_large_paste_placeholder`, `text_for_submission` expands it back).
-- `on_paste` suppresses rendering of pastes over `PASTE_DISPLAY_THRESHOLD`
-  characters.
+- 应用来自 `TuiKeybindings` 的提示键位，在 `normal` / `completion` / `running` 之间切换 footer 模式。
+- 在 `TextArea` 之上定义 `value`/`cursor_position` 兼容别名。
+- 在 `on_key` 中路由提交/取消/补全按键，通过 `_completion_target()`（即 `CompletionActionTarget` 协议）委托给应用。
+- 通过显示紧凑占位符并存储真实文本来处理大型粘贴（`_show_large_paste_placeholder`，`text_for_submission` 再将其还原）。
+- `on_paste` 会抑制超过 `PASTE_DISPLAY_THRESHOLD` 字符的粘贴渲染。
 
-### Modal screens
+### 模态屏幕（Modal screens）
 
-A consistent family of `ModalScreen` subclasses, each composing a `ListView` +
-title + help and routing arrow/enter/escape keys to the list:
+一系列风格一致的 `ModalScreen` 子类，每个都由 `ListView` + 标题 + 帮助文本组成，并把方向键/回车/转义键路由到列表：
 
 - `ExtensionSelectScreen` / `ExtensionConfirmScreen` / `ExtensionInputScreen` —
-  back `context.ui.select` / `confirm` / `input`.
-- `SessionPickerScreen` — pick an indexed session to resume.
-- `TreePickerScreen` — branch from a past session entry; `Enter` branches,
-  `S` summarizes, `C` custom summary, `Ctrl+T` toggles tool-call visibility.
-  `BranchSummaryInstructionsScreen` collects custom summarization instructions.
-- `CommandOutputScreen` — dismissible slash-command output.
-- `LoginProviderPickerScreen` (with `LoginProviderSearchInput`) — searchable
-  provider list for `/login`.
-- `LoginMethodPickerScreen` / `LoginMethodListView` — choose subscription /
-  API key / custom provider.
-- `ThemePickerScreen` — pick a built-in theme.
-- `ModelPickerScreen` (with `ModelPickerSearchInput`) — pick a model or toggle
-  scoped-model membership; `Tab` switches all↔scoped.
-- `CustomProviderLoginScreen` — collect fields for an OpenAI-compatible custom
-  provider (`CustomProviderLoginResult`).
-- `LoginScreen` — paste an API key.
-- `OAuthLoginScreen` — drives the OAuth flow via `OAuthLoginCallbacks`
-  (auth URL, device code, manual code input future).
+  分别对应 `context.ui.select` / `confirm` / `input`。
+- `SessionPickerScreen` — 选取一个已索引的会话以恢复。
+- `TreePickerScreen` — 从过去的会话条目分支；`Enter` 分支，`S` 生成摘要，`C` 自定义摘要，`Ctrl+T` 切换工具调用的可见性。
+  `BranchSummaryInstructionsScreen` 收集自定义摘要指令。
+- `CommandOutputScreen` — 可关闭的斜杠命令输出。
+- `LoginProviderPickerScreen`（带 `LoginProviderSearchInput`）— 可搜索的 provider 列表，用于 `/login`。
+- `LoginMethodPickerScreen` / `LoginMethodListView` — 选择订阅 / API key / 自定义 provider。
+- `ThemePickerScreen` — 选择一个内置主题。
+- `ModelPickerScreen`（带 `ModelPickerSearchInput`）— 选择一个模型或切换 scoped 模型的成员资格；`Tab` 在 all↔scoped 之间切换。
+- `CustomProviderLoginScreen` — 收集一个 OpenAI 兼容自定义 provider 的字段（`CustomProviderLoginResult`）。
+- `LoginScreen` — 粘贴 API key。
+- `OAuthLoginScreen` — 通过 `OAuthLoginCallbacks`（auth URL、设备码、手动输入码的 future）驱动 OAuth 流程。
 
-All share the same navigation idiom: a `ListView` focused on mount, arrow keys
-stopped and redirected to list actions, `enter`/`select` dismisses with the
-chosen value.
+它们都共享相同的导航习惯：挂载时聚焦 `ListView`，方向键被拦截并重定向到列表动作，`enter`/`select` 带着所选值关闭。
 
 ### `TauTuiApp(App[None])`
 
-The main application.
+主应用。
 
-**Construction & layout.** `__init__` takes a `CodingSession` plus
-`tui_settings`, startup messages/notices, and an optional `initial_prompt`. It:
+**构造与布局。** `__init__` 接收一个 `CodingSession`，外加 `tui_settings`、启动消息/通知，以及一个可选的 `initial_prompt`。它会：
 
-- registers Tau themes with Textual (`_register_tau_textual_themes`),
-- installs app bindings from `tui_settings.keybindings` (`_app_bindings`),
-- seeds `TuiState` from the session's messages
-  (`_load_session_messages_from_session`),
-- creates the `TuiEventAdapter`,
-- sets up the extension-seam tracking dicts and connects the extension runtime
-  (`_connect_extension_runtime`),
-- initializes the activity indicator, terminal-title controller, completion
-  state, etc.
+- 用 Textual 注册 Tau 主题（`_register_tau_textual_themes`），
+- 从 `tui_settings.keybindings` 安装应用级绑定（`_app_bindings`），
+- 从会话的消息中为 `TuiState` 播种
+  （`_load_session_messages_from_session`），
+- 创建 `TuiEventAdapter`，
+- 设置扩展接缝追踪字典并连接扩展运行时
+  （`_connect_extension_runtime`），
+- 初始化活动指示器、终端标题控制器、补全状态等。
 
-`compose()` lays out (in a `Horizontal` workspace) the `SessionSidebar`,
-`main-pane` (`TranscriptView`, the three extension slots, `queued-messages`,
-`prompt-row` with `PromptInput`, `CompactSessionInfo`), the `autocomplete`
-widget, and `Footer`. The large inline `CSS` string wires every theme variable
-(`$tau-…`) to the layout, including the extension mount points.
+`compose()` 布局（在 `Horizontal` 工作区内）包含 `SessionSidebar`、
+`main-pane`（`TranscriptView`、三个扩展槽位、`queued-messages`、
+带有 `PromptInput` 的 `prompt-row`、`CompactSessionInfo`）、`autocomplete`
+widget，以及 `Footer`。那段庞大的内联 `CSS` 字符串把每个主题变量
+（`$tau-…`）连接到布局上，包括扩展挂载点。
 
-**Lifecycle.** `on_mount` focuses the prompt, applies responsive layout and
-sidebar position, refreshes chrome, emits any pending session-start
-(`session.emit_pending_session_start`), and submits the `initial_prompt` if
-present. `on_unmount` stops the activity timer, restores the terminal title,
-and clears extension components. `on_resize` updates responsive chrome.
+**生命周期。** `on_mount` 聚焦提示框，应用响应式布局和侧栏位置，刷新 chrome，发出任何待处理的会话启动
+（`session.emit_pending_session_start`），并在有 `initial_prompt` 时提交它。
+`on_unmount` 停止活动计时器、还原终端标题，并清除扩展组件。`on_resize` 更新响应式 chrome。
 
-**Key routing.** `on_event` consults extension key interceptors *before* Textual
-dispatch (porting Pi's `onTerminalInput`), but skips the reserved
-`ctrl+c`/`ctrl+d` keys and never fires while a modal is on the stack. Each
-`action_*` method implements a binding: `action_submit_prompt`,
-`action_submit_follow_up`, `action_cancel`, `action_accept_completion`,
-`action_completion_next/previous`, `action_open_command_palette`,
-`action_open_session_picker`, `action_cycle_thinking`, `action_cycle_model`,
-`action_toggle_tool_results`, `action_toggle_thinking`, `action_edit_queued_message`,
-`action_recall_previous_prompt`, `action_quit`.
+**按键路由。** `on_event` 在 Textual 派发*之前*咨询扩展按键拦截器（移植自 Pi 的 `onTerminalInput`），但会跳过保留的
+`ctrl+c`/`ctrl+d` 按键，且当模态屏幕压在栈上时绝不会触发。每个
+`action_*` 方法实现一种绑定：`action_submit_prompt`、
+`action_submit_follow_up`、`action_cancel`、`action_accept_completion`、
+`action_completion_next/previous`、`action_open_command_palette`、
+`action_open_session_picker`、`action_cycle_thinking`、`action_cycle_model`、
+`action_toggle_tool_results`、`action_toggle_thinking`、`action_edit_queued_message`、
+`action_recall_previous_prompt`、`action_quit`。
 
-**Submitting a prompt — the run loop.** `_submit_prompt_from_editor` reads the
-prompt, applies any selected completion, and then:
+**提交提示 — 运行循环。** `_submit_prompt_from_editor` 读取提示，应用任何已选中的补全，然后：
 
-1. If a compaction is active, it defers.
-2. If the text is a terminal command (`parse_terminal_command`), it runs
-   `_run_terminal_command`.
-3. Otherwise it calls `session.handle_command(text)`. If `handled`, it performs
-   the requested side effects (clear, reload, new session, compact, export,
-   resume, open pickers, login/logout, model/theme/thinking changes) and shows
-   the command's message.
-4. If the session is already `running`, it remembers the prompt and queues it
-   (`_queue_prompt`).
-5. Otherwise it remembers the prompt and calls `_submit_prompt(text)`.
+1. 如果压缩（compaction）正在活动，则推迟。
+2. 如果文本是一个终端命令（`parse_terminal_command`），则运行
+   `_run_terminal_command`。
+3. 否则调用 `session.handle_command(text)`。如果 `handled`，则执行请求的副作用（清除、重载、新建会话、压缩、导出、恢复、打开选择器、登录/登出、模型/主题/思考级别变更）并显示该命令的消息。
+4. 如果会话已经在 `running`，则记住提示并将其排入队列
+   （`_queue_prompt`）。
+5. 否则记住提示并调用 `_submit_prompt(text)`。
 
-`_submit_prompt` increments a `_prompt_run_id` (so a newer run can supersede an
-old one), optionally renders the user message *optimistically*
-(`_append_optimistic_user_message`, matched later by
-`_consume_optimistic_user_event` / `_replace_transformed_optimistic_user_message`),
-and launches the `_run_prompt` coroutine as a Textual worker (`exclusive=True`).
+`_submit_prompt` 递增一个 `_prompt_run_id`（以便更新的运行可以取代旧的运行），可选地*乐观地*渲染用户消息
+（`_append_optimistic_user_message`，稍后由
+`_consume_optimistic_user_event` / `_replace_transformed_optimistic_user_message` 匹配），
+并把 `_run_prompt` 协程作为 Textual worker 启动（`exclusive=True`）。
 
-`_run_prompt` is the streaming loop:
+`_run_prompt` 是流式循环：
 
 ```python
 async for event in self.session.prompt(text, source=..., custom_type=..., details=...):
     if active_run_id != self._prompt_run_id:
-        return                       # superseded by a newer run
-    if self._consume_optimistic_user_event(...):  # dup of our own optimistic msg
+        return                       # 被更新的运行取代
+    if self._consume_optimistic_user_event(...):  # 我们自己的乐观消息的副本
         continue
     if self._replace_transformed_optimistic_user_message(...):
         continue
     if not (_is_user_message_end_event(event) and self.screen_stack):
-        self.adapter.apply(event)   # update TuiState
+        self.adapter.apply(event)   # 更新 TuiState
     await self._apply_streaming_transcript_event(event)
 ```
 
-Each event is first applied to `TuiState` via the adapter, then reflected onto
-the *mounted* transcript widgets by `_apply_streaming_transcript_event` —
-appending assistant deltas, thinking deltas, tool-call/result items, finishing
-the assistant message, and refreshing chrome. This two-step design (state then
-view) keeps the model pure and the view a projection of it: the adapter is the
-only writer of `TuiState`, while `_apply_streaming_transcript_event` only reads
-state to update widgets, so the event→state→view pipeline can be reasoned about
-and tested in isolation.
+每个事件先经由适配器应用到 `TuiState`，再由 `_apply_streaming_transcript_event` 反映到*已挂载的*转录 widget 上——
+追加 assistant 增量、思考增量、工具调用/结果条目，结束 assistant 消息，并刷新 chrome。这种两步设计（先状态、后视图）让模型保持纯净、视图成为它的投影：适配器是 `TuiState` 的唯一写入者，而 `_apply_streaming_transcript_event` 只读取状态来更新 widget，因此事件→状态→视图的管线可以被独立推理和测试。
 
-**Extension delivery.** An extension can request a turn via
-`_on_extension_turn_requested` → `_deliver_extension_message`, which either
-queues the message (if a run is active) or submits it through the normal path.
+**扩展交付。** 扩展可以通过
+`_on_extension_turn_requested` → `_deliver_extension_message` 请求一轮，它要么（在运行活动时）把消息排入队列，要么通过正常路径提交它。
 
-**Chrome & activity.** `_refresh` / `_refresh_chrome` repaint the sidebar,
-header subtitle, queued-message strip, and footer. `_tick_activity` /
-`_sync_activity_indicator` / `_apply_activity_indicator` animate a spinner
-while a run is in flight. `_refresh_completions` builds the autocomplete window
-from `_build_completion_state`.
+**Chrome 与活动。** `_refresh` / `_refresh_chrome` 重绘侧栏、header 副标题、排队消息条和 footer。`_tick_activity` /
+`_sync_activity_indicator` / `_apply_activity_indicator` 在运行进行中动画一个旋转器。
+`_refresh_completions` 从 `_build_completion_state` 构建补全窗口。
 
-**Pickers & login.** The many `_open_*` / `_handle_*_result` methods wire each
-modal screen to a session or provider action: session picker → `_resume_session`,
-tree picker → `_branch_to_tree_entry`, model picker → `session.set_model`,
-thinking cycle → `_cycle_thinking_level`, theme picker → `_set_tui_theme`,
-login picker → `_open_login` (API key via `LoginScreen`, OAuth via
-`OAuthLoginScreen`, custom via `CustomProviderLoginScreen`), logout picker →
-`_logout`. Cancel/compaction paths (`action_cancel`, `_cancel_active_prompt`,
-`_cancel_active_compaction`) stop the worker and notify.
+**选择器与登录。** 众多 `_open_*` / `_handle_*_result` 方法把每个模态屏幕接线到一个会话或 provider 动作：会话选择器 → `_resume_session`，
+树选择器 → `_branch_to_tree_entry`，模型选择器 → `session.set_model`，
+思考级别循环 → `_cycle_thinking_level`，主题选择器 → `_set_tui_theme`，
+登录选择器 → `_open_login`（API key 经 `LoginScreen`，OAuth 经
+`OAuthLoginScreen`，自定义经 `CustomProviderLoginScreen`），登出选择器 →
+`_logout`。取消/压缩路径（`action_cancel`、`_cancel_active_prompt`、
+`_cancel_active_compaction`）停止 worker 并通知。
 
-> Design note: the TUI's defining architectural choice is that it owns **no
-> agent logic**. Every decision — what a command does, how to branch, which
-> model, whether to compact — is delegated to `CodingSession` (Part 3b). The TUI
-> only translates events → widgets and widgets → commands. This boundary is not
-> a stylistic preference but a load-bearing constraint inherited from Tau's
-> architecture: `TUI = one possible frontend`, and "The core stays portable…
-> Frontends consume events" (Tau README). The agent harness in `tau_agent`
-> emits portable `AgentEvent`s and must remain free of Textual, Rich, and any
-> UI concern, so that the same harness can drive the print renderer, the JSON
-> renderer, or this Textual frontend interchangeably. Concretely, `app.py`
-> calls `CodingSession` methods and consumes the `AgentEvent` stream; it never
-> re-implements branching, model selection, or compaction. The Textual
-> framework (https://textual.textualize.io/) is chosen as the interactive
-> frontend precisely because its `ModalScreen`/`Widget` composition model lets
-> the TUI stay a thin projection layer: pickers, dialogs, and the transcript are
-> all widgets that render from `TuiState`, never from embedded agent logic.
+> 设计说明（Design note）：TUI 标志性的架构选择是它**不拥有任何 agent 逻辑**。每一个决策——命令做什么、如何分支、选哪个模型、是否压缩——都委派给 `CodingSession`（3b 部分）。TUI 只把事件→widget 以及 widget→命令进行翻译。这个边界不是风格偏好，而是继承自 Tau 架构的承重约束：`TUI = 一种可能的前端（one possible frontend）`，且"核心保持可移植……前端消费事件（The core stays portable…Frontends consume events）"（Tau README）。`tau_agent` 中的 agent harness 发出可移植的 `AgentEvent`，且必须保持不受 Textual、Rich 以及任何 UI 关注点的影响，这样同一个 harness 才能互换地驱动 print 渲染器、JSON 渲染器，或这个 Textual 前端。具体来说，`app.py` 调用 `CodingSession` 方法并消费 `AgentEvent` 流；它从不重新实现分支、模型选择或压缩。之所以选择 Textual 框架（https://textual.textualize.io/）作为交互式前端，正是因为它的 `ModalScreen`/`Widget` 组合模型让 TUI 保持为一个薄投影层：选择器、对话框和转录区都是渲染自 `TuiState` 的 widget，而从不来自内嵌的 agent 逻辑。
 
 ---
 
-## `tui/widgets.py` — the transcript & sidebar widgets
+## `tui/widgets.py` — 转录区与侧栏 widget
 
-The views that actually paint the conversation live here (1744 lines). `app.py`
-builds its layout by importing `TranscriptView`, `SessionSidebar`,
-`CompactSessionInfo`, and the `render_*` helpers. The module is split into
-**widgets** (Textual `Widget` subclasses) and **pure render functions** (take a
-`ChatItem`/`TuiState` + `TuiTheme`, return Rich renderables — no Textual state).
+真正绘制对话的视图都在这里（1744 行）。`app.py` 通过导入 `TranscriptView`、`SessionSidebar`、
+`CompactSessionInfo` 以及 `render_*` 辅助函数来构建它的布局。该模块被拆分为**widget**（Textual `Widget` 的子类）和**纯渲染函数**（接收一个
+`ChatItem`/`TuiState` + `TuiTheme`，返回 Rich 可渲染对象——不含任何 Textual 状态）。
 
-### Widgets
+### Widget
 
-- `TranscriptLine` (dataclass): a single renderable line paired with its
-  selection source, so the TUI can copy a clean text span rather than styled
-  markup.
-- `SessionSummarySource` (Protocol): the minimal session view the sidebar needs
-  (`cwd`, `model`, context usage, thinking level, git branch) — keeps the sidebar
-  decoupled from `CodingSession`.
-- `SessionSidebar(Static)`: the left rail. Painted by `render_session_sidebar`,
-  showing session title, model, thinking level, context-window usage bar, and
-  git branch (`_git_branch` shells out to `git rev-parse`).
-- `CompactSessionInfo(Static)`: the slim header line above the transcript
-  (`render_compact_session_info`), summarizing the same metadata compactly.
+- `TranscriptLine`（dataclass）：一行可渲染文本，配上它的选区来源，这样 TUI 就能复制干净的文本片段，而非带样式的 markup。
+- `SessionSummarySource`（Protocol）：侧栏所需的最小会话视图（`cwd`、`model`、上下文用量、思考级别、git 分支）——使侧栏与 `CodingSession` 解耦。
+- `SessionSidebar(Static)`：左侧栏。由 `render_session_sidebar` 绘制，显示会话标题、模型、思考级别、上下文窗口用量条，以及 git 分支（`_git_branch` 通过 shell 调用 `git rev-parse`）。
+- `CompactSessionInfo(Static)`：转录区上方纤细的 header 行（`render_compact_session_info`），紧凑地汇总相同的元数据。
 - `TauMarkdownBlock` / `ThemedMarkdownWidget` / `ThemedMarkdown` /
-  `ThemedCodeBlock` / `LeftAlignedMarkdownHeading`: a Markdown stack overridden to
-  honor the active `TuiTheme` (syntax-highlight style via `_markdown_theme`,
-  `_markdown_highlight_style`, `_markdown_inline_code_style`). This is how code
-  blocks and headings pick up theme colors.
-- `TranscriptMessageWidget(Horizontal)`: one assistant/user/tool message row.
-  Composes the role gutter, the markdown body, and tool-call/tool-result blocks.
-  Handles the "toggle tool results/thinking" collapse state and selection
-  styling.
-- `StreamingTranscriptMessageWidget(ThemedMarkdownWidget)`: the live message
-  currently being generated; re-renders deltas as they arrive and shows the
-  spinner/`apply_tool_spinner` placeholder while a tool runs.
-- `TranscriptView(VerticalScroll)`: the scrollable transcript container. Its
-  `mount`/`update` path calls `_transcript_widget(...)` to turn each `ChatItem`
-  into the right widget, appends streaming widgets, and auto-scrolls. Helper
-  `_last_transcript_child_is_hidden_thinking_placeholder` suppresses a dangling
-  "thinking…" placeholder once real content arrives.
+  `ThemedCodeBlock` / `LeftAlignedMarkdownHeading`：一套被覆写以遵循活动 `TuiTheme` 的 Markdown 栈（语法高亮风格经由 `_markdown_theme`、
+  `_markdown_highlight_style`、`_markdown_inline_code_style`）。代码块和标题正是借此拾取主题颜色。
+- `TranscriptMessageWidget(Horizontal)`：一行 assistant/user/tool 消息。组合角色槽（gutter）、markdown 正文，以及工具调用/工具结果块。
+  处理"切换工具结果/思考"的折叠状态与选中样式。
+- `StreamingTranscriptMessageWidget(ThemedMarkdownWidget)`：当前正在生成的实时消息；
+  在增量到达时重新渲染，并在工具运行期间显示旋转器 / `apply_tool_spinner` 占位符。
+- `TranscriptView(VerticalScroll)`：可滚动的转录容器。它的
+  `mount`/`update` 路径调用 `_transcript_widget(...)` 把每个 `ChatItem`
+  变成正确的 widget，追加流式 widget，并自动滚动。辅助函数
+  `_last_transcript_child_is_hidden_thinking_placeholder` 会在真实内容到达后抑制悬空的
+  "thinking…" 占位符。
 
-### Pure render helpers (the contract between `state.py` and the widgets)
+### 纯渲染辅助函数（`state.py` 与 widget 之间的契约）
 
-- `render_chat_item(item, *, theme)` → the Rich renderable for one `ChatItem`;
-  dispatches by role via `_chat_item_role_style` / `_tool_accent_style` /
-  `_tool_success_style` / `_tool_error_style`.
-- `_render_chat_body` / `_render_patch_body`: render assistant text vs. an
-  edit/write diff; `_render_tool_chat_body` + `_render_tool_invocation` format a
-  tool row (bash shows `$ command` via `_split_tool_invocation`).
+- `render_chat_item(item, *, theme)` → 一个 `ChatItem` 的 Rich 可渲染对象；
+  通过 `_chat_item_role_style` / `_tool_accent_style` /
+  `_tool_success_style` / `_tool_error_style` 按角色分派。
+- `_render_chat_body` / `_render_patch_body`：渲染 assistant 文本 vs. 一个
+  edit/write 的 diff；`_render_tool_chat_body` + `_render_tool_invocation` 格式化
+  一行工具（bash 经 `_split_tool_invocation` 显示 `$ command`）。
 - `_use_plain_transcript_body` / `_transcript_plain_body_text` /
-  `_plain_markdown` / `_escape_plain_markdown_line`: when a theme or message has
-  no markdown, fall back to plain text so copy/selection stays clean.
+  `_plain_markdown` / `_escape_plain_markdown_line`：当主题或消息没有 markdown 时，回退到纯文本，使复制/选区保持干净。
 - `_extract_text_selection` / `_clip_selection_to_text` /
-  `_clip_selection_offset`: map a Textual screen selection back to the clean
-  source text range for copy.
-- `_custom_markup_to_text` / `_custom_selection_text` / `_custom_body_renderable`:
-  render extension `custom_message` items through their registered
-  `MessageRenderer`.
-- `render_completion_suggestions(items, ...)`: turns the `CompletionState` from
-  `autocomplete.py` into the suggestion popover (`_bullet_list`, `_short_path`).
+  `_clip_selection_offset`：把一个 Textual 屏幕选区映射回干净的源文本范围以便复制。
+- `_custom_markup_to_text` / `_custom_selection_text` / `_custom_body_renderable`：
+  通过它们已注册的 `MessageRenderer` 渲染扩展的 `custom_message` 条目。
+- `render_completion_suggestions(items, ...)`：把来自
+  `autocomplete.py` 的 `CompletionState` 变成建议弹出层（`_bullet_list`、`_short_path`）。
 - `_context_usage` / `_compact_token_count` / `_context_file_labels` /
-  `_context_file_label` / `_thinking_level` / `_git_branch`: sidebar/compact
-  derivations.
-- `_markdown_theme` / `_fenced_*`: theme-aware fenced-code highlighting.
-- `_has_unclosed_fence` / `_fence_language` / `_syntax_language`: detect and
-  label unterminated code fences (so a half-streamed block still renders).
+  `_context_file_label` / `_thinking_level` / `_git_branch`：侧栏/紧凑视图的派生量。
+- `_markdown_theme` / `_fenced_*`：主题感知的围栏代码高亮。
+- `_has_unclosed_fence` / `_fence_language` / `_syntax_language`：检测并标注未闭合的代码围栏（这样半个流式的块仍能渲染）。
 
-> Design note: keeping `render_*` as pure functions means the widget layer never
-> reaches into `TuiState` mutable fields directly — `state.py` owns the model,
-> these functions only read it. This stateless, read-only projection is what
-> lets the TUI re-render on every event without duplicating formatting logic,
-> and it is the practical consequence of the event→state→view two-phase design:
-> events mutate the model (via the adapter), the view is derived from the model.
-> Because the renderers are pure (input: a `ChatItem`/`TuiState` + `TuiTheme`;
-> output: a Rich renderable), they are independently testable and reusable by
-> both the interactive transcript and any other consumer of `TuiState`.
+> 设计说明（Design note）：把 `render_*` 保持为纯函数，意味着 widget 层绝不直接触及 `TuiState` 的可变字段——`state.py` 拥有模型，这些函数只读取它。这种无状态、只读的投影，正是让 TUI 能在每次事件时重新渲染而不重复格式化逻辑的原因，而它也是事件→状态→视图两阶段设计在实践上的产物：事件（经由适配器）修改模型，视图从模型派生。因为这些渲染器是纯的（输入：一个 `ChatItem`/`TuiState` + `TuiTheme`；输出：一个 Rich 可渲染对象），它们可以被独立测试，也能被交互式转录区和 `TuiState` 的任何其他消费者复用。
 
-## `tui/terminal_title.py` — terminal tab-title control
+## `tui/terminal_title.py` — 终端标签页标题控制
 
-A tiny self-contained module that animates the terminal window/tab title while
-Tau runs (e.g. `⠋ τ | my-session`). It is pure stdlib + `os`/`sys` (no Textual
-dependency) so it can be unit-tested and reused.
+一个微小的自包含模块，在 Tau 运行时为终端窗口/标签页标题做动画（例如 `⠋ τ | my-session`）。它是纯标准库 + `os`/`sys`（无 Textual 依赖），因此可被单元测试和复用。
 
-- `MAX_TERMINAL_TITLE_LENGTH = 120`, `OSC_TERMINATOR = "\a"`,
-  `TAU_TITLE_MARK = "τ"`, `RUNNING_TITLE_FRAMES` (10 braille spinner frames).
-- `terminal_title_supported(*, environ, stream)` — feature-detect: off when
-  `TAU_TERMINAL_TITLE` is `0/false/no/off`, when stdout is not a TTY, when
-  `TERM=dumb`, or under `CI` unless `TAU_TERMINAL_TITLE=1`.
-- `sanitize_terminal_title(value, *, max_length)` — strip OSC-breaking control
-  bytes (`_CONTROL_CHARS_RE`), trim, and truncate with a `…` (never emit a
-  control char that would break the OSC sequence).
-- `build_terminal_title(session_title, *, running, frame)` — assemble
-  `τ | <title>` (or just `τ` for an untitled session), prefixing the spinner
-  frame while running.
-- `osc_terminal_title_sequence(title)` — wrap the sanitized title in an
-  OSC 0 (`\x1b]0;…\a`) sequence.
-- `TerminalTitleController` — stateful writer that (a) only emits when
-  `terminal_title_supported`, (b) **skips duplicate** titles
-  (`_last_title` guard), and (c) disables itself permanently if a write raises
-  (`_write` swallows `OSError`/`ValueError`). `update(...)` writes the current
-  title; `restore()` resets to the neutral `τ` idle mark on shutdown.
+- `MAX_TERMINAL_TITLE_LENGTH = 120`、`OSC_TERMINATOR = "\a"`、
+  `TAU_TITLE_MARK = "τ"`、`RUNNING_TITLE_FRAMES`（10 个盲文旋转帧）。
+- `terminal_title_supported(*, environ, stream)` — 特性探测：当
+  `TAU_TERMINAL_TITLE` 为 `0/false/no/off`、当 stdout 不是 TTY、当
+  `TERM=dumb`，或在 `CI` 下（除非 `TAU_TERMINAL_TITLE=1`）时关闭。
+- `sanitize_terminal_title(value, *, max_length)` — 去除破坏 OSC 的控制字节
+  （`_CONTROL_CHARS_RE`），裁剪，并用 `…` 截断（绝不发出会破坏 OSC 序列的控制字符）。
+- `build_terminal_title(session_title, *, running, frame)` — 拼装
+  `τ | <title>`（无标题会话则仅为 `τ`），运行时在前面加旋转帧。
+- `osc_terminal_title_sequence(title)` — 把清洗后的标题包进一个
+  OSC 0（`\x1b]0;…\a`）序列。
+- `TerminalTitleController` — 一个有状态的写入器：(a) 仅在
+  `terminal_title_supported` 时发出，(b) **跳过重复**标题
+  （`_last_title` 守卫），(c) 若写入抛错则永久自我禁用
+  （`_write` 吞掉 `OSError`/`ValueError`）。`update(...)` 写入当前标题；`restore()` 在关闭时重置为中性、空闲的 `τ` 标记。
 
-> Design note: the controller's "write-on-change + self-disable-on-error" policy
-> keeps title updates cheap (no flicker, no redundant escape sequences) and safe
-> in environments where OSC writes are unsupported or noisy. The `_last_title`
-> guard prevents re-emitting an identical escape sequence on every activity tick,
-> and the permanent self-disable on `OSError`/`ValueError` means a broken or
-> unsupported terminal can never turn a cosmetic title update into a crash —
-> consistent with the module's deliberate lack of any Textual dependency, so it
-> remains unit-testable as pure stdlib.
+> 设计说明（Design note）：控制器的"有变化才写 + 出错即自我禁用"策略，让标题更新开销很低（无闪烁、无冗余转义序列），并且在 OSC 写入不受支持或嘈杂的环境中也很安全。`_last_title` 守卫防止在每次活动 tick 时重发相同的转义序列，而一旦 `OSError`/`ValueError` 就永久自我禁用，意味着一个损坏或不被支持的终端永远无法把一次装饰性的标题更新变成崩溃——这与该模块刻意不依赖任何 Textual 一致，因此它能作为纯标准库保持可单元测试。
 
 ## 逐方法深度剖析(app.py)
 

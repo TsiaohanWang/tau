@@ -5,33 +5,27 @@ description: extensions/ 包与 __init__
 
 ## 5. `extensions/` — the extension system
 
-This is the most architecturally interesting part of `tau_coding`. It lets
-third-party code hook into the agent at runtime without forking Tau. It is split
-into three files mirroring "API contract", "discovery/loading", and
-"runtime dispatch".
+这是 `tau_coding` 中架构上最有趣的部分。它让第三方代码无需 fork Tau 即可在运行时挂接到 agent。它
+被拆分为三个文件,分别对应"API 契约"、"发现/加载"和"运行时分派"。
 
 ### 5.1 `extensions/__init__.py`
 
-Pure re-exports so callers can do `from tau_coding.extensions import ExtensionAPI,
-ExtensionRuntime, load_extensions, StderrUiBridge, ...`. It ties the three
-submodules together at the package boundary.
+纯再导出,以便调用方可以 `from tau_coding.extensions import ExtensionAPI,
+ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块在包边界处绑定在一起。
 
-### 5.2 `extensions/api.py` — the contract
+### 5.2 `extensions/api.py` — 契约
 
-`ExtensionAPI` is the object passed to every extension's `setup(tau)` function.
-It exposes the *safe* surface: `register_tool`, `register_command`,
-`register_message_renderer`, `register_prompt_guideline`, `subscribe`, and
-actions like `send_user_message` / `send_custom_message` / `append_custom_entry`.
-Every method validates against the active `ExtensionGeneration`; an API object
-from a reloaded generation raises `ExtensionError`.
+`ExtensionAPI` 是传给每个扩展的 `setup(tau)` 函数的对象。它暴露 *安全* 的能力面:`register_tool`、
+`register_command`、`register_message_renderer`、`register_prompt_guideline`、`subscribe`,以及
+`send_user_message` / `send_custom_message` / `append_custom_entry` 等动作。每个方法都会针对当前活跃的
+`ExtensionGeneration` 进行校验;来自已重载代(Generation)的 API 对象会抛出 `ExtensionError`。
 
-Supporting types: `ExtensionHandler`, `ExtensionCommandHandler`,
-`ExtensionCommandContext`, `MessageRenderer`, `MessageRenderOptions`,
-`CustomMessageView`, `InputEvent`, `InputHookResult`, `ToolCallHookEvent`/
-`ToolCallHookResult`, `ToolResultHookEvent`/`ToolResultHookResult`,
-`SessionStartEvent`/`SessionShutdownEvent`, `RegisteredExtension`,
-`ExtensionGeneration`, `ExtensionError`, `UiBridge`/`NullUiBridge`, plus the
-`AGENT_EVENT_TYPES` / `LIFECYCLE_EVENT_TYPES` / `AGENT_EVENT_WILDCARD` constants.
+辅助类型:`ExtensionHandler`、`ExtensionCommandHandler`、`ExtensionCommandContext`、
+`MessageRenderer`、`MessageRenderOptions`、`CustomMessageView`、`InputEvent`、
+`InputHookResult`、`ToolCallHookEvent`/`ToolCallHookResult`、
+`ToolResultHookEvent`/`ToolResultHookResult`、`SessionStartEvent`/`SessionShutdownEvent`、
+`RegisteredExtension`、`ExtensionGeneration`、`ExtensionError`、`UiBridge`/`NullUiBridge`,
+以及 `AGENT_EVENT_TYPES` / `LIFECYCLE_EVENT_TYPES` / `AGENT_EVENT_WILDCARD` 常量。
 
 #### 逐方法深度剖析（`api.py`）
 
@@ -641,126 +635,99 @@ Supporting types: `ExtensionHandler`, `ExtensionCommandHandler`,
 
 ### 5.3 `extensions/loader.py` — discovery and import
 
-This file answers "what extensions exist and how do I import them safely?"
+本文件回答"存在哪些扩展,以及如何安全地导入它们?"
 
-**Data types:** `DiscoveredExtension` (name, path, optional package_dir) — a
-candidate before import; `LoadedExtension` (name, path, `setup` callable) — after
-a successful import; `ExtensionLoadResult` (loaded extensions + non-fatal
-diagnostics).
+**数据类型:** `DiscoveredExtension`(name、path、可选 package_dir)—— 导入前的候选;
+`LoadedExtension`(name、path、`setup` 可调用对象)—— 成功导入后;`ExtensionLoadResult`
+(已加载扩展 + 非致命诊断信息)。
 
-**Discovery rules (`discover_extensions`):**
+**发现规则(`discover_extensions`):**
 
-- `extension_dirs(...)` returns load directories **project-first, then user**
-  (`<cwd>/.tau/extensions`, then `<root>/extensions`). Earlier dirs win name
-  conflicts (project extensions shadow user ones). Project dirs are opt-in
-  (`--project-extensions`) because they execute at session startup (a trust
-  concern).
-- A directory is scanned for `*.py` files (skipping `_`/`.` prefixed) or a
-  subdirectory containing `extension.py`, or a `pyproject.toml` manifest under
-  `[tool.tau] extensions = [...]`.
-- Explicit `--extension <path>` entries always load, even with `--no-extensions`
-  (the escape hatch that disables resource-dir discovery).
-- Duplicate names are reported as diagnostics; first-seen wins.
+- `extension_dirs(...)` 返回加载目录,顺序为 **项目优先,然后是用户**
+  (`<cwd>/.tau/extensions`,然后是 `<root>/extensions`)。靠前的目录在名称冲突时胜出(项目扩展遮蔽用户扩展)。
+  项目目录是选择启用的(`--project-extensions`),因为它们在会话启动时执行(一个信任问题)。
+- 扫描目录以查找 `*.py` 文件(跳过 `_`/`.` 前缀的)或包含 `extension.py` 的子目录,或位于
+  `[tool.tau] extensions = [...]` 下的 `pyproject.toml` 清单。
+- 显式的 `--extension <path>` 条目总是会加载,即便使用了 `--no-extensions`
+  (即禁用资源目录发现的逃生舱口)。
+- 重复的名称作为诊断信息上报;先到先得。
 
-**Loading (`load_extensions` → `_load_extension`):**
+**加载(`load_extensions` → `_load_extension`):**
 
-- Each entry gets a unique synthetic module name
-  (`tau_extension_<slug>_<counter>`) so two extensions can't collide in
-  `sys.modules`.
-- Directory extensions load as **real packages** (`submodule_search_locations`)
-  so their sibling modules are reachable via relative imports.
-- Import errors, missing `setup`, or an **async** `setup` are all caught and
-  turned into `ResourceDiagnostic`s — one bad extension never kills the others
-  (the "extensions are an isolation boundary" principle).
-  > **Why are extensions an isolation boundary?** Third-party `setup` code runs
-  > inside the host process and can raise, hang, or register broken handlers. If
-  > a failure in one extension aborted loading of the rest, a single misbehaving
-  > extension would disable the whole session. Catching every import/setup error
-  > into a non-fatal `ResourceDiagnostic` keeps the remaining extensions alive and
-  > surfaces the problem to the user, so extensibility does not become a
-  > single-point-of-failure.
-- `unload_extension_modules()` removes the synthetic modules so a `/reload`
-  re-imports fresh objects.
+- 每个条目获得一个唯一的合成模块名
+  (`tau_extension_<slug>_<counter>`),这样两个扩展不会在 `sys.modules` 中冲突。
+- 目录扩展作为 **真实包**(`submodule_search_locations`)加载,以便其同级模块可通过相对导入访问。
+- 导入错误、缺失 `setup`,或 **异步** 的 `setup` 都会被捕获并转为 `ResourceDiagnostic` —— 一个坏扩展
+  绝不会拖垮其它扩展("扩展即隔离边界"原则)。
+  > **为何扩展是一个隔离边界?** 第三方 `setup` 代码在宿主进程内运行,可能抛出、挂起或注册损坏的
+  > handler。若一个扩展的失败会中止其余扩展的加载,那么单个行为异常的扩展就会禁用整个会话。将每个
+  > 导入/setup 错误捕获为非致命的 `ResourceDiagnostic`,可让其余扩展继续存活并将问题暴露给用户,
+  > 从而使可扩展性不会变成单点故障。
+- `unload_extension_modules()` 移除合成模块,以便 `/reload` 能重新导入全新对象。
 
 ### 5.4 `extensions/runtime.py` — the orchestration core
 
-`ExtensionRuntime` is the long-lived owner of all extensions. It outlives any
-single `CodingSession` (resume/new re-bind it; `/reload` replaces the
-registration set).
+`ExtensionRuntime`(扩展运行时)是所有扩展的长生命周期所有者。它比任何单个 `CodingSession` 都活得久
+(resume/new 会重新绑定它;`/reload` 替换注册集)。
 
-**Construction & lifecycle:**
+**构建与生命周期:**
 
-- `__init__` initializes empty registries for extensions, tools, commands,
-  prompt guidelines, message renderers, diagnostics, plus a `BoundSession` slot
-  and a `UiBridge`.
-- `load(...)` discovers+imports, then calls `_setup_extension` for each, handing
-  it a fresh `ExtensionAPI` bound to the current `ExtensionGeneration`.
-- `reset_for_reload()` tears down host UI, **invalidates** the current
-  generation (so stale API objects raise), clears all registrations, and
-  unloads modules — then a fresh `load` rebuilds everything.
-- `bind(session)` attaches a `BoundSession` (the protocol slice of
-  `CodingSession` the runtime needs: `cwd`, `model`, `provider_name`,
-  `session_id`, `system_prompt`, `is_running`, `messages`, plus
-  `queue_steering_message` / `queue_follow_up_message` / `append_custom_entry`).
+- `__init__` 为扩展、工具、命令、prompt 指导、消息渲染器、诊断信息初始化空注册表,外加一个
+  `BoundSession` 槽位和一个 `UiBridge`。
+- `load(...)` 发现+导入,然后为每个扩展调用 `_setup_extension`,交予一个绑定到当前 `ExtensionGeneration`
+  的全新 `ExtensionAPI`。
+- `reset_for_reload()` 拆除宿主 UI,**使当前代失效**(这样陈旧的 API 对象会抛出),清空所有注册,
+  并卸载模块 —— 随后一次全新的 `load` 重建一切。
+- `bind(session)` 附上一个 `BoundSession`(运行时所需要的 `CodingSession` 协议切片:`cwd`、`model`、
+  `provider_name`、`session_id`、`system_prompt`、`is_running`、`messages`,外加
+  `queue_steering_message` / `queue_follow_up_message` / `append_custom_entry`)。
 
-**Registration (called via `ExtensionAPI`):**
+**注册(经由 `ExtensionAPI` 调用):**
 
 - `register_tool` / `register_command` / `register_message_renderer` /
-  `register_prompt_guideline` — all "first registration per name wins";
-  duplicates are diagnosed, not fatal.
-- `subscribe(event, handler)` validates the event name against the known agent
-  and lifecycle event sets, then appends the handler.
+  `register_prompt_guideline` —— 全部"每个名称首次注册生效";重复项作为诊断上报,而非致命。
+- `subscribe(event, handler)` 针对已知的 agent 与生命周期事件集合校验事件名,然后追加 handler。
 
-**Tool wrapping (`compose_tools` / `_wrap_tool`):**
+**工具包装(`compose_tools` / `_wrap_tool`):**
 
-- `compose_tools(builtin_tools)` merges built-in + extension tools; an extension
-  tool with a built-in's name **overrides in place**.
-- Each tool is wrapped so that, on every call, `tool_call` hooks run first
-  (they can **block** the call or rewrite `arguments`), then the real executor
-  runs, then `tool_result` hooks can rewrite `content`/`ok`/`details`. This is
-  the "hook seam" around every tool — the central extension power feature.
+- `compose_tools(builtin_tools)` 合并内置 + 扩展工具;扩展工具若与内置同名则 **就地覆盖**。
+- 每个工具都被包装,使得每次调用时 `tool_call` 钩子先运行(它们可以 **阻止** 调用或改写 `arguments`),
+  然后真正的执行器运行,随后 `tool_result` 钩子可以改写 `content`/`ok`/`details`。这就是围绕每个工具的
+  "钩子接缝" —— 扩展的核心能力特性。
 
-**Event dispatch:**
+**事件分派:**
 
-- `attach_harness_listener(subscribe)` wires `_on_agent_event` into the harness's
-  event stream. `_on_agent_event` fans out to handlers subscribed to the event
-  type **and** to the `AGENT_EVENT_WILDCARD` subscribers.
-- `run_input_hooks(text, ...)` runs `input` hooks over prompt text; transforms
-  chain, and a `handled` result short-circuits submission.
-- `emit_session_start` / `emit_session_shutdown` dispatch the lifecycle events.
-- Every handler invocation is wrapped in try/except; failures are recorded as
-  runtime diagnostics (via `_record_runtime_failure` / `_record_bad_result`)
-  rather than crashing the host.
+- `attach_harness_listener(subscribe)` 将 `_on_agent_event` 接入 harness 的事件流。`_on_agent_event`
+  分发给订阅了该事件类型的 handler **以及** `AGENT_EVENT_WILDCARD` 订阅者。
+- `run_input_hooks(text, ...)` 在 prompt 文本上运行 `input` 钩子;transform 链式传递,而 `handled`
+  结果会短路提交。
+- `emit_session_start` / `emit_session_shutdown` 分派生命周期事件。
+- 每次 handler 调用都包裹在 try/except 中;失败被记录为运行时诊断(经由 `_record_runtime_failure` /
+  `_record_bad_result`)而非让宿主崩溃。
 
-**Rendering integration:**
+**渲染集成:**
 
-- `render_custom_message` / `render_tool_call` / `render_tool_result` are
-  installed into the frontends. Missing or failing renderers yield `None` so the
-  UI falls back to generic formatting. Failures are tracked once per
-  type/tool to avoid diagnostic blow-up on every redraw.
+- `render_custom_message` / `render_tool_call` / `render_tool_result` 被安装到前端。缺失或失败的
+  渲染器会返回 `None`,以便 UI 回退到通用格式。每个类型/工具只跟踪一次失败,避免在每次重绘时诊断信息
+  爆炸式增长。
 
-**Message delivery (`send_user_message` / `send_custom_message`):**
+**消息投递(`send_user_message` / `send_custom_message`):**
 
-- If the session is running, the message is queued as a steering or follow-up
-  message. If idle and a `turn_requested` callback is installed (the TUI's
-  exclusive worker), it triggers a new turn through the same serialized path as
-  user input — so extension turns can't race user runs. Otherwise it queues for
-  the next run.
+- 若会话正在运行,消息作为 steering(转向)或 follow-up(后续)消息排队。若空闲且安装了 `turn_requested`
+  回调(TUI 的独占 worker),则通过和用户输入相同的序列化路径触发新的一回合 —— 因此扩展回合不会与用户运行
+  发生竞态。否则它排队等待下一次运行。
 
-**Command execution (`build_command_registry` / `_command_handler`):**
+**命令执行(`build_command_registry` / `_command_handler`):**
 
-- Merges built-in commands with extension commands into a `CommandRegistry`.
-  Each extension command is wrapped so its handler receives an
-  `ExtensionCommandContext` (with `.args` and `.api`) and its exceptions are
-  captured into a `CommandResult`.
+- 将内置命令与扩展命令合并为 `CommandRegistry`。每个扩展命令被包装,使其 handler 收到一个
+  `ExtensionCommandContext`(含 `.args` 与 `.api`),且其异常被捕获到 `CommandResult` 中。
 
 ---
 
 ## 6. `tau_coding/__init__.py` — public exports
 
-The package's top-level `__init__.py` re-exports a broad, stable surface (and
-sets `__version__`) so external code, the CLI, and tests can import from
-`tau_coding` directly. The exported names fall into these groups:
+包顶层的 `__init__.py` 再导出了一组广泛且稳定的能力面(并设置 `__version__`),以便外部代码、CLI
+和测试可以直接从 `tau_coding` 导入。被导出的名称分为以下几组:
 
 - **Session / commands:** `CodingSession`, `CodingSessionConfig`, `CommandRegistry`,
   `CommandResult`, `SlashCommand`, `create_default_command_registry`,
@@ -803,9 +770,8 @@ sets `__version__`) so external code, the CLI, and tests can import from
   `TauResourcePaths`, `TauPaths`, `ShellSettings`, `load_shell_settings`,
   `ShellConfigError`, and `current_version`.
 
-This is the stable "front door" of `tau_coding`; `cli.py` and the TUI import
-through it. The `extensions` subpackage is imported separately (its surface is
-re-exported from `tau_coding.extensions`).
+这是 `tau_coding` 稳定的"正门";`cli.py` 与 TUI 都通过它导入。`extensions` 子包被单独导入(其能力面
+从 `tau_coding.extensions` 再导出)。
 
 ---
 
@@ -832,26 +798,21 @@ Putting the entire `tau_coding` layer together (parts 3a–3e):
    TauTuiApp       plain / json
 ```
 
-- **`credentials` + `oauth*`** are the *authentication backbone*: they let a
-  provider id in `providers.json` become a live, refreshable `ModelProvider`
-  (`provider_runtime.py`, 3c). Credentials persist to `credentials.json` (never
-  `providers.json`); each provider turns a stored `OAuthCredential` into request
-  auth via `runtime_auth`.
-- **`cli.py`** is the *composition root*: it is the only place that knows about
-  all the other pieces, handles the `sessions`/`providers`/`setup`/`export`
-  subcommands, and decides which frontend (TUI or print mode) to launch.
-- **`extensions/*`** is the *extensibility spine*: discovery (`loader`) →
-  registration (`api`) → runtime dispatch and hook seams (`runtime`). It lets
-  `tau_coding` stay open for third-party behavior without modifying core code.
+- **`credentials` + `oauth*`** 是 *认证支柱*:它们让 `providers.json` 中的一个 provider id 变成
+  活动的、可刷新的 `ModelProvider`(`provider_runtime.py`,3c)。凭证持久化到 `credentials.json`
+  (绝不写入 `providers.json`);每个 provider 都通过 `runtime_auth` 将已存储的 `OAuthCredential`
+  转换为请求鉴权。
+- **`cli.py`** 是 *组合根*:它是唯一了解所有其它部分的地方,负责处理 `sessions`/`providers`/`setup`/
+  `export` 子命令,并决定启动哪个前端(TUI 还是打印模式)。
+- **`extensions/*`** 是 *可扩展性脊梁*:发现(`loader`)→ 注册(`api`)→ 运行时分派与钩子接缝(`runtime`)。
+  它让 `tau_coding` 无需修改核心代码即可对第三方行为保持开放。
 
-With this part complete, **every file in `tau_coding` has been dissected**, and
-together with `tau_ai` (parts 1a–1b) and `tau_agent` (parts 2a–2d) we now have a
-full bottom-up walkthrough of the entire Tau codebase.
+本部分完成后,**`tau_coding` 中的每个文件都已被剖析**,加上 `tau_ai`(1a–1b 部分)与 `tau_agent`
+(2a–2d 部分),我们现在已拥有对整个 Tau 代码库自底向上的完整走读。
 
 ---
 
-*Next: merge parts 1a, 1b, 2a, 2b, 2c, 2d, 3a, 3b, 3c, 3d, 3e into a single
-tutorial document.*
+*下一步:将 1a、1b、2a、2b、2c、2d、3a、3b、3c、3d、3e 各部分合并为单一教程文档。*
 
 <!-- NAV -->
 [← tau_coding · CLI 入口]({{< relref "./coding-cli.md" >}})

@@ -610,7 +610,12 @@ section{ padding:88px 0; }
   font-weight:500; color:var(--ink-soft);
 }
 .sidebar-toplink:hover{ color:var(--ink); }
-.sidebar-toplink.active{ color:var(--accent); border-left-color:var(--accent); }
+ .sidebar-toplink.active{ color:var(--accent); border-left-color:var(--accent); }
+ .sidebar-subgroup-label{
+   display:block; padding:6px 0 2px 12px; margin:8px 0 0 -13px;
+   font-size:12px; letter-spacing:.06em; color:var(--ink);
+   font-weight:600;
+ }
 
 .docs-content{ min-width:0; font-family:var(--serif); font-size:17px; line-height:1.7; }
 .docs-content h1{

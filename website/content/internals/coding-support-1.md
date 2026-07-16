@@ -5,179 +5,97 @@ description: thinking / catalog_loader / branch_summary / diagnostics
 
 ## `tau_coding/thinking.py` — thinking-mode primitives
 
-A tiny, dependency-free module that *centralizes the vocabulary* of reasoning
-effort so every layer (catalog, session, TUI, providers) agrees on the same set
-of levels. This avoids stringly-typed reasoning settings scattered across the
-codebase.
+一个轻量、零依赖的模块,它*集中管理*推理强度的词汇表,使每一层(catalog、session、TUI、providers)都对同一组级别达成一致,从而避免推理设置以字符串形式散落在代码各处。
 
 - **Type aliases:**
   - `ThinkingLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh"]`
-    — the user-facing UI vocabulary.
+    —— 面向用户的 UI 词汇表。
   - `ThinkingParameter = Literal["reasoning_effort", "reasoning.effort", "anthropic.thinking"]`
-    — the *wire parameter name* each provider expects (OpenAI uses the first two
-    in different API shapes; Anthropic uses `anthropic.thinking`). The catalog
-    picks which one a model uses.
+    —— 各 provider 期望的*线路参数名*(OpenAI 在不同 API 形态下使用前两种;Anthropic 使用 `anthropic.thinking`)。catalog 决定某个模型使用哪一种。
   - `ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]`
-    — the OpenAI-compatible value (note `"off"` maps to `"none"`).
-- **`THINKING_LEVELS`** — the canonical ordered tuple; `"off"` first so cycling
-  reaches it.
-- **`DEFAULT_THINKING_LEVEL = "medium"`**.
-- **`THINKING_LEVEL_DESCRIPTIONS`** — human-readable labels for the TUI.
-- **`normalize_thinking_level(value)`** — case/space-insenstive validation;
-  `None` → default; raises a user-facing `ValueError` listing valid modes.
-- **`normalize_thinking_levels(values)`** — validate a *sequence* (used by the
-  catalog); rejects a bare string, empty lists, and duplicates.
-- **`reasoning_effort_for_level(level)`** — maps to OpenAI: `"off"` → `"none"`,
-  otherwise the same word.
-- **`anthropic_thinking_budget_for_level(level)`** — maps to Anthropic extended-
-  thinking token budgets: `minimal=1024`, `low=2048`, `medium=4096`,
-  `high=8192`, `xhigh=16384`; `"off"` → `None` (no extended thinking).
-- **`next_thinking_level(current, *, available)`** — stable cyclic rotation used
-  by the TUI's "cycle thinking" key; wraps with modulo; unknown → first
-  available.
+    —— 与 OpenAI 兼容的取值(注意 `"off"` 映射为 `"none"`)。
+- **`THINKING_LEVELS`** —— 规范的有序元组;以 `"off"` 开头,以便循环切换时能到达它。
+- **`DEFAULT_THINKING_LEVEL = "medium"`** —— 默认思考级别。
+- **`THINKING_LEVEL_DESCRIPTIONS`** —— 供 TUI 使用的人类可读标签。
+- **`normalize_thinking_level(value)`** —— 大小写/空白不敏感的校验;`None` → 默认值;抛出面向用户的 `ValueError`,并列出所有可用模式。
+- **`normalize_thinking_levels(values)`** —— 校验一个*序列*(catalog 使用);拒绝裸字符串、空列表与重复项。
+- **`reasoning_effort_for_level(level)`** —— 映射到 OpenAI:`"off"` → `"none"`,其余保持原词。
+- **`anthropic_thinking_budget_for_level(level)`** —— 映射到 Anthropic 扩展思考(extended-thinking)的 token 预算:`minimal=1024`、`low=2048`、`medium=4096`、`high=8192`、`xhigh=16384`;`"off"` → `None`(不开启扩展思考)。
+- **`next_thinking_level(current, *, available)`** —— 稳定的循环旋转,供 TUI 的"循环思考"按键使用;以取模方式回绕;未知值 → 第一个可用值。
 
-> **Why this design.** The module separates the *UI level* (stable, friendly,
-> provider-independent vocabulary surfaced in the TUI) from the *provider
-> parameter* (wire-specific name each backend expects). This follows Tau's
-> "Small layers beat magic" principle — each layer agrees on one shared vocabulary
-> instead of threading provider quirks through the UI. Adding a new provider later
-> therefore means adding one mapping here plus a catalog entry; the TUI and session
-> layers remain unchanged, because they only ever speak the abstract level.
+> **设计缘由。** 该模块把*UI 级别*(稳定、友好、与 provider 无关、在 TUI 中暴露的词汇表)与*provider 参数*(各后端期望的线路特定名称)分离开来。这遵循了 Tau 的"小层胜过魔法"(Small layers beat magic)原则——每一层都对一套共享词汇表达成一致,而不是把 provider 的怪异之处穿过 UI 层层传递。因此,日后新增一个 provider 只需在此处加一个映射并补一条 catalog 条目,TUI 与 session 层保持不变,因为它们只使用抽象级别。
 
 ---
 
 ## `tau_coding/catalog_loader.py` — provider catalog loading
 
-Loads `tau_coding/data/catalog.toml` (built-in) and overlays the user's
-`~/.tau/catalog.toml`, producing validated `ProviderCatalogEntry` objects used
-by `provider_catalog.py`.
+加载 `tau_coding/data/catalog.toml`(内置)并叠加用户自己的
+`~/.tau/catalog.toml`,产出经校验、供 `provider_catalog.py` 使用的 `ProviderCatalogEntry` 对象。
 
-- **Constants:** `CATALOG_SCHEMA_VERSION = 1`, `USER_CATALOG_FILENAME = "catalog.toml"`,
-  `_THINKING_FIELDS` (the four thinking keys that must be merged as a *group*,
-  mirroring `_merge_provider_config` in `provider_config.py`).
-- **Pydantic validators with strict types** (`_NonEmptyString`,
-  `_NonEmptyStringTuple`, `_PositiveInt`, `_NonNegativeFloat`) — `extra="forbid"`
-  and `frozen=True` on `_CatalogCostTier`, `_CatalogModelMetadata`,
-  `_CatalogProvider`, `_CatalogFile` so malformed TOML fails loudly and entries
-  are immutable.
-- **`CatalogError(ValueError)`** — the single exception type for bad catalog
-  files.
-- **`builtin_catalog_resource_text()`** — reads the packaged TOML via
-  `importlib.resources.files`.
-- **`builtin_catalog()`** (`@cache`) — parsed/validated built-in providers.
-- **`user_catalog_path(paths)`** — `~/.tau/catalog.toml`.
-- **`effective_catalog(paths)`** — returns built-in if no user file; otherwise
-  parses, validates, `_merge_raw_catalogs`, and re-validates.
-- **`save_user_catalog_entries(entries, paths)`** — upserts full provider
-  definitions into the user catalog (used by `/setup`); preserves other entries,
-  writes atomically via `_atomic_write_text`.
-- **Merge logic:** `_merge_raw_catalogs` overlays provider tables by name
-  (overlay wins, new providers keep their order); `_merge_raw_provider` merges
-  scalar overrides, concatenates `models` with `dict.fromkeys` de-dup, deep-merges
-  `context_windows`/`headers`/`compat`/`model_metadata`, and — critically —
-  treats the four thinking keys as a *unit*: if the overlay sets any thinking
-  field, the whole group is replaced and the base's thinking group dropped.
-  `_merge_model_metadata` does the same nested merge for per-model metadata.
-- **Validation:** `_entries_from_raw` → `_entry_from_provider` runs semantic
-  checks (default model in `models`; thinking models / context windows / metadata
-  keys all reference real models; `thinking_default ∈ thinking_levels`; final
-  cost tier must omit `max_input_tokens`; tier limits strictly increasing) and
-  raises `CatalogError` with precise, dotted field paths.
-- **Serialization round-trip:** `_raw_provider_from_entry` / `_raw_model_metadata_from_entry`
-  regenerate TOML-serializable dicts; `_catalog_to_toml` and `_toml_value` /
-  `_toml_key` emit clean TOML; `thinking_level_map` is split into positive
-  entries + `unsupported_thinking_levels` (the inverse of the load-time merge in
-  `_model_metadata_from_provider`, which turns `unsupported_thinking_levels`
-  back into `None` map values).
-- **`_format_validation_error` / `_dotted_location`** — turn Pydantic errors into
-  human-readable `providers.<name>.<field>` paths (resolving the array index to
-  the provider name).
+- **常量:** `CATALOG_SCHEMA_VERSION = 1`、`USER_CATALOG_FILENAME = "catalog.toml"`、
+  `_THINKING_FIELDS`(必须作为*一组*合并的四个思考字段,与 `provider_config.py` 中的 `_merge_provider_config` 对应)。
+- **严格类型的 Pydantic 校验器**(`_NonEmptyString`、
+  `_NonEmptyStringTuple`、`_PositiveInt`、`_NonNegativeFloat`)—— 对 `_CatalogCostTier`、`_CatalogModelMetadata`、
+  `_CatalogProvider`、`_CatalogFile` 设置 `extra="forbid"`
+  与 `frozen=True`,使格式错误的 TOML 立即报错,且条目不可变。
+- **`CatalogError(ValueError)`** —— 针对错误 catalog 文件的唯一异常类型。
+- **`builtin_catalog_resource_text()`** —— 通过 `importlib.resources.files` 读取打包的 TOML。
+- **`builtin_catalog()`**(`@cache`)—— 已解析/校验的内置 provider。
+- **`user_catalog_path(paths)`** —— `~/.tau/catalog.toml`。
+- **`effective_catalog(paths)`** —— 若无用户文件则返回内置;否则解析、校验、`_merge_raw_catalogs` 再重新校验。
+- **`save_user_catalog_entries(entries, paths)`** —— 把完整的 provider 定义 upsert 进用户 catalog(供 `/setup` 使用);保留其他条目,通过 `_atomic_write_text` 原子写入。
+- **合并逻辑:** `_merge_raw_catalogs` 按名称叠加 provider 表(overlay 优先,新增 provider 保持原有顺序);`_merge_raw_provider` 合并标量覆盖项,用 `dict.fromkeys` 去重拼接 `models`,深度合并 `context_windows`/`headers`/`compat`/`model_metadata`,并且——关键地——把四个思考字段当作一个*整体*处理:若 overlay 设置了任一思考字段,则整组替换,并丢弃 base 的思考组。`_merge_model_metadata` 对每个模型的元数据做同样的嵌套合并。
+- **校验:** `_entries_from_raw` → `_entry_from_provider` 执行语义检查(默认模型须在 `models` 中;思考模型 / 上下文窗口 / 元数据键都引用真实模型;`thinking_default ∈ thinking_levels`;最后一个定价档位必须省略 `max_input_tokens`;档位上限严格递增),并以精确的带点字段路径抛出 `CatalogError`。
+- **序列化往返:** `_raw_provider_from_entry` / `_raw_model_metadata_from_entry`
+  重新生成可 TOML 序列化的字典;`_catalog_to_toml` 与 `_toml_value` /
+  `_toml_key` 输出干净的 TOML;`thinking_level_map` 被拆为有效条目 + `unsupported_thinking_levels`(与加载时 `_model_metadata_from_provider` 中的合并操作互逆,后者会把 `unsupported_thinking_levels` 还原为 `None` 映射值)。
+- **`_format_validation_error` / `_dotted_location`** —— 把 Pydantic 错误转换为人类可读的 `providers.<name>.<field>` 路径(将数组下标解析为 provider 名称)。
 
-> **Why this design.** The catalog is *data, not code*. The loader's job is to
-> make data authoritative and code-derived: providers are validated once here,
-> then the runtime never re-checks them. This embodies Tau's "Documentation follows
-> implementation" stance — the catalog is the single source of truth that the
-> runtime simply consumes. Strict Pydantic models (frozen, `extra="forbid"`) plus a
-> single `CatalogError` type keep that contract airtight: malformed TOML fails
-> loudly at load time rather than producing subtle runtime misbehavior.
+> **设计缘由。** catalog 是*数据,而非代码*。加载器的职责是让数据成为权威、由代码派生:provider 在此处一次性校验,之后运行时不再重复检查。这体现了 Tau 的"文档随实现而生"(Documentation follows implementation)立场——catalog 是单一事实来源,运行时只需消费它。严格类型的 Pydantic 模型(frozen、`extra="forbid"`)加上单一的 `CatalogError` 类型,使这一契约严丝合缝:格式错误的 TOML 在加载时即大声报错,而不是在运行时产生难以察觉的异常行为。
 
 ---
 
 ## `tau_coding/branch_summary.py` — abandoned-branch summaries
 
-When the user switches session branches, the abandoned branch's conversation can
-be summarized by the model and re-attached as context. This module builds the
-prompt and parses the result.
+当用户切换会话分支时,被放弃分支的对话可由模型浓缩成摘要,并作为上下文重新附加。本模块负责构建提示词并解析结果。
 
-- **Constants / prompts:** `BRANCH_SUMMARY_SYSTEM_PROMPT` (strictly "summarize,
-  do not continue"), `BRANCH_SUMMARY_PREAMBLE` (the "you explored a different
-  branch" framing prepended to the summary), `BRANCH_SUMMARY_PROMPT` (a fixed
-  Markdown template with Goal / Constraints / Progress / Key Decisions /
-  Next Steps sections), and `MAX_SUMMARY_SOURCE_MESSAGE_CHARS = 4_000`,
-  `MAX_SUMMARY_SOURCE_TOTAL_CHARS = 60_000`, `TOOL_RESULT_MAX_CHARS = 2_000` —
-  hard caps so the summary request itself never blows up the context window.
+- **常量 / 提示词:** `BRANCH_SUMMARY_SYSTEM_PROMPT`(严格要求"只总结、不要续写")、`BRANCH_SUMMARY_PREAMBLE`(附加到摘要前的"你此前探索了另一条分支"引导语)、`BRANCH_SUMMARY_PROMPT`(一个固定的 Markdown 模板,包含 Goal / Constraints / Progress / Key Decisions / Next Steps 等小节),以及 `MAX_SUMMARY_SOURCE_MESSAGE_CHARS = 4_000`、
+  `MAX_SUMMARY_SOURCE_TOTAL_CHARS = 60_000`、`TOOL_RESULT_MAX_CHARS = 2_000` —— 这些是硬性上限,确保摘要请求本身永远不会撑爆上下文窗口。
 - **`summarize_branch_messages_with_model(*, provider, model, messages, custom_instructions, replace_instructions)`**
-  — streams a `UserMessage` (no tools) through the provider, returns the
-  assistant text or `None` on any `ProviderErrorEvent` / empty result, then
-  wraps it with `_add_branch_summary_context`.
-- **`_branch_summary_prompt`** — serializes the conversation and assembles the
-  instructions; `replace_instructions` swaps the template entirely, otherwise
-  `custom_instructions` is appended as "Additional focus".
-- **`_serialize_branch_conversation`** — trims each message to
-  `MAX_SUMMARY_SOURCE_MESSAGE_CHARS`, stops when the running total exceeds
-  `MAX_SUMMARY_SOURCE_TOTAL_CHARS`, and appends an "[N message(s) omitted]"
-  note. This budget discipline is why a 60k-char branch still fits a summary
-  request.
+  —— 通过 provider 流式发送一条 `UserMessage`(无工具),返回助手文本;若遇到任何 `ProviderErrorEvent` / 空结果则返回 `None`,随后用 `_add_branch_summary_context` 包装。
+- **`_branch_summary_prompt`** —— 序列化对话并组装指令;`replace_instructions` 会整体替换模板,否则把 `custom_instructions` 作为"Additional focus"追加。
+- **`_serialize_branch_conversation`** —— 把每条消息裁剪到
+  `MAX_SUMMARY_SOURCE_MESSAGE_CHARS`;当累计字符数超过
+  `MAX_SUMMARY_SOURCE_TOTAL_CHARS` 时停止,并追加一条 "[N message(s) omitted]"
+  说明。正是这种预算纪律,使得一个 6 万字符的分支仍能装入一次摘要请求。
 - **`_format_summary_source_message` / `_format_assistant_summary_source` /
-  `_format_tool_call_arguments`** — render each `AgentMessage` into a compact
-  labeled line; tool calls are shown as `name(key=val, …)`.
-- **`_trim_summary_source_text`** — truncation with an explicit "[… N more
-  characters truncated]" marker.
-- **`_add_branch_summary_context`** — scans assistant tool calls for `read`,
-  `edit`, `write` on `path` arguments, emitting `<read-files>` /
-  `<modified-files>` blocks so the summary retains the most decision-relevant
-  file list. `read_only` files (read but not modified) are separated from
-  `modified`.
+  `_format_tool_call_arguments`** —— 把每条 `AgentMessage` 渲染为紧凑、带标签的一行;工具调用显示为 `name(key=val, …)`。
+- **`_trim_summary_source_text`** —— 截断,并附上明确的 "[… N more
+  characters truncated]" 标记。
+- **`_add_branch_summary_context`** —— 扫描助手工具调用中对 `path` 参数的 `read`、
+  `edit`、`write` 操作,发出 `<read-files>` /
+  `<modified-files>` 块,使摘要保留与决策最相关的文件清单。仅读取(读了但未修改)的文件与已修改的文件分开。
 
-> **Why this design.** The summarizer is deliberately *lossy but structured*. It
-> trades verbatim fidelity for a bounded, schema-shaped summary plus the file-set,
-> which is what an agent actually needs when it later returns to a branch. The hard
-> character caps (`MAX_SUMMARY_SOURCE_MESSAGE_CHARS`, `MAX_SUMMARY_SOURCE_TOTAL_CHARS`)
-> guarantee the summarize request itself can never exhaust the context window,
-> regardless of how long the abandoned branch grew. This keeps branch recovery
-> cheap and predictable instead of replaying full transcripts.
+> **设计缘由。** 摘要器被刻意设计成*有损但结构化*。它用逐字保真换取一个有界、符合模式的摘要加上文件集合,而这正是 agent 日后回到某个分支时真正需要的东西。硬性字符上限(`MAX_SUMMARY_SOURCE_MESSAGE_CHARS`、`MAX_SUMMARY_SOURCE_TOTAL_CHARS`)保证无论被放弃的分支增长到多长,摘要请求本身都不可能耗尽上下文窗口。这让分支恢复既廉价又可预期,而不必重放完整的对话记录。
 
 ---
 
 ## `tau_coding/diagnostics.py` — structured failure logging
 
-Appends machine-readable JSONL diagnostics when agent calls fail, so support /
-debugging can reconstruct what happened without secrets.
+当 agent 调用失败时,追加机器可读的 JSONL 诊断信息,以便支持 / 调试在不泄露密钥的情况下重建发生了什么。
 
-- **`AgentCallDiagnosticContext`** (frozen, slots) — non-secret context:
-  `provider_name`, `model`, `cwd`, `session_id`, `run_id`. Note it deliberately
-  carries *no* API keys or message content.
-- **`AgentCallDiagnosticLogger`** — constructed with a `path`; `from_paths`
-  builds it at `TauPaths().agent_calls_log_path`. `log_exception` writes a
-  `kind="exception"` entry with type/message/full traceback; `log_error_event`
-  writes a `kind="error_event"` entry with the `ErrorEvent.message`,
-  `recoverable` flag, and optional `data`. `_append` makes the parent dir and
-  appends one JSON line (sorted keys) — append-only, so crashes mid-write don't
-  corrupt prior entries.
-- **`new_agent_call_run_id()`** — a `uuid4().hex` identifying one coding-session
-  agent call; threaded through `AgentCallDiagnosticContext` so multiple log
-  entries for the same run share an id.
-- **`_base_entry`** — stamps `timestamp` (UTC ISO), `kind`, `phase`, and the
-  context fields. The `phase` argument lets callers record *where* in the loop
-  the failure happened (provider call, tool execution, compaction, …).
+- **`AgentCallDiagnosticContext`**(frozen,slots)—— 不含密钥的上下文:
+  `provider_name`、`model`、`cwd`、`session_id`、`run_id`。注意它刻意*不*携带任何 API 密钥或消息内容。
+- **`AgentCallDiagnosticLogger`** —— 以 `path` 构造;`from_paths`
+  在 `TauPaths().agent_calls_log_path` 处构建它。`log_exception` 写入一条
+  `kind="exception"` 条目,含类型/消息/完整 traceback;`log_error_event`
+  写入一条 `kind="error_event"` 条目,含 `ErrorEvent.message`、
+  `recoverable` 标志以及可选的 `data`。`_append` 创建父目录并
+  追加一行 JSON(键已排序)—— 仅追加,因此写入中途崩溃不会破坏之前的条目。
+- **`new_agent_call_run_id()`** —— 一个 `uuid4().hex`,标识一次 coding-session 的 agent 调用;它会穿过 `AgentCallDiagnosticContext`,使同一次运行的多条日志条目共享同一个 id。
+- **`_base_entry`** —— 打上 `timestamp`(UTC ISO)、`kind`、`phase` 以及上下文字段。`phase` 参数让调用方记录失败发生在循环的*何处*(provider 调用、工具执行、压缩……)。
 
-> **Why this design.** Diagnostics are deliberately separated from user-facing
-> errors. They are append-only, secret-free, and structured so they can be
-> grepped/parsed later without risk of leaking credentials — the context dataclass
-> carries `provider_name`/`model`/`cwd`/`session_id`/`run_id` but never API keys or
-> message content. Because entries are appended as single JSON lines, a crash
-> mid-write cannot corrupt prior entries. Nothing here is shown to the user unless
-> a failure path explicitly surfaces the log path.
+> **设计缘由。** 诊断信息被刻意地与面向用户的错误分离。它们是仅追加、无密钥、结构化的,以便日后可被 grep/解析而不存在泄露凭据的风险——上下文数据类携带 `provider_name`/`model`/`cwd`/`session_id`/`run_id`,但绝不携带 API 密钥或消息内容。由于条目以单行 JSON 追加,写入中途崩溃不会破坏之前的条目。除非某个失败路径主动暴露日志路径,否则这里的内容不会展示给用户。
 
 ---
 
