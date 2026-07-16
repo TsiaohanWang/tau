@@ -183,6 +183,659 @@ Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用�
 下一任务（Part 2a）进入 `tau_agent`，先看它定义的"数据模型"——这些
 `AgentMessage` / `ToolCall` / 事件类型正是 provider 的输入与输出所依赖的结构。
 
+## 逐方法深度剖析（各 provider 实现）
+
+> 以下为各 provider 实现（含 openai_compatible 全 1044 行）的逐方法展开。
+
+## 文件:openai_compatible.py
+
+该文件是覆盖绝大多数 OpenAI 兼容端点的“总适配器”。核心策略:通过 `stream_response` 在请求时按模型名路由到两种底层协议——标准 `/chat/completions` 或 `/v1/responses`——二者共用同一个 HTTP/重试/取消信封(由 `OpenAICompatibleProvider._stream` 实现),只是各自提供不同的 `_StreamParser` 解析器。其余 provider(anthropic/google/mistral/codex)都偏离了这一基类:它们没有这种端点路由,且各自有独立的请求体构造、工具 schema 格式和流式事件映射。
+
+模块级常量与函数:
+
+#### `_RESPONSES_ONLY_PREFIXES: tuple[str, ...]`
+模块级常量,值为 `("gpt-5.5", "gpt-5.4")`,记录那些在 `/chat/completions` 上拒绝“函数工具 + reasoning_effort”组合、必须在 `/v1/responses` 上服务的模型前缀。
+
+#### `_use_responses_api(model: str) -> bool`
+判断给定 `model` 是否必须走 Responses API。把模型名 `strip().lower()` 后,若包含子串 `"codex"` 直接返回 `True`(所有 codex 家族模型强制走 responses);否则若以小写化后与前缀元组任一成员 `startswith` 匹配也返回 `True`,其余返回 `False`。
+
+### OpenAICompatibleProvider
+
+`OpenAICompatibleConfig` 驱动的通用适配器,支持 chat-completions 与 responses 双协议。
+
+#### `__init__(self, config: OpenAICompatibleConfig, *, client: httpx.AsyncClient | None = None) -> None`
+保存 `config`,若调用方未传入 `client` 则置 `None` 并记 `self._owns_client = True`(之后由 `_get_client` 惰性创建、由 `aclose` 负责关闭);传入则 `_owns_client = False`。
+
+#### `async def aclose(self) -> None`
+若该 provider 自己创建了 client(`_owns_client`)且尚未关闭,则 `await self._client.aclose()` 并置 `None`。
+
+#### `def stream_response(self, *, model: str, system: str, messages: list[AgentMessage], tools: list[AgentTool], signal: CancellationToken | None = None) -> AsyncIterator[ProviderEvent]`
+入口分流:若 `config.api == "openai-responses"` 或 `_use_responses_api(model)` 为真,返回 `_stream_responses(...)`,否则返回 `_stream_chat_completions(...)`。两类方法各自先构造 payload 再调用共享的 `_stream`。
+
+#### `def _stream_chat_completions(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+构造 chat-completions payload(`_build_chat_payload`,传入 `reasoning_effort`/`reasoning_effort_parameter`/`thinking_format`/`compat`/`max_tokens`/`include_reasoning_effort_none`),再调用 `_stream`,URL 为 `{base_url}/chat/completions`,`parser_factory=_ChatStreamParser`。
+
+#### `def _stream_responses(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+构造 responses payload(`_build_responses_payload`),调用 `_stream`,URL 为 `{base_url}/responses`,`parser_factory=_ResponsesStreamParser`。
+
+#### `def _stream(self, *, model, url, payload, parser_factory, signal=None) -> AsyncIterator[ProviderEvent]`
+共享流式信封(核心)。内部定义 `async def iterator()`:
+1. 取 client;准备 `api_key` 与 `headers`(基于 `config.headers`)。
+2. 若 `config.credential_resolver` 非空,`await` 解析出 `auth`,覆盖 `api_key`、合并 `auth.headers`;若 `auth.base_url` 非空,则按当前 url 末尾是 `/responses` 还是 `/chat/completions` 重建 `request_url`。
+3. 若 `config.omit_authorization_header` 为假且 headers 中没有(大小写不敏感)`authorization`,则补 `Authorization: Bearer {api_key}`。
+4. `attempt = 0` 进入重试循环,每轮先 `parser = parser_factory()`。
+5. `async with client.stream("POST", request_url, json=payload, headers=headers)`:若 `status_code >= 400`,`aread` 读 body,`decode(errors="replace")`;若 `_should_retry(attempt, status_code=...)` 则发 `provider_retry_event` 并 `wait_for_retry`,失败则返回、超时则 `continue`;否则发 `ProviderErrorEvent`(由 `provider_http_error_message` 生成)后 `return`。
+6. 成功则先发 `ProviderResponseStartEvent(model)`,随后 `async for line in response.aiter_lines()`(每轮先检查 `signal.is_cancelled()`),用 `_parse_sse_line` 解析,非 None 则 `events, stop = parser.feed(event)`,逐个 `yield`,若 `stop` 跳出。
+7. 循环后若 `parser.fatal` 为真直接 `return`(解析器已发出终态错误事件,不再 `finalize`),否则 `yield from parser.finalize()`,再 `return`。
+8. `except httpx.HTTPError`:若 `not parser.emitted_content and _should_retry(attempt)` 则重试(发 retry event + `wait_for_retry`),否则发 `ProviderErrorEvent` 返回。
+
+#### `def _get_client(self) -> httpx.AsyncClient`
+惰性创建:若 `self._client is None` 则 `create_async_client(timeout=config.timeout_seconds)`。
+
+#### `def _should_retry(self, attempt: int, *, status_code: int | None = None) -> bool`
+超出 `config.max_retries` 返回 False;否则 `status_code is None` 或 `_is_transient_status(status_code)` 为真时返回 True。
+
+### _StreamParser (Protocol)
+
+解析器的协议类型,定义 `emitted_content: bool`(已发内容则中途断流可重试)、`fatal: bool`(解析器已发终态错误则信封不调 finalize)、`feed(event) -> tuple[list[ProviderEvent], bool]`、`finalize() -> list[ProviderEvent]`。
+
+### _ChatStreamParser
+
+`/chat/completions` 的 SSE 块解析器。
+
+#### `__init__(self) -> None`
+初始化 `emitted_content=False`、`fatal=False`、`_content_parts=[]`、`_tool_call_builders: dict[int,_ToolCallBuilder]={}`、`_finish_reason=None`、`_usage=None`。
+
+#### `def feed(self, event: str) -> tuple[list[ProviderEvent], bool]`
+1. 若 `event == "[DONE]"` 返回 `([], True)`(停止)。
+2. `_loads_object(event)` 失败则置 `self.fatal=True` 并返回 `[ProviderErrorEvent("Provider returned invalid JSON chunk")], True`。
+3. 顶层 `chunk["usage"]` 为 Mapping 则 `_parse_chunk_usage` 写入 `self._usage`(处理带 stream_options 的 usage 块)。
+4. `_first_choice(chunk)` 取首个 choice;为空返回 `([], False)`。
+5. 回退:若顶层无 usage 且 `choice["usage"]` 是 Mapping,也解析它(Moonshot 等把 usage 放到 choice 上)。
+6. 更新 `self._finish_reason = choice.get("finish_reason") or self._finish_reason`。
+7. `delta = choice["delta"]` 非 Mapping 返回 `([], False)`。
+8. `delta["content"]` 是字符串且非空:记 `emitted_content`,追加 `_content_parts`,发 `ProviderTextDeltaEvent`。
+9. `_thinking_delta_text(delta)` 若非空:记 emitted_content,发 `ProviderThinkingDeltaEvent`(兼容 reasoning_content/reasoning/thinking 三字段)。
+10. 对每个 `_tool_call_deltas(delta)`:记 emitted_content,按 `index` 取/建 `_ToolCallBuilder` 并 `add_delta`。
+11. 返回 `(events, False)`。
+
+#### `def finalize(self) -> list[ProviderEvent]`
+按 index 排序用 `_ToolCallBuilder.build` 生成 `tool_calls`;先 `yield` 每个 `ProviderToolCallEvent`,再发 `ProviderResponseEndEvent(AssistantMessage(content, tool_calls, usage=self._usage), finish_reason=self._finish_reason)`。
+
+### _ResponsesStreamParser
+
+`/v1/responses` 的 SSE 事件解析器(无 `[DONE]`,以终态事件收尾)。
+
+#### `__init__(self) -> None`
+`emitted_content=False`、`fatal=False`、`_content_parts=[]`、`_tool_call_builders: dict[str,_ResponsesToolCallBuilder]={}`、`_status=None`、`_usage=None`。
+
+#### `def feed(self, event: str) -> tuple[list[ProviderEvent], bool]`
+1. `event == "[DONE]"` 返回 `([], False)`(responses 无此哨兵)。
+2. `_loads_object` 失败返回 `([], False)`。
+3. `chunk_type = chunk["type"]` 非字符串返回 `([], False)`。
+4. `response.output_text.delta` / `response.refusal.delta`:`delta` 字符串非空则记 emitted_content、追加 `_content_parts`、发 `ProviderTextDeltaEvent`。
+5. `response.reasoning_summary_text.delta` / `response.reasoning_text.delta`:`delta` 非空发 `ProviderThinkingDeltaEvent`。
+6. `response.output_item.added`:`item` 为 function_call 时调用 `_register_responses_item` 登记 builder。
+7. `response.function_call_arguments.delta`:用 `item_id` 取/建 builder,`add_arguments_delta`。
+8. `response.function_call_arguments.done`:用 `item_id` 取/建 builder,`set_final(arguments=...)`。
+9. `response.output_item.done`:`_finalize_responses_item` 填充最终 arguments/name/call_id。
+10. `response.completed` / `response.incomplete`:存 `_status=_responses_finish_reason(chunk)`、`_usage=_usage_from_responses_event(chunk)`,返回 `([], True)`(停止)。
+11. `response.failed`:置 `fatal=True`,返回 `[_responses_failure_event(chunk)], True`。
+12. `error`:置 `fatal=True`,返回 `[ProviderErrorEvent(message=_responses_error_message(chunk), data={"event":chunk})], True`。
+13. 其它返回 `([], False)`。
+
+#### `def finalize(self) -> list[ProviderEvent]`
+`[_ordered_builders(...)]` 按 output_index 排序生成 `tool_calls`,`yield` 每个 `ProviderToolCallEvent`,末尾 `ProviderResponseEndEvent` 的 `finish_reason` 经 `_normalize_finish_reason(self._status, has_tool_calls=...)` 归一化。
+
+### _ToolCallBuilder
+
+chat-completions 路径的工具调用累积器(按整数 index 索引)。
+
+#### `__init__(self) -> None`
+`id=""`、`name=""`、`arguments_parts=[]`。
+
+#### `def add_delta(self, delta: Mapping[str, Any]) -> None`
+若 `delta["id"]` 是字符串则赋 `self.id`;`function = delta["function"]` 非 Mapping 返回;若 `function["name"]` 是字符串赋 `self.name`;若 `function["arguments"]` 是字符串则 `arguments_parts.append`。
+
+#### `def build(self, index: int) -> ToolCall`
+拼 `arguments_parts` 为文本,`_loads_object` 解析(空则 `{}`,解析失败则 `{"_raw_arguments": 文本}`);返回 `ToolCall(id=self.id or f"tool-call-{index}", name=self.name, arguments=arguments)`。
+
+### _ResponsesToolCallBuilder
+
+responses 路径的工具调用累积器(按字符串 item_id 索引,带 output_index 排序)。
+
+#### `__init__(self, *, call_id="", name="", output_index=0) -> None`
+初始化 `call_id`、`name`、`output_index`、`arguments_parts=[]`、`arguments_final=None`。
+
+#### `def add_arguments_delta(self, delta: object) -> None`
+`delta` 为字符串则 `arguments_parts.append`。
+
+#### `def set_final(self, *, call_id=None, name=None, arguments=None, output_index=None) -> None`
+各字段若为真则覆盖;字符串 `arguments` 写入 `arguments_final`;`output_index` 若非 None 覆盖。
+
+#### `def build(self, index: int) -> ToolCall`
+优先用 `arguments_final`,否则拼 `arguments_parts`;解析规则同上;返回 `ToolCall(id=self.call_id or f"tool-call-{index}", name=self.name, arguments=arguments)`。
+
+### 模块级构造/解析辅助函数
+
+#### `def _build_chat_payload(...) -> dict[str, JSONValue]`
+构造 chat-completions 请求体:
+- `resolved_compat = dict(compat or {})`,读取 `supportsStore`/`supportsUsageInStreaming`/`supportsReasoningEffort`(默认 True)与 `maxTokensField`(默认 `max_completion_tokens`)。
+- 基础体含 `model`、`stream=True`、`messages=[_system_message(system), *[_message_to_openai(m) for m in messages]]`。
+- `supports_usage` 则加 `stream_options={"include_usage": True}`。
+- `supports_store` 则加 `store=False`。
+- `max_tokens` 非 None 则按 `maxTokensField` 写 `max_tokens` 或 `max_completion_tokens`。
+- `compat["openrouterProvider"]` 为 dict 时写 `provider`。
+- 调 `_apply_chat_reasoning` 注入推理参数。
+- `tools` 非空前加 `tools=[_tool_to_openai(t) for t]`,若 `compat["zaiToolStream"] is True` 加 `tool_stream=True`。
+
+#### `def _apply_chat_reasoning(payload, *, reasoning_effort, reasoning_effort_parameter, thinking_format, include_reasoning_effort_none) -> None`
+按 `thinking_format` 注入不同的推理字段:
+- `zai`/`qwen`:`payload["enable_thinking"] = reasoning_enabled`。
+- `qwen-chat-template`:`payload["chat_template_kwargs"]={"enable_thinking":..., "preserve_thinking": True}`。
+- `deepseek`:`payload["thinking"]={"type":"enabled"/"disabled"}`,启用时另加 `reasoning_effort`。
+- `openrouter` 或 `reasoning_effort_parameter=="reasoning.effort"`:启用则 `payload["reasoning"]={"effort":...}`,否则 `include_reasoning_effort_none` 时写 `{"effort":"none"}`。
+- `together`:`payload["reasoning"]={"enabled":...}`,启用时另加 `reasoning_effort`。
+- 默认(含 `openai` 等):`reasoning_enabled or include_reasoning_effort_none` 时写 `payload["reasoning_effort"] = reasoning_effort or "none"`。
+所有分支在 `reasoning_effort` 为 None 或 `"none"` 时视为未启用(除非显式 `include_reasoning_effort_none`)。
+
+#### `def _string_compat(value: object, *, default: str) -> str`
+`value` 为字符串且非空返回它,否则 `default`。
+
+#### `def _build_responses_payload(...) -> dict[str, JSONValue]`
+构造 responses 请求体:`model`、`stream=True`、`store=False`、`instructions=system`、`input=_messages_to_responses_input(messages)`;`max_tokens` 非 None 时 `max_output_tokens=...`;`_normalize_responses_effort` 返回非 None 则加 `reasoning={"effort":..., "summary":"auto"}`;`tools` 非空前 `tools=[_tool_to_responses(t) for t]`。
+
+#### `def _normalize_responses_effort(reasoning_effort: str | None) -> str | None`
+None 或 `strip().lower()` 为 `""`/`"none"` 返回 None,否则返回小写化值。
+
+#### `def _messages_to_responses_input(messages) -> list[JSONValue]`
+Responses 输入格式:`UserMessage`→`{"role":"user","content":...}`;`AssistantMessage` 有 content 则 `{"role":"assistant","content":...}`,每个 tool_call 另加 `{"type":"function_call","call_id":...,"name":...,"arguments":dumps(...)}`;`ToolResultMessage`→`{"type":"function_call_output","call_id":...,"output":...}`。(注意此处 user/assistant 内容用纯字符串,与 codex 的细粒度 items 不同。)
+
+#### `def _tool_to_responses(tool: AgentTool) -> dict[str, JSONValue]`
+`{"type":"function","name":...,"description":...,"parameters":dict(input_schema)}`(无 strict)。
+
+#### `def _register_responses_item(builders, item, *, output_index) -> None`
+仅处理 `item["type"]=="function_call"` 且 `item["id"]` 为字符串:用 `item_id` 取/建 builder,`set_final(call_id=..., name=..., arguments=..., output_index=_int_or_none(output_index))`。
+
+#### `def _finalize_responses_item(builders, item, *, output_index) -> None`
+同 `_register_responses_item` 逻辑,用于 `output_item.done` 时填充最终结果。
+
+#### `def _ordered_builders(builders) -> list[_ResponsesToolCallBuilder]`
+按 `builder.output_index` 排序返回。
+
+#### `def _responses_finish_reason(chunk) -> str | None`
+从 `chunk["response"]["status"]` 取字符串状态。
+
+#### `def _normalize_finish_reason(status, *, has_tool_calls) -> str`
+有 tool_calls 返回 `"tool_calls"`;`status=="incomplete"` 返回 `"length"`;否则 `"stop"`。
+
+#### `def _responses_failure_event(chunk) -> ProviderErrorEvent`
+从 `chunk["response"]["error"]["message"]` 取消息,缺省 `"Provider response failed"`,带 `data={"event": dict(chunk)}`。
+
+#### `def _responses_error_message(chunk) -> str`
+依次取 `chunk["message"]`、`chunk["error"]["message"]`,均缺省返回 `"Provider stream error"`。
+
+#### `def _str_or_none(value: object) -> str | None`
+字符串且非空返回它,否则 None。
+
+#### `def _system_message(system: str) -> dict[str, JSONValue]`
+`{"role":"system","content":system}`。
+
+#### `def _message_to_openai(message: AgentMessage) -> dict[str, JSONValue]`
+`UserMessage`→`{"role":"user","content":...}`;`AssistantMessage`→`{"role":"assistant","content":...}`,有 tool_calls 则附 `tool_calls=[_tool_call_to_openai(...)]`;`ToolResultMessage`→`{"role":"tool","tool_call_id":...,"name":...,"content":...}`。
+
+#### `def _tool_to_openai(tool: AgentTool) -> dict[str, JSONValue]`
+`{"type":"function","function":{"name":...,"description":...,"parameters":dict(input_schema)}}`。
+
+#### `def _tool_call_to_openai(tool_call: ToolCall) -> dict[str, JSONValue]`
+`{"id":...,"type":"function","function":{"name":...,"arguments":dumps(arguments)}}`。
+
+#### `def _parse_sse_line(line: str) -> str | None`
+`strip` 后,空或非 `data:` 开头返回 None,否则 `removeprefix("data:").strip()`。
+
+#### `def _loads_object(value: str) -> dict[str, JSONValue] | None`
+`loads` 失败或非 dict 返回 None,否则返回 dict。
+
+#### `def _first_choice(chunk) -> Mapping[str, Any] | None`
+取 `chunk["choices"][0]`,类型校验后返回。
+
+#### `def _int_or_zero(value: object) -> int`
+整数(非 bool)返回它,否则 0。
+
+#### `def _int_or_none(value: object) -> int | None`
+整数(非 bool)返回它,否则 None。
+
+#### `def _parse_chunk_usage(raw: Mapping[str, Any]) -> Usage`
+解析 chat-completions usage:由 `prompt_tokens` 减 `cached_tokens`(`prompt_tokens_details.cached_tokens`,回退 `prompt_cache_hit_tokens`,即 DeepSeek)/`cache_write_tokens` 得 fresh input;`output=completion_tokens`;`reasoning=completion_tokens_details.reasoning_tokens`;组装 `Usage`。cost 留 None。
+
+#### `def _usage_from_responses_event(chunk) -> Usage | None`
+从 `chunk["response"]["usage"]` 解析:cache_read=`input_tokens_details.cached_tokens`,input=`input_tokens - cache_read`(最小 0),`cache_write=0`,`reasoning=output_tokens_details.reasoning_tokens`(None 表示未报),`total_tokens`。
+
+#### `def _tool_call_deltas(delta) -> list[Mapping[str, Any]]`
+取 `delta["tool_calls"]` 中全部 Mapping 元素。
+
+#### `def _thinking_delta_text(delta: Mapping[str, Any]) -> str`
+依次检查 `delta["reasoning_content"]`、`delta["reasoning"]`、`delta["thinking"]`,首个非空字符串返回,否则 `""`(兼容各厂商扩展字段)。
+
+#### `def _is_transient_status(status_code: int) -> bool`
+`status_code in {408,409,425,429} or status_code >= 500`。
+
+---
+
+## 文件:anthropic.py
+
+Anthropic Messages API 适配器,完全偏离 openai_compatible 基类:使用 `anthropic-version` 头、`x-api-key`(或 bearer)鉴权、`/messages` 端点、Anthropic 自有消息格式与 SSE 事件类型(如 `message_start`/`content_block_*`/`message_delta`),thinking 用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort`。
+
+### AnthropicProvider
+
+#### `__init__(self, config: AnthropicConfig, *, client: httpx.AsyncClient | None = None) -> None`
+保存 config、`client`、`_owns_client`。
+
+#### `async def aclose(self) -> None`
+同通用关闭逻辑。
+
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+内部 `iterator()`:
+1. 取 client;准备 `api_key`、`base_url`、`auth_headers`;`credential_resolver` 存在则解析并可能改写 `base_url`(确保带 `/v1`)、合并 headers。
+2. `_build_messages_payload(...)` 构造请求体。
+3. headers:`anthropic-version`、`content-type`、`config.headers`、`auth_headers`;若 `config.bearer_auth` 则 `Authorization: Bearer`,否则 `x-api-key`。URL=`{base_url}/messages`。
+4. 重试循环:`async with client.stream("POST", url, json=payload, headers=headers)`。
+5. `status>=400`:读 body,`_should_retry(attempt, status_code)` 则发 `provider_retry_event` 并重试,否则发 `ProviderErrorEvent`(由 `provider_http_error_message` 生成,含 `status_code`/`body`/`attempts`)。
+6. 发 `ProviderResponseStartEvent`;逐行 `_parse_sse_line`→`_loads_object`,按 `chunk["type"]` 分支:
+   - `message_start`:从 `message.usage` 建 `usage = _usage_from_message_start`。
+   - `content_block_start`:`block.type=="tool_use"` 时按 `index` 取/建 `_AnthropicToolBuilder`,填 `id`/`name`。
+   - `content_block_delta`:`text_delta`→`ProviderTextDeltaEvent`;`thinking_delta`→`ProviderThinkingDeltaEvent`;`input_json_delta`→向 builder 追加 `partial_json`。
+   - `message_delta`:更新 `finish_reason=stop_reason`、`usage=_apply_message_delta_usage`。
+   - `error`:发 `ProviderErrorEvent` 并 return。
+7. 收尾:排序 builders `build` 出 tool_calls,逐个发 `ProviderToolCallEvent`,最后发 `ProviderResponseEndEvent(AssistantMessage("".join(content_parts), tool_calls, usage), finish_reason)`。
+8. `except httpx.HTTPError`:未发内容且可重试则重试,否则发 `ProviderErrorEvent`。
+
+#### `def _get_client(self) -> httpx.AsyncClient`
+惰性创建 client。
+
+#### `def _should_retry(self, attempt: int, *, status_code: int | None = None) -> bool`
+超 `max_retries` 返回 False;否则 `status_code is None` 或 `status_code in {408,409,425,429} or >=500`。
+
+### _AnthropicToolBuilder
+
+#### `__init__(self) -> None`
+`id=""`、`name=""`、`arguments_parts=[]`。
+
+#### `def build(self, index: int) -> ToolCall`
+拼 `arguments_parts` 解析(`_loads_object`,空则 `{}`,失败则 `{"_raw_arguments":文本}`);返回 `ToolCall(id=self.id or f"tool-call-{index}", name=self.name, arguments=arguments)`。
+
+### 模块级辅助函数
+
+#### `def _build_messages_payload(...) -> dict[str, JSONValue]`
+构造 Anthropic 请求体:`resolved_max_tokens = max_tokens or 4096`,若 `thinking_budget_tokens` 非空则 `max(resolved, budget+1024)`;含 `model`、`max_tokens`、`stream=True`、`system`(有 `oauth_system_prompt` 时拼成 `[{type:text,...},{type:text,...}]` 列表,否则纯字符串)、`messages=[_anthropic_message(m) for m]`;thinking:`thinking_mode=="adaptive"` 且 `thinking_effort` 非空→`thinking={"type":"adaptive","display":"summarized"}` 且 `output_config={"effort":...}`,否则 `thinking_budget_tokens` 非空→`thinking={"type":"enabled","budget_tokens":...}`;`tools` 非空→`tools=[_anthropic_tool(t) for t]`。
+
+#### `def _anthropic_message(message: AgentMessage) -> dict[str, JSONValue]`
+`UserMessage`→`{"role":"user","content":message.content}`;`AssistantMessage`→`{"role":"assistant","content":[...]}`,有 content 加 `{"type":"text","text":...}`,每个 tool_call 加 `{"type":"tool_use","id":...,"name":...,"input":arguments}`;`ToolResultMessage`→`{"role":"user","content":[{"type":"tool_result","tool_use_id":...,"content":...,"is_error":not ok}]}`;否则 `TypeError`。
+
+#### `def _anthropic_tool(tool: AgentTool) -> dict[str, JSONValue]`
+`{"name":...,"description":...,"input_schema":dict(input_schema)}`(注意键是 `input_schema`,非 OpenAI 的 `parameters`)。
+
+#### `def _parse_sse_line(line: str) -> str | None`
+`data:` 前缀去掉。
+
+#### `def _loads_object(text: str) -> dict[str, Any] | None`
+`loads`,非 dict 返回 None。
+
+#### `def _string_or_empty(value: object) -> str`
+字符串返回,否则 `""`。
+
+#### `def _int_or_none(value: object) -> int | None`
+整数(非 bool)返回,否则 None。
+
+#### `def _usage_from_message_start(raw: object) -> Usage`
+从 `message_start.message.usage` 构造 Usage:`input=input_tokens`、`output=output_tokens`、`cache_read=cache_read_input_tokens`、`cache_write=cache_creation_input_tokens`、`cache_write_1h=cache_creation.ephemeral_1h_input_tokens`、`total_tokens` 求和。
+
+#### `def _apply_message_delta_usage(usage: Usage | None, raw: object) -> Usage | None`
+把 `message_delta.usage` 覆盖到 running Usage(仅覆盖非 null 字段),`output_tokens_details.thinking_tokens`→`usage.reasoning`,重算 `total_tokens`。
+
+---
+
+## 文件:google.py
+
+Google Generative Language API 适配器,偏离基类最彻底:端点是 `{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`(API key 在 query),请求体用 `contents`/`systemInstruction`/`generationConfig`/`tools[].functionDeclarations`,thinking 由 `thinkingConfig`(`thinkingBudget`/`thinkingLevel`/`includeThoughts`)控制,SSE 对象不是 OpenAI 风格而是 `{candidates:[{content:{parts:[...]}}]}`,thinking 通过 `part.thought==True` 与 `part.thoughtSignature` 区分。
+
+### GoogleGenerativeAIProvider
+
+#### `__init__(self, config: OpenAICompatibleConfig, *, client=None) -> None`
+保存 config/client/`_owns_client`(复用 `OpenAICompatibleConfig`)。
+
+#### `async def aclose(self) -> None`
+标准关闭。
+
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+内部 `iterator()`:
+1. 取 client;`_build_google_payload(...)` 构造体。
+2. URL=`{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`;headers=`config.headers`+`content-type`。
+3. 重试循环,每轮 `parser = _GoogleStreamParser()`(循环内重建,确保每次尝试干净)。
+4. `status>=400`:重试/错误逻辑同通用。
+5. 发 `ProviderResponseStartEvent`;逐行 `_parse_sse_line`→`parser.feed(event)` 逐个 `yield`,结束 `parser.finalize()` 逐个 `yield`。
+6. `except httpx.HTTPError`:`parser.emitted_content` 决定可重试。
+
+#### `def _get_client(self) -> httpx.AsyncClient`
+惰性创建。
+
+#### `def _should_retry(self, attempt: int, *, status_code=None) -> bool`
+同通用(基于 `config.max_retries` 与 {408,409,425,429}/>=500)。
+
+### _GoogleStreamParser
+
+#### `__init__(self) -> None`
+`emitted_content=False`、`_content_parts=[]`、`_thinking_parts=[]`、`_tool_calls=[]`、`_finish_reason=None`。
+
+#### `def feed(self, event: str) -> list[ProviderEvent]`
+`_loads_object`;取 `candidates[0]`;`finishReason` 记到 `_finish_reason`;`content.parts` 遍历:
+- `part.text` 且 `part.thought==True`→`ProviderThinkingDeltaEvent`,存 `_thinking_parts`。
+- 普通 `part.text`→`ProviderTextDeltaEvent`,存 `_content_parts`。
+- `part.functionCall`(Mapping)→构造 `ToolCall(id=functionCall.id or f"tool-call-{len}", name=..., arguments=_object_or_empty(args), thought_signature=...)`,发 `ProviderToolCallEvent` 并追加 `_tool_calls`。
+返回 events 列表。
+
+#### `def finalize(self) -> list[ProviderEvent]`
+返回单个 `ProviderResponseEndEvent(AssistantMessage("".join(_content_parts), tool_calls=_tool_calls), finish_reason=_normalize_finish_reason(_finish_reason, has_tool_calls=bool(_tool_calls)))`。
+
+### 模块级辅助函数
+
+#### `def _build_google_payload(...) -> dict[str, JSONValue]`
+`contents=[_message_to_google(m) for m]`;`system` 非空加 `systemInstruction={"parts":[{"text":system}]}`;`max_tokens` 非空加 `generationConfig.maxOutputTokens`;`_google_thinking_config` 非空则 `generationConfig.thinkingConfig`;`tools` 非空则 `tools=[{"functionDeclarations":[_tool_to_google(t) for t]}]`。
+
+#### `def _google_thinking_config(model, reasoning_effort) -> dict[str, JSONValue] | None`
+`reasoning_effort is None`→None;`"none"`→按模型族返回 `thinkingLevel`(gemini-3-pro→LOW,gemini-3-flash/gemma-4→MINIMAL,其它→`thinkingBudget:0`);`reasoning_effort in {MINIMAL,LOW,MEDIUM,HIGH}`→`{includeThoughts:True, thinkingLevel:...}`;否则 `_google_budget` 给出预算则 `{includeThoughts:True, thinkingBudget:...}`,否则 `{includeThoughts:True, thinkingLevel:_google_level(...)}`。
+
+#### `def _google_budget(model, effort) -> int | None`
+把 minimal/low/medium/high(xhigh 归一为 high)映射到各模型预算:gemini-3 家族与 gemma-4 返回 None(不用预算);2.5-pro/2.5-flash(-lite)/2.5-flash 各有不同预算字典;都不匹配返回 -1。
+
+#### `def _google_level(model, effort) -> str`
+按模型族返回 thinkingLevel 字符串(gemini-3-pro: low/high;gemma-4: minimal/high;其余 MINIMAL/LOW/MEDIUM/HIGH 映射)。
+
+#### `def _is_gemini3_pro_model(model) -> bool` / `def _is_gemini3_flash_model(model) -> bool` / `def _is_gemma4_model(model) -> bool`
+基于子串的小写匹配。
+
+#### `def _message_to_google(message: AgentMessage) -> dict[str, JSONValue]`
+`UserMessage`→`{"role":"user","parts":[{"text":...}]}`;`AssistantMessage`→`{"role":"model","parts":[...]}`,content 加 `{"text":...}`,每个 tool_call 加 `{"functionCall":{"id":...,"name":...,"args":...}}`(有 `thought_signature` 则加),空则 `[{"text":""}]`;`ToolResultMessage`→`{"role":"user","parts":[{"functionResponse":{"output"/"error":content, 带 id}}]}`。
+
+#### `def _tool_to_google(tool: AgentTool) -> dict[str, JSONValue]`
+`{"name":...,"description":...,"parameters":_sanitize_google_schema(dict(input_schema))}`(键是 `parameters`,且清理 schema)。
+
+#### `def _sanitize_google_schema(value: JSONValue) -> JSONValue`
+递归删除 Gemini OpenAPI 子集不支持的键:`additionalProperties`、`$schema`。
+
+#### `def _parse_sse_line(line: str) -> str | None`
+`strip` 后空或非 `data:` 返回 None。
+
+#### `def _loads_object(value: str) -> dict[str, JSONValue] | None`
+`loads` 失败或非 dict 返回 None。
+
+#### `def _string_or_default(value: object, default: str) -> str`
+字符串且非空返回它,否则 default。
+
+#### `def _object_or_empty(value: object) -> dict[str, JSONValue]`
+dict 返回,否则 `{}`。
+
+#### `def _normalize_finish_reason(reason: str | None, *, has_tool_calls: bool) -> str`
+有 tool_calls→`"tool_calls"`;`reason in {MAX_TOKENS,MODEL_ARMOR,RECITATION}`→`"length"`;否则 `"stop"`。
+
+---
+
+## 文件:mistral.py
+
+Mistral Conversations 适配器,形态上最接近 openai_compatible 的 chat 分支,但端点 `/chat/completions`、用 `OpenAICompatibleConfig`、消息体用 `system` role 消息、thinking 字段为 `reasoning_effort: "high"` 或 `prompt_mode: "reasoning"`、`tools[].function` 带 `strict: False`。流式解析器 `_MistralStreamParser` 与 `_ChatStreamParser` 同构,但支持 content 为列表且 `type==thinking` 的 thinking 分块。
+
+### MistralConversationsProvider
+
+#### `__init__(self, config: OpenAICompatibleConfig, *, client=None) -> None`
+保存 config/client/`_owns_client`。
+
+#### `async def aclose(self) -> None`
+标准关闭。
+
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+先 `_build_mistral_payload(...)`,再调 `_stream(model=model, url=f"{_mistral_base_url(base_url)}/chat/completions", payload=payload, signal=signal)`。
+
+#### `def _stream(self, *, model, url, payload, signal) -> AsyncIterator[ProviderEvent]`
+内部 `iterator()`(与基类 `_stream` 同构):取 client,headers=`config.headers`+`Authorization: Bearer {api_key}`;重试循环每轮 `parser=_MistralStreamParser()`;`status>=400` 重试/错误;发 `ProviderResponseStartEvent`;逐行 `_parse_sse_line`→`events, stop = parser.feed(event)`,逐个 yield,`stop` 则 break;最后 `parser.finalize()`;HTTP 异常按 `parser.emitted_content` 重试。
+
+#### `def _get_client(self) -> httpx.AsyncClient`
+惰性创建。
+
+#### `def _should_retry(self, attempt, *, status_code=None) -> bool`
+同通用。
+
+### _StreamParser (Protocol)
+
+同 openai_compatible 的协议:`emitted_content`、`feed(event)->tuple[list[ProviderEvent], bool]`、`finalize()->list[ProviderEvent]`。
+
+### _MistralStreamParser
+
+#### `__init__(self) -> None`
+`emitted_content=False`、`_content_parts=[]`、`_tool_call_builders=dict`、`_finish_reason=None`。
+
+#### `def feed(self, event: str) -> tuple[list[ProviderEvent], bool]`
+1. `event=="[DONE]"`→`([], True)`。
+2. `_loads_object` 失败→`([], False)`。
+3. `_first_choice(chunk)`;更新 `_finish_reason`(兼容 `finish_reason`/`finishReason`)。
+4. `delta = choice["delta"]`;对每个 `_content_deltas(delta)` 发 `ProviderTextDeltaEvent`;对每个 `_thinking_deltas(delta)` 发 `ProviderThinkingDeltaEvent`;对每个 `_tool_call_deltas(delta)` 按 `index` 取/建 `_ToolCallBuilder` 并 `add_delta`。
+5. 返回 `(events, False)`。
+
+#### `def finalize(self) -> list[ProviderEvent]`
+排序 builders `build` 出 tool_calls,发各 `ProviderToolCallEvent`,末尾 `ProviderResponseEndEvent(finish_reason=self._finish_reason or ("tool_calls" if tool_calls else "stop"))`。
+
+### _ToolCallBuilder
+
+#### `__init__(self) -> None`
+`id=""`、`name=""`、`arguments_parts=[]`。
+
+#### `def add_delta(self, delta: Mapping[str, Any]) -> None`
+`delta["id"]` 非 `"null"` 字符串则赋 `self.id`;`function` 非 Mapping 返回;`function["name"]` 字符串赋 `self.name`;`function["arguments"]` 字符串追加,若为 Mapping 则 `dumps` 后追加。
+
+#### `def build(self, index: int) -> ToolCall`
+拼参、解析规则同 chat builder,返回 `ToolCall(id=self.id or f"tool-call-{index}", name=self.name, arguments=arguments)`。
+
+### 模块级辅助函数
+
+#### `def _build_mistral_payload(...) -> dict[str, JSONValue]`
+`model`、`stream=True`、`messages=[*_system_messages(system), *[_message_to_mistral(m) for m]]`;`max_tokens` 非空加 `max_tokens`;`tools` 非空加 `tools=[_tool_to_mistral(t) for t]`;`reasoning_effort` 非 None 且非 `"none"` 时:若 `_uses_reasoning_effort(model)` 加 `reasoning_effort:"high"`,否则加 `prompt_mode:"reasoning"`。
+
+#### `def _system_messages(system: str) -> list[dict[str, JSONValue]]`
+非空则 `[{"role":"system","content":system}]`。
+
+#### `def _message_to_mistral(message: AgentMessage) -> dict[str, JSONValue]`
+`UserMessage`→`{"role":"user","content":...}`;`AssistantMessage`→`{"role":"assistant","content":...}`,有 tool_calls 附 `tool_calls=[_tool_call_to_mistral(...)]`;`ToolResultMessage`→`{"role":"tool","tool_call_id":...,"name":...,"content":...}`。
+
+#### `def _tool_to_mistral(tool: AgentTool) -> dict[str, JSONValue]`
+`{"type":"function","function":{"name":...,"description":...,"parameters":dict(input_schema),"strict":False}}`。
+
+#### `def _tool_call_to_mistral(tool_call: ToolCall) -> dict[str, JSONValue]`
+`{"id":...,"type":"function","function":{"name":...,"arguments":dumps(arguments)}}`。
+
+#### `def _mistral_base_url(base_url: str) -> str`
+去掉末尾 `/`;若以 `/v1` 结尾保持,否则补 `/v1`。
+
+#### `def _uses_reasoning_effort(model: str) -> bool`
+`model in {"mistral-small-2603","mistral-small-latest","mistral-medium-3.5"}`。
+
+#### `def _parse_sse_line(line: str) -> str | None`
+同通用。
+
+#### `def _loads_object(value: str) -> dict[str, JSONValue] | None`
+`loads` 失败或非 dict 返回 None。
+
+#### `def _first_choice(chunk) -> Mapping[str, Any] | None`
+取 `chunk["choices"][0]`。
+
+#### `def _content_deltas(delta) -> list[str]`
+`delta["content"]` 字符串或非 text 列表,逐一提取文本。
+
+#### `def _thinking_deltas(delta) -> list[str]`
+`delta["content"]` 为列表时,取 `type=="thinking"` 的 `thinking`(字符串或 `[{text}]` 列表)。
+
+#### `def _tool_call_deltas(delta) -> list[Mapping[str, Any]]`
+取 `delta["tool_calls"]` 或 `delta["toolCalls"]` 中 Mapping。
+
+---
+
+## 文件:openai_codex.py
+
+OpenAI Codex 订阅版 Responses 适配器,完全自包含(不继承 openai_compatible 基类)。端点 `{base_url}/codex/responses`,鉴权为 `Authorization: Bearer {access_token}` + `chatgpt-account-id` + `originator` + `OpenAI-Beta: responses=experimental`,请求体走 Responses 风格但带 `text.verbosity`/`include`/`tool_choice`/`parallel_tool_calls`,工具 id 用 `call_id|item_id` 复合形式。SSE 解析在异步生成器 `_codex_provider_events` 内联完成(而非独立 parser 类)。`reasoning_effort`+`reasoning_summary` 控制思维,thinking 映射 `response.reasoning.*` 系列事件。
+
+### 模块级常量/类型
+
+#### `DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"`
+默认 base url。
+
+#### `@dataclass(frozen=True, slots=True) class OpenAICodexCredentials`
+字段 `access_token: str`、`account_id: str`。
+
+#### `type OpenAICodexCredentialResolver = Callable[[], Awaitable[OpenAICodexCredentials]]`
+凭证解析器类型。
+
+#### `@dataclass(frozen=True, slots=True) class OpenAICodexConfig`
+字段:`credential_resolver`、`base_url=DEFAULT_...`、`headers`、`timeout_seconds`、`max_retries`、`max_retry_delay_seconds`、`originator="tau"`、`reasoning_effort`、`reasoning_summary="auto"`、`provider_name="OpenAI Codex"`。
+
+### OpenAICodexProvider
+
+#### `__init__(self, config: OpenAICodexConfig, *, client=None) -> None`
+保存 config/client/`_owns_client`。
+
+#### `async def aclose(self) -> None`
+标准关闭。
+
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+内部 `iterator()`:
+1. 取 client,`_build_codex_payload(...)` 构造体,`_resolve_codex_url(base_url)` 得 URL。
+2. 重试循环:`attempt=0`。每轮先 `await self._config.credential_resolver()` 取凭证,`_build_codex_headers(...)` 构造 headers;`async with client.stream("POST", url, json=payload, headers=headers)`。
+3. `status>=400`:读 body,`_should_retry(attempt, status_code=..., body=...)`(带 body 判定终端限流)则重试,否则发 `ProviderErrorEvent`(含 attempts)。
+4. 发 `ProviderResponseStartEvent`;`async for event in _codex_provider_events(response, signal=signal)`:若 event 是 `ProviderTextDeltaEvent | ProviderToolCallEvent` 则置 `emitted_content=True`,`yield event`。
+5. `except httpx.HTTPError`:未发内容可重试;`except Exception`(裸异常)→直接发 `ProviderErrorEvent` 返回(BLE001 豁免,把 provider 错误转为事件)。
+
+#### `def _get_client(self) -> httpx.AsyncClient`
+惰性创建。
+
+#### `def _should_retry(self, attempt, *, status_code=None, body="") -> bool`
+超 `max_retries` 返回 False;否则 `status_code is None or _is_retryable_status(status_code, body)`。
+
+### _ToolCallBuilder
+
+#### `__init__(self, *, call_id: str, item_id: str | None, name: str) -> None`
+保存 `call_id`、`item_id`、`name`、`arguments_parts=[]`。
+
+#### `def add_delta(self, delta: str) -> None`
+追加参数片段。
+
+#### `def set_arguments(self, arguments: str) -> None`
+整段替换参数(用最终值)。
+
+#### `def update_from_item(self, item: Mapping[str, Any]) -> None`
+从完成的 function-call item 补 `call_id`/`item_id`/`name`。
+
+#### `def build(self) -> ToolCall`
+拼参、解析;返回 `ToolCall(id=f"{self.call_id}|{item_id}", name=self.name, arguments=arguments)`(`item_id` 缺省为 `f"fc_{call_id}"`)。
+
+### 模块级辅助函数
+
+#### `def _build_codex_payload(...) -> dict[str, JSONValue]`
+`model`、`store=False`、`stream=True`、`instructions=system or "You are a helpful assistant."`、`input=_messages_to_responses_input(messages)`、`text={"verbosity":"low"}`、`include=["reasoning.encrypted_content"]`、`tool_choice="auto"`、`parallel_tool_calls=True`;`reasoning_effort` 非空→`reasoning={"effort":...,"summary":reasoning_summary}`;`tools` 非空→`tools=[_tool_to_codex(t) for t]`。
+
+#### `def _messages_to_responses_input(messages) -> list[JSONValue]`
+与基类 responses 输入不同,使用细粒度 items:`UserMessage`→`{"role":"user","content":[{"type":"input_text","text":...}]}`;`AssistantMessage` 有 content→`{"type":"message","role":"assistant","content":[{"type":"output_text","text":...,"annotations":[]}],"status":"completed","id":f"msg_{i}"}`,每个 tool_call→`{"type":"function_call","call_id":...,"name":...,"arguments":dumps(...), ("id":item_id)}`;`ToolResultMessage`→`{"type":"function_call_output","call_id":(拆分后),"output":...}`。
+
+#### `def _tool_to_codex(tool: AgentTool) -> dict[str, JSONValue]`
+`{"type":"function","name":...,"description":...,"parameters":dict(input_schema),"strict":None}`。
+
+#### `async def _codex_provider_events(response, *, signal) -> AsyncIterator[ProviderEvent]`
+核心流式解析(内联,非 parser 类):维护 `content_parts`、`tool_calls`、`active_tools`、`tools_by_item_id/call_id/output_index`、`finish_reason`、`usage`。`async for event in _iter_sse_objects(response)`:
+- `type=="error"`→`ProviderErrorEvent` 返回。
+- `type=="response.failed"`→`ProviderErrorEvent` 返回。
+- `response.output_item.added` 且 item 为 `function_call`→`_track_tool_builder(_tool_builder_from_item(item), ...)`。
+- `response.function_call_arguments.delta`→按事件定位 builder,`add_delta(delta)`。
+- `response.function_call_arguments.done`→定位 builder,`set_arguments(arguments)`。
+- `response.output_text.delta`→`ProviderTextDeltaEvent` 并记 `content_parts`。
+- `response.reasoning.delta`/`reasoning_summary_text.delta`/`reasoning_text.delta`→`ProviderThinkingDeltaEvent`。
+- `response.output_item.done`/`completed` 且 item 为 `function_call`→定位(或新建)builder,`update_from_item`,`set_arguments(item.arguments)`,`build` 出 `ToolCall` 并 append+发 `ProviderToolCallEvent`,`_untrack_tool_builder`;若 item 为 `message` 且尚无 content,`_text_from_done_message` 提取并发 `ProviderTextDeltaEvent`。
+- `response.done`/`completed`/`incomplete`→存 `finish_reason=_finish_reason_from_response`、`usage=_usage_from_response`,`break`。
+收尾 `yield ProviderResponseEndEvent(AssistantMessage("".join(content_parts), tool_calls, usage), finish_reason)`。
+
+#### `async def _iter_sse_objects(response) -> AsyncIterator[dict[str, JSONValue]]`
+逐行累积 `data:` 行(支持多行拼接),空行时把累积文本 `_loads_object` 产出;`[DONE]` 终止。
+
+#### `def _tool_builder_from_item(item) -> _ToolCallBuilder`
+从 item 取 `call_id`(缺省 `"call_0"`)、`item_id`、`name` 构造 builder。
+
+#### `def _track_tool_builder(builder, event, *, active_tools, by_item_id, by_call_id, by_output_index) -> None`
+把 builder 登记进 active 列表与三个索引字典(按 item_id/call_id/output_index)。
+
+#### `def _untrack_tool_builder(builder, *, ...) -> None`
+从 active 列表与三个字典移除。
+
+#### `def _tool_builder_for_event(event, *, ...) -> _ToolCallBuilder | None`
+按 `item_id`→`call_id`→`output_index` 顺序定位 builder;若都无且 active 仅 1 个则返回它,否则 None。
+
+#### `def _event_item_id(event) -> str | None` / `def _event_call_id(event) -> str | None` / `def _event_output_index(event) -> int | None`
+从 event 或 event.item 提取对应标识。
+
+#### `def _text_from_done_message(item) -> str`
+遍历 `item.content`,聚合 `output_text` 的 `text` 与 `refusal` 的 `refusal`。
+
+#### `def _finish_reason_from_response(event) -> str | None`
+取 `event["response"]["status"]` 字符串。
+
+#### `def _int_or_zero(value) -> int`
+整数(非 bool)返回,否则 0。
+
+#### `def _usage_from_response(event) -> Usage | None`
+从 `event["response"]["usage"]` 解析:`cache_read=input_tokens_details.cached_tokens`,`input=input_tokens - cache_read`,`cache_write=0`,`reasoning=output_tokens_details.reasoning_tokens`(None 表示未报),`total_tokens`。
+
+#### `def _response_error_message(event) -> str`
+`event["response"]["error"]["message"]` 或 code 或默认。
+
+#### `def _error_message(event, *, fallback) -> str`
+`event["message"]` 或 `event["code"]` 或 fallback。
+
+#### `def _build_codex_headers(configured_headers, *, access_token, account_id, originator) -> dict[str, str]`
+合并 headers + `Authorization: Bearer`、`chatgpt-account-id`、`originator`、`User-Agent`(含系统信息)、`OpenAI-Beta: responses=experimental`、`accept: text/event-stream`、`content-type`。
+
+#### `def _resolve_codex_url(base_url) -> str`
+确保以 `/codex/responses` 结尾(已含 `/codex/responses` 保持;`/codex` 补 `/responses`;否则补)。
+
+#### `def _split_tool_call_id(value: str) -> tuple[str, str | None]`
+按首个 `|` 拆成 `(call_id, item_id)`。
+
+#### `def _loads_object(value: str) -> dict[str, JSONValue] | None`
+`loads` 失败或非 dict 返回 None。
+
+#### `def _is_retryable_status(status_code: int, body: str) -> bool`
+`status_code==429` 且 `_is_terminal_rate_limit(body)` 则返回 False;否则 `status_code in {408,409,425,429} or >=500`。
+
+#### `def _is_terminal_rate_limit(body: str) -> bool`
+body 小写后若含任一计费相关 marker(`gousagelimiterror`/`freeusagelimiterror`/`monthly usage limit reached`/`available balance`/`insufficient_quota`/`out of budget`/`quota exceeded`/`billing`)返回 True。
+
+---
+
+## 文件:fake.py
+
+确定性测试 provider,不发起任何网络请求,只回放预定义的事件流,用于 agent-loop 测试。
+
+### FakeProvider
+
+#### `__init__(self, streams: Iterable[Iterable[ProviderEvent]]) -> None`
+把每个传入流 `list(...)` 存入 `self._streams`,并初始化 `self.calls`(记录每次调用的 `(model, system, messages, tools)`)。
+
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+记录本次调用到 `self.calls`(`model, system, list(messages), list(tools)`);从 `self._streams` 弹出下一条流(无则空列表);定义内部 `async def iterator()` 逐 `yield event`,但每轮检查 `signal is not None and signal.is_cancelled()` 可提前 `return`;返回该迭代器。即每次调用消费一个预脚本流,使测试具备确定性、可断言调用参数。
+
+### 对比小结(各 provider 在 payload / 工具 schema / thinking / 事件映射 上的异同)
+
+- 端点与鉴权:openai_compatible 子类通用 `/chat/completions` 或 `/v1/responses` + Bearer;anthropic 用 `/messages` + `x-api-key`/`anthropic-version`;google 用 `/models/{model}:streamGenerateContent?key=`(key 在 query);mistral 复用 `/chat/completions` + Bearer;codex 用 `{base_url}/codex/responses` + Bearer+`chatgpt-account-id`+`OpenAI-Beta`。
+- 工具 schema:`tools` 顶层键名各异——OpenAI 系用 `tools[].function.{name,parameters}`,Anthropic 用 `tools[].{name,input_schema}`,Google 用 `tools[].functionDeclarations[].{name,parameters}`(且清理 `additionalProperties`/`$schema`),Codex 同 OpenAI 但 `strict: None`,Mistral 同 OpenAI 但 `strict: False`。
+- thinking:OpenAI 系靠 `reasoning_effort`/`reasoning`(按 thinking_format 多变),Anthropic 用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort`,Google 用 `thinkingConfig`(`thinkingBudget`/`thinkingLevel`/`includeThoughts`),Mistral 用 `reasoning_effort:"high"` 或 `prompt_mode:"reasoning"`,Codex 用 `reasoning.effort`+`summary`。
+- 流式事件映射:所有 provider 都把原生块映射为统一的 `ProviderResponseStartEvent`/`ProviderTextDeltaEvent`/`ProviderThinkingDeltaEvent`/`ProviderToolCallEvent`/`ProviderResponseEndEvent`/`ProviderErrorEvent`/`provider_retry_event`。差异在原生事件名:OpenAI 系看 `choices[].delta`/Responses `response.*`;Anthropic 看 `content_block_*`/`message_delta`;Google 看 `candidates[].content.parts` 且以 `thought` 标志区分 thinking;Codex 内联处理 `response.*` 且 thinking 映射到 `reasoning.*` 系列。错误统一转 `ProviderErrorEvent`(HTTP 用 `provider_http_error_message`,流内错误用各自 `_*_error_message`)。
+- 偏离基类:除 mistral/openai_compatible 共享“chat-completions 同构信封”思路外,anthropic、google、codex 均自成一套流式解析(anthropic 在 `stream_response` 内联分支、google 用 `_GoogleStreamParser`、codex 用异步生成器 `_codex_provider_events`),且各自有独立的消息格式转换与 usage/retry 判定。openai_compatible 通过 `_use_responses_api` 参数化路由覆盖了绝大多数 OpenAI 兼容端点,mistral 与 codex 则是对该范式的变体(前者贴近 chat、后者贴近 responses 但带订阅凭证)。
+
+---
+
 <!-- NAV -->
 [← tau_ai · 环境配置]({{< relref "./ai-env-config.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
