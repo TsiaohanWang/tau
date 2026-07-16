@@ -1,7 +1,7 @@
 {{/* code-browser.html — right-side source code panel
-     Usage: {{ partial "code-browser.html" . }}
+     Uses Hugo's built-in highlight for server-side syntax highlighting.
      Expects .Page.Params.code_files to be a list of relative paths
-     under src/ (mounted via module.mounts to source-code/).
+     under src/ (mounted via module.mounts to assets/source-code/).
 */}}
 {{ $files := .Page.Params.code_files }}
 {{ if $files }}
@@ -31,9 +31,9 @@
            aria-labelledby="tab-{{ $i }}">
         {{ if $resource }}
           {{ $content := $resource.Content }}
-          <pre><code class="language-python">{{ $content }}</code></pre>
+          <div class="code-highlight">{{ highlight $content "python" "" }}</div>
         {{ else }}
-          <pre><code class="language-python"># File not found: {{ $f }}</code></pre>
+          <div class="code-highlight"><pre class="chroma"><code># File not found: {{ $f }}</code></pre></div>
         {{ end }}
       </div>
     {{ end }}

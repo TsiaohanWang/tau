@@ -1,6 +1,7 @@
 {{ define "main" }}
 {{ $hasCode := .Params.code_files }}
 <div class="wrap docs-layout{{ if $hasCode }} has-code-panel{{ end }}">
+  <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">&#x276E;</button>
   <aside>
     {{ partial "sidebar.html" . }}
   </aside>

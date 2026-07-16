@@ -1,7 +1,6 @@
  {{ $current := .RelPermalink }}
  {{ $base := "/tau" }}
- <div class="docs-sidebar-wrap" id="sidebar-wrap">
-   <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">&#x276E;</button>
+ <div class="docs-sidebar-wrap">
    <nav class="docs-sidebar" aria-label="Documentation">
      {{ range $group := site.Data.sidebar }}
        {{ $link := "" }}
