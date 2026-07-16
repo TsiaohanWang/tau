@@ -189,6 +189,593 @@ Part 3a 让"抽象 agent"变成"会读文件、会跑命令的编程助手"：
 下一任务（Part 3b）看 `tau_coding/session.py` 的 `CodingSession`——它把这些工具、
 提示、资源组合起来，包住 `AgentHarness`，并负责持久化、命令、压缩、溢出恢复。
 
+---
+
+## 逐方法深层剖析（tools.py）
+
+> 以下对四个内置 coding 工具及其所有辅助函数做逐方法展开。
+
+## 内置工具概览
+
+本模块 `tau_coding/tools.py` 为 Tau 的本地编码会话提供四个内置工具：`read`、`write`、`edit`、`bash`。工具以两层对象暴露：
+
+- **`ToolDefinition`**(模块内定义)：包含名称、描述、prompt 片段与准则、JSON 输入 schema、以及异步执行器 `executor`。这是"完整定义"，保留给需要 prompt 元数据与 schema 的调用方。
+- **`AgentTool`**(来自 `tau_agent.tools`)：由 `ToolDefinition.to_agent_tool()` 转换而来的精简对象，被 provider 中立的 agent 循环消费。
+
+四个工具通过 `create_coding_tools(...)` 一次性组装为有序列表 `[read, write, edit, bash]`。所有相对路径都相对于一个可配置的工作目录 `cwd`(缺省为进程当前目录)解析；同一进程内对同一文件的写入/编辑通过进程级字典 `_file_locks` 中的 `asyncio.Lock` 串行化，避免并发突变交错。
+
+核心常量：
+- `DEFAULT_MAX_OUTPUT_BYTES = 50 * 1024`(50KB)
+- `DEFAULT_MAX_OUTPUT_LINES = 2_000`
+- `SUPPORTED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}`
+- `UTF8_BOM = "\ufeff"`
+
+模块的顶层数据结构与工厂函数在下文逐一展开；四个内置工具的详细行为在各自的 `## read 工具` 等小节中详述。
+
+---
+
+## ToolInputError
+
+### class ToolInputError(ValueError)
+
+模块级异常类(行 34-35)，继承自标准库 `ValueError`。当工具收到结构化的非法参数(类型错误、取值非法、文件不存在、oldText 不唯一等)时抛出。它是所有工具执行器内部校验失败的统一出口，由调用方捕获并转化为工具失败结果(在 `bash` 中变为 `ok=False` 与 `error`)。
+
+---
+
+## TruncationResult
+
+### class TruncationResult( frozen=True, slots=True )
+
+冻结的、使用 `__slots__` 的数据类(行 38-59)，描述"一次工具输出被如何截断"的元数据。字段：
+
+- `content: str`：实际返回的切片内容。
+- `truncated: bool`：是否发生了截断。
+- `truncated_by: str | None`：触发截断的限制维度，取值 `"lines"` 或 `"bytes"` 或 `None`。
+- `total_lines: int` / `total_bytes: int`：原始输出的总行数/总字节数。
+- `output_lines: int` / `output_bytes: int`：返回切片的实际行数/字节数。
+- `last_line_partial: bool`：末尾行是否因为字节限制被从尾部裁剪而变成"半行"(仅 `truncate_tail` 可能置位)。
+- `first_line_exceeds_limit: bool`：首行是否因为单行长于字节限制而无法安全展示(仅 `truncate_head` 可能置位)。
+- `max_lines: int` / `max_bytes: int`：本次截断所采用的上限(始终为模块常量)。
+
+### to_json(self) -> dict[str, JSONValue]
+
+将整个数据类通过 `dataclasses.asdict` 序列化为普通 `dict[str, JSONValue]`(行 61-62)，用于塞进 `AgentToolResult.data["truncation"]`，供前端渲染截断提示。
+
+---
+
+## ToolDefinition
+
+### class ToolDefinition( frozen=True, slots=True )
+
+冻结数据类(行 65-90)，表示一个编码工具在转换为 provider 工具之前的"完整定义"。字段：
+
+- `name: str`、`description: str`、`prompt_snippet: str`
+- `prompt_guidelines: tuple[str, ...]`：写进提示词、指导模型如何正确使用该工具的准则。
+- `input_schema: Mapping[str, JSONValue]`：JSON Schema 片段。
+- `executor: ToolExecutor`：异步执行器(签名为 `async (arguments, signal) -> AgentToolResult`)。
+
+### to_agent_tool(self) -> AgentTool
+
+(行 82-90)构造并返回 `tau_agent.tools.AgentTool`，把 `name`、`description`、`input_schema`、`executor`、以及 prompt 元数据 `prompt_snippet`/`prompt_guidelines` 一并透传。注意 `tool_call_id` 不在此设置(留空字符串在 `AgentToolResult` 中由执行器填写)。
+
+---
+
+## create_coding_tools
+
+### create_coding_tools(*, cwd: str | Path | None = None, shell_command_prefix: str | None = None) -> list[AgentTool]
+
+(行 96-116)工厂入口，返回默认编码工具集。实现要点：
+
+1. `root = Path.cwd() if cwd is None else Path(cwd)`——解析基准工作目录；`cwd` 缺省时取工厂调用时刻的进程当前目录。
+2. 顺序返回四个已转换为 `AgentTool` 的对象：`create_read_tool(cwd=root)`、`create_write_tool(cwd=root)`、`create_edit_tool(cwd=root)`、`create_bash_tool(cwd=root, shell_command_prefix=shell_command_prefix)`。
+3. 所有工具共享进程内 `_file_locks`，从而同一文件的多重写入/编辑互斥；`bash` 额外接收 `shell_command_prefix`，在每次命令前拼一个 setup 前缀。
+
+---
+
+## create_read_tool_definition
+
+### create_read_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinition
+
+(行 119-252)构造 `read` 工具的完整定义。先解析 `root`(同上)，再定义内嵌异步执行器 `execute`，最后返回 `ToolDefinition`，其 schema 仅要求 `path`，可选 `offset`/`limit`。
+
+### execute(arguments, signal) — 内嵌于 create_read_tool_definition
+
+(行 136-229)读取文件的核心逻辑，逐步：
+
+1. `del signal`——`read` 不响应取消信号，显式丢弃。
+2. `raw_path = _str_arg(arguments, "path")`——保留原始传入路径字符串(用于提示信息)；`path = _path_arg(arguments, "path", cwd=root)`——解析为绝对 `Path`。
+3. `offset = _optional_int_arg(arguments, "offset")`、`limit = _optional_int_arg(arguments, "limit")`。若 `offset < 0` 抛 `ToolInputError("offset must be at least 0")`；若 `limit < 1` 抛 `ToolInputError("limit must be at least 1")`。
+4. 校验：`path.exists()` 否则抛 `File not found`；`path.is_dir()` 否则抛 `Path is a directory`。注意：特殊路径 `/` 会落在此处的"是目录"分支而报错(源码没有对 `/` 做专门列出目录的特殊处理)。
+5. `mime_type = _detect_supported_image_mime_type(path)`——若命中支持的图像 MIME，则 `data = path.read_bytes()`，返回 `AgentToolResult`，`content="Read image file [{mime_type}]"`，`data` 含 `path`、`mime_type`、`bytes`、以及 `_base64_text(data)` 得到的 `image_base64`。不进入文本截断逻辑。
+6. 文本路径：`text = path.read_text(encoding="utf-8")`；`all_lines = text.split("\n")`(按 `\n` 切分，保留末尾空串)。
+7. `start_line = 0 if offset is None or offset == 0 else offset - 1`——offset 为 1 索引，转 0 索引。若 `start_line >= len(all_lines)` 抛 `Offset ... is beyond end of file` 错误。
+8. 若给定 `limit`：`end_line = min(start_line + limit, len(all_lines))`，取切片 `all_lines[start_line:end_line]` 用 `\n` 连接，并记录 `user_limited_lines = end_line - start_line`；否则取 `start_line:` 之后的全部。
+9. `truncation = truncate_head(selected)`——对选中文本做"从头截断"判断(行/字节双限)。
+10. `start_display = start_line + 1`；`details = {"path": str(path), "truncation": truncation.to_json()}`。
+11. 输出文案分支：
+    - 若 `truncation.first_line_exceeds_limit`：首行过长，输出一段指导用 `bash: sed -n '<start_display>p' <raw_path> | head -c <DEFAULT_MAX_OUTPUT_BYTES>` 取该行的提示(用 `format_size` 显示大小)。
+    - 若 `truncation.truncated`：在 `truncation.content` 后追加续读提示；若因行数限制，提示 `Showing lines {start_display}-{end_display} of {total}... Use offset={next_offset}`；若因字节限制，附加 `({format_size(DEFAULT_MAX_OUTPUT_BYTES)} limit)`。`end_display = start_display + truncation.output_lines - 1`，`next_offset = end_display + 1`。
+    - 否则若 `user_limited_lines is not None` 且仍有剩余行：输出 `truncation.content` 并提示剩余行数与 `next_offset`。
+    - 否则直接使用 `truncation.content`(无截断、无剩余)。
+12. 返回 `AgentToolResult(ok=True, name="read", content=output, data=details)`。
+
+`description` 文案明确告知：文本输出被截断到 `DEFAULT_MAX_OUTPUT_LINES` 行或 `DEFAULT_MAX_OUTPUT_BYTES//1024 KB`(先到先停)，用 offset/limit 处理大文件。`prompt_guidelines` 建议"用 read 检查文件而非 cat/sed"。
+
+---
+
+## create_read_tool
+
+### create_read_tool(*, cwd: str | Path | None = None) -> AgentTool
+
+(行 255-257)薄封装，等价于 `create_read_tool_definition(cwd=cwd).to_agent_tool()`。`description` 注释写"用于读取 UTF-8 文本文件与受支持的图像"。
+
+---
+
+## create_write_tool_definition
+
+### create_write_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinition
+
+(行 260-312)构造 `write` 工具的完整定义，内嵌 `execute`,schema 要求 `path` 与 `content`。
+
+### execute(arguments, signal) — 内嵌于 create_write_tool_definition
+
+(行 275-293)写入文件：
+
+1. `del signal`——`write` 不响应取消信号。
+2. `path = _path_arg(arguments, "path", cwd=root)`、`content = _str_arg(arguments, "content")`。
+3. `async with _file_lock(path):`——获取该绝对路径对应的进程内 `asyncio.Lock`，串行化同文件并发写。
+4. 在锁内：`path.parent.mkdir(parents=True, exist_ok=True)` 自动创建父目录；`path.write_text(content, encoding="utf-8")` 以 UTF-8 **整体覆盖**写入(已存在文件被覆盖,不存在则新建)。
+5. 返回 `AgentToolResult(ok=True, content=f"Successfully wrote to {path}.", data={"path": str(path), "characters": len(content)})`——`characters` 是传入字符串的字符数(而非字节数)。
+
+注意：源码中 `write` 的 `execute` 并没有实现"超大文件状态块"逻辑(无 BOM 剥离、无行尾归一、无大小阈值分支)——它始终直接 `write_text`。`_strip_bom`/`restore_line_endings` 等仅用于 `edit`。`description` 文案强调"覆盖写、自动建父目录"。
+
+---
+
+## create_write_tool
+
+### create_write_tool(*, cwd: str | Path | None = None) -> AgentTool
+
+(行 315-317)薄封装：`create_write_tool_definition(cwd=cwd).to_agent_tool()`。
+
+---
+
+## create_edit_tool_definition
+
+### create_edit_tool_definition(*, cwd: str | Path | None = None) -> ToolDefinition
+
+(行 320-425)构造 `edit` 工具的完整定义，内嵌 `execute`,schema 要求 `path` 与 `edits`(数组,每项 `{oldText, newText}`,`additionalProperties: False`)。`description`/`prompt_guidelines` 强调：每个 `oldText` 必须精确匹配且全局唯一、不可重叠;多处分开改动应在一次调用中以多个 `edits` 项给出,不要发重叠/嵌套 edits,`oldText` 应短而唯一。
+
+### execute(arguments, signal) — 内嵌于 create_edit_tool_definition
+
+(行 340-379)精确文本替换：
+
+1. `del signal`——`edit` 不响应取消信号。
+2. `prepared = _prepare_edit_arguments(arguments)`——规范化参数(兼容旧式顶层 `oldText`/`newText` 与 JSON 字符串 `edits`)。
+3. `path = _path_arg(prepared, "path", cwd=root)`、`edits = _edits_arg(prepared)`——校验并提取 edits 列表。
+4. 校验：`path.exists()` 否则抛 `File not found`；`path.is_dir()` 否则抛 `Path is a directory`。
+5. `async with _file_lock(path):`——获取文件锁。
+6. `raw_content = path.read_text(encoding="utf-8")`；`bom, content = _strip_bom(raw_content)`——剥离 UTF-8 BOM 并记录。
+7. `original_ending = detect_line_ending(content)`——探测原文件主导行尾(CRLF/LF)。
+8. `normalized = normalize_to_lf(content)`——统一成 LF 便于匹配。
+9. `base_content, new_content = apply_edits_to_normalized_content(normalized, edits, str(path))`——在归一化文本上执行所有 edits(含唯一性/重叠/非空校验)。
+10. `final_content = bom + restore_line_endings(new_content, original_ending)`——重新加回 BOM,并按原行尾恢复。
+11. `path.write_text(final_content, encoding="utf-8")`——写回。
+12. 锁外：`diff_text, first_changed_line = generate_diff_string(base_content, new_content)`；`patch = generate_unified_patch(str(path), base_content, new_content)`。
+13. 返回 `AgentToolResult(ok=True, content=f"Successfully replaced {len(edits)} block(s) in {path}.", data={path, edits 数, diff, patch, first_changed_line})`。
+
+关键点:所有校验(找得到、唯一、不重叠、非空、确实有变化)在写盘前完成,任一失败抛 `ToolInputError`,文件保持未改动(因为写盘在锁内但校验在写盘前)。
+
+---
+
+## create_edit_tool
+
+### create_edit_tool(*, cwd: str | Path | None = None) -> AgentTool
+
+(行 428-430)薄封装：`create_edit_tool_definition(cwd=cwd).to_agent_tool()`。
+
+---
+
+## create_bash_tool_definition
+
+### create_bash_tool_definition(*, cwd: str | Path | None = None, shell_command_prefix: str | None = None) -> ToolDefinition
+
+(行 433-571)构造 `bash` 工具定义。先解析 `root`;如有 `shell_command_prefix` 则 `prefix = shell_command_prefix.strip()`,否则 `None`。内嵌 `execute`,schema 要求 `command`,可选数字 `timeout`。
+
+### execute(arguments, signal) — 内嵌于 create_bash_tool_definition
+
+(行 457-547)执行 shell 命令：
+
+1. `command = _str_arg(arguments, "command")`；`shell_command = _prefixed_shell_command(command, prefix)`(若有 prefix 则前置为 `prefix\ncommand`)。
+2. `timeout = _optional_float_arg(arguments, "timeout")`;若 `timeout is not None and timeout <= 0` 抛 `timeout must be greater than 0`。
+3. 若 `signal is not None and signal.is_cancelled()` 抛 `Command cancelled`(在起进程前判断)。
+4. `start = monotonic()`——计时起点。
+5. **POSIX**:`asyncio.create_subprocess_shell(shell_command, cwd=root, stdout=PIPE, stderr=STDOUT, start_new_session=True, executable="bash" if prefix else None)`——合并 stderr 到 stdout,新建会话(便于超时整体杀组),有 prefix 时显式用 `bash` 解释器。
+   **非 POSIX**:同样 `create_subprocess_shell` 但不带 `start_new_session`/`executable`。
+6. `output_bytes, _stderr, timed_out, cancelled = await _communicate_with_cancellation(process, timeout=timeout, signal=signal)`。
+7. `output = output_bytes.decode(errors="replace")`——用替换策略解码(避免非法字节崩)。
+8. `truncation = truncate_tail(output)`——**尾部截断**(保留末尾内容)。
+9. `full_output_path = None`;`output_text = truncation.content or "(no output)"`。
+10. 若 `truncation.truncated`:调用 `_write_temp_output(output)` 把**完整**输出写到临时日志文件,记下路径。计算 `start_line = total_lines - output_lines + 1`、`end_line = total_lines`,按三种情形追加提示:
+    - `last_line_partial`:最后一行被字节裁剪,提示 `Showing last {size} of line {end_line}. Full output: {path}`。
+    - `truncated_by == "lines"`:`Showing lines {start_line}-{end_line} of {total}. Full output: {path}`。
+    - 否则(字节限):附带 `({format_size(DEFAULT_MAX_OUTPUT_BYTES)} limit)`。
+11. `exit_code = process.returncode`。
+12. 状态文案:超时→`Command timed out after {timeout:g} seconds`(无 timeout 则 `Command timed out`);取消→`Command cancelled`;退出码非 0/非 `None`→`Command exited with code {exit_code}`。若有状态,`output_text = append_status_block(output_text, status)`(在空行后追加)。
+13. `ok = exit_code == 0 and not timed_out and not cancelled`。
+14. 返回 `AgentToolResult(ok=ok, content=output_text, error=None if ok else status, data={command, exit_code, timed_out, cancelled, duration_seconds(round 3 位), truncation.to_json(), full_output_path, shell_command_prefix_applied})`。
+
+`description` 文案指出:输出被截断到末尾 `DEFAULT_MAX_OUTPUT_LINES` 行或 `DEFAULT_MAX_OUTPUT_BYTES//1024 KB`,截断时全量写临时文件;可选 `timeout`(秒,无默认超时)。
+
+---
+
+## create_bash_tool
+
+### create_bash_tool(*, cwd: str | Path | None = None, shell_command_prefix: str | None = None) -> AgentTool
+
+(行 574-583)薄封装：`create_bash_tool_definition(cwd=cwd, shell_command_prefix=shell_command_prefix).to_agent_tool()`。
+
+---
+
+## _prefixed_shell_command
+
+### _prefixed_shell_command(command: str, prefix: str | None) -> str
+
+(行 586-590)若有 `prefix` 返回 `f"{prefix}\n{command}"`(让 setup 前缀先执行),否则原样返回 `command`。
+
+---
+
+## format_size
+
+### format_size(bytes_count: int) -> str
+
+(行 593-598)把字节数格式化为人类可读串：`<1024`→`{n}B`;`[1024, 1024*1024)`→`{n/1024:.1f}KB`;`>=1024*1024`→`{n/MB:.1f}MB`。被 read/bash 的截断提示复用。
+
+---
+
+## append_status_block
+
+### append_status_block(text: str, status: str) -> str
+
+(行 601-603)若 `text` 非空返回 `f"{text}\n\n{status}"`(空一行后追加状态),否则直接返回 `status`。用于 bash 把超时/取消/非零退出状态接在输出之后。
+
+---
+
+## _communicate_with_cancellation
+
+### _communicate_with_cancellation(process, *, timeout, signal) -> tuple[bytes, bytes | None, bool, bool]
+
+(行 606-646)在带超时与取消监听的情况下收集子进程输出,返回 `(output_bytes, stderr, timed_out, cancelled)`：
+
+1. `communicate = asyncio.create_task(process.communicate())` 启动通信任务。
+2. 若 `signal` 非空,`cancel_watch = asyncio.create_task(_wait_for_cancel(signal))`,加入等待集合。
+3. `asyncio.wait(wait_for, timeout=timeout, return_when=FIRST_COMPLETED)`:
+    - 若 `communicate` 先完成：取 `communicate.result()` 返回 `(output_bytes, stderr, False, False)`(未超时、未取消)。
+    - 否则(`communicate` 未先完成)：`cancelled = cancel_watch in done`(超时则 `cancel_watch` 不在 done);调 `_kill_process_tree(process)` 杀进程树;再 `await communicate` 收割输出(捕获 `CancelledError` 时输出置 `b""`、stderr 置 `None`)。返回 `(output_bytes, stderr_result, not cancelled, cancelled)`——注意 `timed_out` 字段为 `not cancelled`(若不是取消,就是超时)。
+4. 外层 `except asyncio.CancelledError`:`_kill_process_tree(process)`,若 `communicate` 未完成则 `communicate.cancel()` 并 re-raise。
+5. `finally`:若有 `cancel_watch` 则 `cancel()` 清理监听任务。
+
+由于 stderr 被合并到 stdout,实际 `stderr` 返回值基本无意义(始终来自合并流)。
+
+---
+
+## _wait_for_cancel
+
+### _wait_for_cancel(signal: ToolCancellationToken) -> None
+
+(行 649-651)轮询 `signal.is_cancelled()`,每 50ms 睡眠一次,直到被取消。作为 `cancel_watch` 任务让 `_communicate_with_cancellation` 能感知外部取消。
+
+---
+
+## truncate_head
+
+### truncate_head(content, *, max_lines=DEFAULT_MAX_OUTPUT_LINES, max_bytes=DEFAULT_MAX_OUTPUT_BYTES) -> TruncationResult
+
+(行 654-694)从头保留、丢弃尾部,用于 `read`：
+
+1. `lines = _split_lines_for_counting(content)`(按 `\n` 切并按末尾换行修正);`total_lines/ total_bytes` 统计。
+2. 若 `total_lines <= max_lines and total_bytes <= max_bytes`:返回未截断结果(content 全量,`truncated=False`,`truncated_by=None`)。
+3. 若首行字节 `lines[0]` 超 `max_bytes`:返回 `first_line=True`、`truncated=True`、`truncated_by="bytes"`、空 content——表示首行大到无法安全展示。
+4. 否则从头逐行累加(`output_lines`),累加时第二行起额外计入 1 字节换行:`line_bytes = len(line.encode()) + (1 if index > 0 else 0)`。一旦 `output_bytes + line_bytes > max_bytes` 即改 `truncated_by="bytes"` 并停止;否则 `truncated_by` 保持 `"lines"`(行数先到限)。最多取 `max_lines` 行。
+5. `output = "\n".join(output_lines)`,调用 `_truncation_result` 构造结果。
+
+---
+
+## truncate_tail
+
+### truncate_tail(content, *, max_lines=DEFAULT_MAX_OUTPUT_LINES, max_bytes=DEFAULT_MAX_OUTPUT_BYTES) -> TruncationResult
+
+(行 697-741)从尾部保留、丢弃头部,用于 `bash`：
+
+1. 同样 `lines = _split_lines_for_counting(content)`、`total_lines/total_bytes`。
+2. 未超双限则原样返回未截断结果。
+3. 从尾部倒序处理:`output_lines` 从头部插入。`line_bytes = len(line.encode()) + (1 if output_lines else 0)`(已收集行前需补换行)。
+4. 若 `len(output_lines) >= max_lines`:置 `truncated_by="lines"` 并 break(行数先满)。
+5. 若 `output_bytes + line_bytes > max_bytes`:置 `truncated_by="bytes"`;若此时还没有任何行(`not output_lines`),用 `_truncate_string_to_bytes_from_end(line, max_bytes)` 从该行尾部裁字节,插入并设 `last_line_partial=True`;然后 break。
+6. 否则 `output_lines.insert(0, line)` 累加。
+7. `output = "\n".join(output_lines)`,调用 `_truncation_result(..., last_line_partial=last_line_partial)`。
+
+---
+
+## detect_line_ending
+
+### detect_line_ending(content: str) -> str
+
+(行 744-749)探测文件主导行尾：`crlf_index = content.find("\r\n")`、`lf_index = content.find("\n")`。若两者之一为 `-1`(即没有 CRLF 或没有 LF)返回 `"\n"`;否则返回两者中先出现者:`"\r\n" if crlf_index < lf_index else "\n"`。供 `edit` 在归一化改完后恢复原始行尾。
+
+---
+
+## normalize_to_lf
+
+### normalize_to_lf(text: str) -> str
+
+(行 752-753)把文本行尾统一成 LF：`text.replace("\r\n", "\n").replace("\r", "\n")`。用于 `edit` 的匹配阶段(内容与 oldText/newText 都先归一)。
+
+---
+
+## restore_line_endings
+
+### restore_line_endings(text: str, ending: str) -> str
+
+(行 756-757)若 `ending == "\r\n"` 则 `text.replace("\n", "\r\n")`,否则原样返回。供 `edit` 在替换完成后恢复原始行尾。
+
+---
+
+## apply_edits_to_normalized_content
+
+### apply_edits_to_normalized_content(normalized_content, edits, path) -> tuple[str, str]
+
+(行 760-790)在已归一化(纯 LF)内容上执行全部 edits,返回 `(base_content, new_content)`：
+
+1. 先把每个 edit 的 `oldText`/`newText` 各自 `normalize_to_lf` 得到 `normalized_edits`。
+2. 遍历校验：`if not edit["oldText"]` 抛 `_empty_old_text_error`(oldText 不可为空)。
+3. 计算匹配区间 `matches: list[(start, end, newText)]`:对每个 edit,`_count_occurrences(normalized_content, old_text)`——`0` 抛 `_not_found_error`;`>1` 抛 `_duplicate_error`(必须唯一);否则 `start = index(old_text)`,`matches.append((start, start+len, newText))`。
+4. `_validate_non_overlapping(matches)`——保证区间不重叠。
+5. 从后往前(`sorted(matches, reverse=True)`)逐个切片替换:`new_content = new_content[:start] + new_text + new_content[end:]`(倒序保证前面的区间索引不被前面的替换改变)。
+6. `if new_content == normalized_content` 抛 `_no_change_error`(替换后无变化)。
+7. 返回 `(normalized_content, new_content)`。
+
+注意:源码无"模糊匹配",`oldText` 必须是精确子串且唯一——"模糊"在任务描述里是指归一化(行尾/BOM)层面的容差,并非近似匹配。
+
+---
+
+## generate_diff_string
+
+### generate_diff_string(old: str, new: str) -> tuple[str, int | None]
+
+(行 793-808)生成 ndiff 风格 diff 与首个变更行号：
+
+1. `old_lines = old.splitlines()`、`new_lines = new.splitlines()`。
+2. `diff = "\n".join(difflib.ndiff(old_lines, new_lines))`——字符串形式的行级差异(`  ` 不变,`+` 新增,`-` 删除)。
+3. 二次遍历 `ndiff` 计算 `first_changed_line`:`new_line_number` 初 0;遇 `  `(上下文)与 `+` 都 `+1`;`+` 且 `first_changed_line is None` 时记下行号;遇 `-` 且尚未记录时记 `max(new_line_number + 1, 1)`。
+4. 返回 `(diff, first_changed_line)`。
+
+---
+
+## generate_unified_patch
+
+### generate_unified_patch(path: str, old: str, new: str) -> str
+
+(行 811-819)用 `difflib.unified_diff` 生成标准 unified diff 补丁：`old.splitlines(keepends=True)` 与 `new.splitlines(keepends=True)`(保留换行),`fromfile=tofile=path`,把生成器 `"" .join(...)` 成字符串。
+
+---
+
+## _truncation_result
+
+### _truncation_result(content, truncated, truncated_by, total_lines, total_bytes, output_lines, output_bytes, *, last_line_partial=False, first_line=False) -> TruncationResult
+
+(行 822-846)构造 `TruncationResult` 的工厂:`max_lines/max_bytes` 固定填模块常量,`first_line_exceeds_limit` 填 `first_line` 参数,其余字段透传。被 `truncate_head`/`truncate_tail` 复用,避免重复字面量。
+
+---
+
+## _split_lines_for_counting
+
+### _split_lines_for_counting(content: str) -> list[str]
+
+(行 849-855)为"按行计/截断"切分:空串返回 `[]`;否则 `content.split("\n")`,若 `content.endswith("\n")` 则 `pop()` 去掉末尾空串(因为末尾换行不应算作额外一行)。返回不含末尾空串的行列表。
+
+---
+
+## _truncate_string_to_bytes_from_end
+
+### _truncate_string_to_bytes_from_end(text: str, max_bytes: int) -> str
+
+(行 858-863)从字符串尾部裁到 `max_bytes` 字节:`encoded = text.encode()`;若长度不超过直接返回;否则 `clipped = encoded[-max_bytes:]`,`clipped.decode(errors="ignore")`——从末尾截取最多 `max_bytes` 字节并忽略非法截断点。被 `truncate_tail` 在末尾行超字节限制时用来生成"半行"。
+
+---
+
+## _str_arg
+
+### _str_arg(arguments, name) -> str
+
+(行 866-870)从参数字典取 `name`,若值不是 `str` 抛 `ToolInputError(f"{name} must be a string")`;否则返回。是所有字符串参数的统一取用入口(`path`、`content`、`command` 等)。
+
+---
+
+## _path_arg
+
+### _path_arg(arguments, name, *, cwd: Path) -> Path
+
+(行 873-878)先 `_str_arg(arguments, name)`;`path = Path(value).expanduser()`(展开 `~`);若非绝对路径则 `cwd / path` 拼接为相对 `cwd` 的绝对路径;返回 `Path`。
+
+---
+
+## _optional_int_arg
+
+### _optional_int_arg(arguments, name) -> int | None
+
+(行 881-887)取值:为 `None` 返回 `None`;否则若不是 `int` 抛 `ToolInputError(f"{name} must be an integer")`;返回该 int。`offset`/`limit` 使用。
+
+---
+
+## _optional_float_arg
+
+### _optional_float_arg(arguments, name) -> float | None
+
+(行 890-896)取值:为 `None` 返回 `None`;否则若不是 `int | float` 抛 `ToolInputError(f"{name} must be a number")`;返回 `float(value)`。`timeout` 使用(允许整数或浮点秒)。
+
+---
+
+## _prepare_edit_arguments
+
+### _prepare_edit_arguments(arguments) -> Mapping[str, JSONValue]
+
+(行 899-918)把各种历史/兼容形态的参数规整成标准形态(返回新 dict,不修改原参)：
+
+1. `prepared = dict(arguments)`。
+2. 若 `edits_value` 是字符串:尝试 `json.loads`;解析成功且为 `list` 则写回 `prepared["edits"]`(支持把 JSON 字符串形式的 edits 当数组用)。
+3. 若顶层有 `oldText` 与 `newText`(旧式单 edit 写法):取出;把已有的 `edits`(若是 list)与这一对合并——`prepared["edits"] = [*edit_list, {"oldText": old_text, "newText": new_text}]`,并 `pop` 掉顶层 `oldText`/`newText`(避免与数组混用冲突)。
+4. 返回 `prepared`。
+
+---
+
+## _edits_arg
+
+### _edits_arg(arguments) -> list[dict[str, str]]
+
+(行 921-939)从规整后的参数中校验并抽取 edits 列表：
+
+1. `value = arguments.get("edits")`;若不是非空 `list` 抛 `ToolInputError("Edit tool input is invalid. edits must contain at least one replacement.")`。
+2. 遍历:每项必须是 `dict`,且 `oldText`/`newText` 均为 `str`(否则按索引抛 `edits[{i}] must be an object` 或 `... must be strings`)。
+3. 收集并返回 `[{"oldText", "newText"}, ...]`。
+
+---
+
+## _validate_non_overlapping
+
+### _validate_non_overlapping(spans: list[tuple[int, int, str]]) -> None
+
+(行 942-947)校验匹配区间不重叠:先把 `(start, end, newText)` 按 `start` 排序;`previous_end = -1`,遍历若 `start < previous_end` 抛 `ToolInputError("Edits must not overlap")`;`previous_end = end`。保证多个 edits 作用区域互不相交。
+
+---
+
+## _count_occurrences
+
+### _count_occurrences(content: str, text: str) -> int
+
+(行 950-958)统计 `text` 在 `content` 中的非重叠出现次数:从 `start=0` 起 `content.find(text, start)`,命中则 `count+=1` 且 `start = index + len(text)`,直到 `-1` 返回 `count`。供 `apply_edits_to_normalized_content` 判定 oldText 唯一性。
+
+---
+
+## _strip_bom
+
+### _strip_bom(content: str) -> tuple[str, str]
+
+(行 961-962)若 `content.startswith(UTF8_BOM)` 返回 `(UTF8_BOM, content[1:])`(记下 BOM 以备写回),否则返回 `("", content)`。供 `edit` 在读写时保留 UTF-8 BOM。
+
+---
+
+## _not_found_error
+
+### _not_found_error(path, edit_index, total_edits) -> str
+
+(行 965-974)构造"oldText 未找到"错误信息:单 edit(`total_edits==1`)返回针对文件整体的提示(强调需精确匹配含空白与换行);多 edit 则返回针对 `edits[{edit_index}]` 的提示。
+
+---
+
+## _duplicate_error
+
+### _duplicate_error(path, edit_index, total_edits, occurrences) -> str
+
+(行 977-986)构造"oldText 不唯一"错误信息:单 edit 报 `Found {occurrences} occurrences ... must be unique`;多 edit 报针对 `edits[{edit_index}]` 的同样内容。
+
+---
+
+## _empty_old_text_error
+
+### _empty_old_text_error(path, edit_index, total_edits) -> str
+
+(行 989-992)构造"oldText 为空"错误信息:单 edit→`oldText must not be empty in {path}.`;多 edit→`edits[{edit_index}].oldText must not be empty in {path}.`。
+
+---
+
+## _no_change_error
+
+### _no_change_error(path, total_edits) -> str
+
+(行 995-1002)构造"替换后无变化"错误信息:单 edit 附带一段说明(可能因特殊字符或文本不存在所致);多 edit 简版 `No changes made to {path}. The replacements produced identical content.`。
+
+---
+
+## _detect_supported_image_mime_type
+
+### _detect_supported_image_mime_type(path: Path) -> str | None
+
+(行 1005-1007)`mimetypes.guess_type(path)` 猜 MIME;若落在 `SUPPORTED_IMAGE_MIME_TYPES`(`image/jpeg|png|gif|webp`)返回该类型,否则 `None`。供 `read` 判断图像路径(注意它只靠扩展名猜 MIME,不读文件头)。
+
+---
+
+## _base64_text
+
+### _base64_text(data: bytes) -> str
+
+(行 1010-1013)函数内 `import base64`(延迟导入),`base64.b64encode(data).decode("ascii")` 返回 ASCII base64 串。供 `read` 把图像字节编码进结果。
+
+---
+
+## _kill_process_tree
+
+### _kill_process_tree(process: asyncio.subprocess.Process) -> None
+
+(行 1016-1026)杀掉子进程及其子树:POSIX 下 `os.killpg(process.pid, signal.SIGKILL)`(因 `start_new_session=True`,pid 即进程组 id,整组强杀,覆盖管道/复合命令的子进程);捕获 `ProcessLookupError` 直接返回。非 POSIX 下 `process.kill()`(仅直接子进程),同样容错 `ProcessLookupError`。被 `_communicate_with_cancellation` 在超时/取消时调用。
+
+---
+
+## _write_temp_output
+
+### _write_temp_output(output: str) -> str
+
+(行 1029-1038)把完整输出写到临时日志文件:`tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="tau-bash-", suffix=".log", delete=False)`,写入 `output`,返回 `handle.name`(文件路径)。`delete=False` 保证文件不被自动删除,供前端/用户后续读取完整输出。被 `bash` 在截断发生时调用。
+
+---
+
+## _FileLockContext
+
+### class _FileLockContext
+
+(行 1041-1053)进程内按文件串行化写入的异步上下文管理器。
+
+### __init__(self, path: Path) -> None
+
+(行 1042-1044)`self._path = path.resolve()`(解析为绝对真实路径,作为锁字典的键);`self._lock: asyncio.Lock | None = None`(延迟到进入时取/建)。
+
+### __aenter__(self) -> None
+
+(行 1046-1049)`lock = _file_locks.setdefault(self._path, asyncio.Lock())`——以解析后的路径为键,从进程级字典取已有锁或新建;`self._lock = lock`;`await lock.acquire()` 获取锁。
+
+### __aexit__(self, _exc_type, _exc, _tb) -> None
+
+(行 1051-1053)若 `self._lock is not None` 则 `self._lock.release()` 释放锁。异常信息参数被忽略(不吞异常,正常传播)。
+
+---
+
+## _file_lock
+
+### _file_lock(path: Path) -> _FileLockContext
+
+(行 1056-1057)工厂函数,返回 `_FileLockContext(path)`。被 `write`/`edit` 的 `async with _file_lock(path):` 使用,实现同文件写入互斥。
+
+---
+
+## read 工具
+
+`read` 由 `create_read_tool_definition` 定义、`create_read_tool` 暴露为 `AgentTool`。核心行为见上文 `execute(arguments, signal)` 展开。补充要点：
+
+- **特殊路径**：源码中没有对 `/` 或目录做"列出目录"的特殊渲染——`/` 经 `_path_arg` 解析成根目录后,在 `path.is_dir()` 分支被当作目录直接抛 `ToolInputError("Path is a directory: /")`。目录与不存在文件都报错,而非列出内容。
+- **图片**：仅当扩展名对应支持的 MIME(`jpg/png/gif/webp`)时走图像分支,返回 base64 而非文本。
+- **行范围与截断**：`offset`(1 索引)与 `limit`(正整)先切片,再经 `truncate_head` 受行/字节双限约束;续读提示统一用 `offset=<下一行>`。首行过长有专门的 sed 引导提示。
+
+## write 工具
+
+由 `create_write_tool_definition` 定义。核心行为见其 `execute` 展开。`write` 是**整体覆盖/创建**,直接 `write_text`,无 diff、无 BOM 特殊处理、无大小阈值状态块(任务描述中的"超大文件状态块"在本源码的 `write` 中并未实现——它始终直接写盘)。父目录自动创建,文件锁保证同文件并发写串行。
+
+## edit 工具
+
+由 `create_edit_tool_definition` 定义。多 edits 的精确匹配、唯一性、不重叠校验、归一化编辑算法、diff 生成均见 `execute` 与 `apply_edits_to_normalized_content`/`generate_diff_string`/`generate_unified_patch` 的展开。关键:BOM 剥离后保留、原行尾探测后恢复;所有校验在写盘前完成,任一失败文件不动。
+
+## bash 工具
+
+由 `create_bash_tool_definition` 定义。shell 执行、超时、流式(`_communicate_with_cancellation` + `_wait_for_cancel`)、尾部截断(`truncate_tail`)、退出码/超时/取消状态、图片无关(注意:`bash` 不处理图像输出,只有 `read` 处理图像)、截断时全量输出落临时文件(由 `_write_temp_output` 生成路径并回报)。详见其 `execute` 与各私有辅助。
+
 <!-- NAV -->
 [← tau_agent · 公共导出与边界]({{< relref "./agent-init-boundary.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
