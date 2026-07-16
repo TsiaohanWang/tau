@@ -1,4 +1,5 @@
 {{ $current := .RelPermalink }}
+{{ $base := "/tau" }}
 <nav class="docs-sidebar" aria-label="Documentation">
   {{ range $group := site.Data.sidebar }}
     {{ $link := "" }}
@@ -8,13 +9,13 @@
         <p class="sidebar-group-label">{{ $group.label }}</p>
         <ul>
           {{ range $item := $group.items }}
-            {{ $href := $item.path | relURL }}
+            {{ $href := printf "%s%s" $base ($item.path | relURL) }}
             <li><a href="{{ $href }}" {{ if eq $current $href }}class="active"{{ end }}>{{ $item.label }}</a></li>
           {{ end }}
         </ul>
       </div>
     {{ else }}
-      {{ $href := $link | relURL }}
+      {{ $href := printf "%s%s" $base ($link | relURL) }}
       <a class="sidebar-toplink {{ if eq $current $href }}active{{ end }}" href="{{ $href }}">{{ $group.label }}</a>
     {{ end }}
   {{ end }}
