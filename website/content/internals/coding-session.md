@@ -1,6 +1,8 @@
 ---
 title: tau_coding · CodingSession
 description: session.py —— coding agent 的环境核心
+code_files:
+  - tau_coding/session.py
 ---
 
 ## 公开数据类（`CodingSession` 之前的类型）

@@ -1,6 +1,9 @@
 ---
 title: tau_coding · 渲染层(print/json)
 description: rendering/plain.py / rendering/json.py
+code_files:
+  - tau_coding/rendering/plain.py
+  - tau_coding/rendering/json.py
 ---
 
 ## `tau_coding/rendering/plain.py` — print 模式的最终文本

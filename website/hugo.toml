@@ -49,3 +49,6 @@ publishDir = "public"
   [[module.mounts]]
     source = "../src/tau_coding/data/release-notes"
     target = "data/release-notes"
+  [[module.mounts]]
+    source = "../src"
+    target = "assets/source-code"

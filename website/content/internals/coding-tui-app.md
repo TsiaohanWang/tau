@@ -1,6 +1,9 @@
 ---
 title: tau_coding · TUI 界面与控件
 description: tui/app / widgets / terminal_title
+code_files:
+  - tau_coding/tui/app.py
+  - tau_coding/tui/widgets.py
 ---
 
 ## `tui/app.py` — Textual 应用

@@ -1,6 +1,10 @@
 ---
 title: tau_coding · Provider 配置
 description: provider_catalog / provider_config / provider_runtime
+code_files:
+  - tau_coding/provider_config.py
+  - tau_coding/provider_catalog.py
+  - tau_coding/provider_runtime.py
 ---
 
 ## `tau_coding/provider_catalog.py` — 内建 provider 目录

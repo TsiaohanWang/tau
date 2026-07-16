@@ -1,6 +1,9 @@
 ---
 title: tau_agent · 执行核心
 description: loop.py 纯循环 / harness.py 有状态大脑
+code_files:
+  - tau_agent/loop.py
+  - tau_agent/harness.py
 ---
 
 ## `tau_agent/loop.py` — 纯 agent 循环

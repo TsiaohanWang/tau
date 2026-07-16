@@ -1,6 +1,12 @@
 ---
 title: tau_coding · 渲染层
 description: rendering/ 包全貌
+code_files:
+  - tau_coding/rendering/__init__.py
+  - tau_coding/rendering/base.py
+  - tau_coding/rendering/json.py
+  - tau_coding/rendering/plain.py
+  - tau_coding/rendering/transcript.py
 ---
 
 ## `tau_coding/rendering/base.py` — 共享的渲染原语

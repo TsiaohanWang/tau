@@ -1,6 +1,13 @@
 ---
 title: tau_coding · 工具与提示组装
 description: tools / system_prompt / context / context_window / skills / resources
+code_files:
+  - tau_coding/tools.py
+  - tau_coding/system_prompt.py
+  - tau_coding/context.py
+  - tau_coding/context_window.py
+  - tau_coding/skills.py
+  - tau_coding/resources.py
 ---
 
 ## `tau_coding/tools.py` — 内置 coding 工具（1057 行）

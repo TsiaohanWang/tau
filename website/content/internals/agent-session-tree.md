@@ -1,6 +1,13 @@
 ---
 title: tau_agent · 会话持久化树
 description: session/ 包的 entries / tree / jsonl / storage / memory
+code_files:
+  - tau_agent/session/__init__.py
+  - tau_agent/session/entries.py
+  - tau_agent/session/tree.py
+  - tau_agent/session/jsonl.py
+  - tau_agent/session/storage.py
+  - tau_agent/session/memory.py
 ---
 
 ## `session/entries.py` — 会话树节点模型

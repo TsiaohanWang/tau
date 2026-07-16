@@ -1,6 +1,8 @@
 ---
 title: tau_coding · CLI 入口
 description: cli.py —— Typer 命令行
+code_files:
+  - tau_coding/cli.py
 ---
 
 ## 4. `cli.py` — the Typer entry point

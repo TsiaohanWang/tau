@@ -13,6 +13,11 @@
       {{ $navJs = $navJs | js.Build | minify | fingerprint }}
     {{ end }}
     <script src="{{ $navJs.RelPermalink }}"></script>
+    {{ $codeBrowserJs := resources.Get "js/code-browser.js" }}
+    {{ if hugo.IsProduction }}
+      {{ $codeBrowserJs = $codeBrowserJs | js.Build | minify | fingerprint }}
+    {{ end }}
+    <script src="{{ $codeBrowserJs.RelPermalink }}"></script>
     {{ block "scripts" . }}{{ end }}
   </body>
 </html>

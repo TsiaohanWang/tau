@@ -1,6 +1,8 @@
 ---
 title: tau_agent · 公共导出与边界
 description: __init__.py 与 tau_ai 的边界
+code_files:
+  - tau_agent/__init__.py
 ---
 
 ## `tau_agent/__init__.py` — 公共导出面

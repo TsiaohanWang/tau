@@ -1,6 +1,13 @@
 ---
 title: tau_ai · 各 Provider 实现
 description: openai_compatible / anthropic / google / mistral / openai_codex / fake
+code_files:
+  - tau_ai/openai_compatible.py
+  - tau_ai/anthropic.py
+  - tau_ai/google.py
+  - tau_ai/mistral.py
+  - tau_ai/openai_codex.py
+  - tau_ai/fake.py
 ---
 
 ## `tau_ai/openai_compatible.py` — OpenAI 系"总管"

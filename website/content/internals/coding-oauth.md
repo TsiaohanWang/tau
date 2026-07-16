@@ -1,6 +1,13 @@
 ---
 title: tau_coding · OAuth 登录流程
 description: oauth_types / oauth_registry / oauth_anthropic / oauth_github_copilot / oauth_device
+code_files:
+  - tau_coding/oauth.py
+  - tau_coding/oauth_types.py
+  - tau_coding/oauth_registry.py
+  - tau_coding/oauth_anthropic.py
+  - tau_coding/oauth_github_copilot.py
+  - tau_coding/oauth_device.py
 ---
 
 ## 2. OAuth: the types and the registry

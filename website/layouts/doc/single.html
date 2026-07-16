@@ -1,5 +1,6 @@
 {{ define "main" }}
-<div class="wrap docs-layout">
+{{ $hasCode := .Params.code_files }}
+<div class="wrap docs-layout{{ if $hasCode }} has-code-panel{{ end }}">
   <aside>
     {{ partial "sidebar.html" . }}
   </aside>
@@ -13,5 +14,8 @@
     </div>
     {{ partial "docs-prevnext.html" . }}
   </article>
+  {{ if $hasCode }}
+    {{ partial "code-browser.html" . }}
+  {{ end }}
 </div>
 {{ end }}

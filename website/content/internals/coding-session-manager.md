@@ -1,6 +1,8 @@
 ---
 title: tau_coding · 会话索引
 description: session_manager.py
+code_files:
+  - tau_coding/session_manager.py
 ---
 
 ## `tau_coding/session_manager.py` — the session index

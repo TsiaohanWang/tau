@@ -1,6 +1,11 @@
 ---
 title: tau_coding · 扩展系统
 description: extensions/ 包与 __init__
+code_files:
+  - tau_coding/extensions/__init__.py
+  - tau_coding/extensions/api.py
+  - tau_coding/extensions/loader.py
+  - tau_coding/extensions/runtime.py
 ---
 
 ## 5. `extensions/` — the extension system

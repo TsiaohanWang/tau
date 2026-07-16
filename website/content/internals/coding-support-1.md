@@ -1,6 +1,11 @@
 ---
 title: tau_coding · 支撑模块(一)
 description: thinking / catalog_loader / branch_summary / diagnostics
+code_files:
+  - tau_coding/thinking.py
+  - tau_coding/catalog_loader.py
+  - tau_coding/branch_summary.py
+  - tau_coding/diagnostics.py
 ---
 
 ## `tau_coding/thinking.py` — thinking-mode primitives

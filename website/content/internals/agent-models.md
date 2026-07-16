@@ -1,6 +1,11 @@
 ---
 title: tau_agent · 数据模型
 description: types / messages / tools / events
+code_files:
+  - tau_agent/types.py
+  - tau_agent/messages.py
+  - tau_agent/events.py
+  - tau_agent/tools.py
 ---
 
 ## `tau_agent/types.py` — JSON 值类型别名

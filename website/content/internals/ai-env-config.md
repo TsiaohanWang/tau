@@ -1,6 +1,8 @@
 ---
 title: tau_ai · 环境配置
 description: env.py —— 基于环境变量的 provider 配置
+code_files:
+  - tau_ai/env.py
 ---
 
 ## `tau_ai/http_errors.py` — 安全的 HTTP 错误细节提取

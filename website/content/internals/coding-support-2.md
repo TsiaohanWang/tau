@@ -1,6 +1,13 @@
 ---
 title: tau_coding · 支撑模块(二)
 description: prompt_templates / reload / session_export / shell_config / update_check / version
+code_files:
+  - tau_coding/prompt_templates.py
+  - tau_coding/reload.py
+  - tau_coding/session_export.py
+  - tau_coding/shell_config.py
+  - tau_coding/update_check.py
+  - tau_coding/version.py
 ---
 
 ## `tau_coding/prompt_templates.py` — Markdown prompt templates

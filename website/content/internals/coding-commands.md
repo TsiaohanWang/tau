@@ -1,6 +1,8 @@
 ---
 title: tau_coding · Slash 命令
 description: commands.py
+code_files:
+  - tau_coding/commands.py
 ---
 
 ## `tau_coding/commands.py` — slash commands

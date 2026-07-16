@@ -1,6 +1,9 @@
 ---
 title: tau_coding · TUI 状态与适配
 description: tui/state / adapter / config / autocomplete
+code_files:
+  - tau_coding/tui/state.py
+  - tau_coding/tui/adapter.py
 ---
 
 ## `tui/state.py` — transcript（转录/对话流）模型

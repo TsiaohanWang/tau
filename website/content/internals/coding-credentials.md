@@ -1,6 +1,8 @@
 ---
 title: tau_coding · 凭证存储
 description: credentials.py
+code_files:
+  - tau_coding/credentials.py
 ---
 
 ## 1. `credentials.py` — 凭证存储

@@ -1,0 +1,45 @@
+{{/* code-browser.html — right-side source code panel
+     Usage: {{ partial "code-browser.html" . }}
+     Expects .Page.Params.code_files to be a list of relative paths
+     under src/ (mounted via module.mounts to source-code/).
+*/}}
+{{ $files := .Page.Params.code_files }}
+{{ if $files }}
+<aside class="docs-code-panel" id="code-panel">
+  <div class="code-panel-header">
+    <span class="panel-title">Source</span>
+    <button class="code-panel-toggle" id="code-panel-toggle" title="Collapse panel" aria-label="Toggle code panel">&#x2715;</button>
+  </div>
+  <div class="code-panel-tabs" id="code-panel-tabs" role="tablist">
+    {{ range $i, $f := $files }}
+      {{ $parts := split $f "/" }}
+      {{ $label := index $parts (sub (len $parts) 1) }}
+      <button class="code-panel-tab{{ if eq $i 0 }} active{{ end }}"
+              data-file-index="{{ $i }}"
+              role="tab"
+              aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"
+              id="tab-{{ $i }}"
+              aria-controls="panel-{{ $i }}">{{ $label }}</button>
+    {{ end }}
+  </div>
+  <div class="code-panel-body" id="code-panel-body">
+    {{ range $i, $f := $files }}
+      {{ $resource := resources.Get (printf "source-code/%s" $f) }}
+      <div class="code-panel-file{{ if eq $i 0 }} is-active{{ end }}"
+           id="panel-{{ $i }}"
+           role="tabpanel"
+           aria-labelledby="tab-{{ $i }}">
+        {{ if $resource }}
+          {{ $content := $resource.Content }}
+          <pre><code class="code-lines">{{ range $lineNo, $line := split $content "\n" }}<span class="code-line"><span class="code-line-num"></span>{{ $line }}</span>
+{{ end }}</code></pre>
+        {{ else }}
+          <pre><code class="code-lines"><span class="code-line"><span class="code-line-num"></span># File not found: {{ $f }}</span>
+</code></pre>
+        {{ end }}
+      </div>
+    {{ end }}
+  </div>
+</aside>
+<button class="code-panel-expand" id="code-panel-expand" title="Show code panel" aria-label="Expand code panel">&#x25C0; Code</button>
+{{ end }}

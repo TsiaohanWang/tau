@@ -1,6 +1,10 @@
 ---
 title: tau_ai · Provider 契约与事件流
 description: provider.py / events.py / retry.py / http.py / http_errors 之前的底层契约
+code_files:
+  - tau_ai/provider.py
+  - tau_ai/events.py
+  - tau_ai/retry.py
 ---
 
 ## `tau_ai/provider.py` — 全栈依赖的两个 Protocol
