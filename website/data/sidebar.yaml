@@ -48,6 +48,54 @@
       path: /internals/design-principles/
     - label: Build your own frontend
       path: /internals/custom-frontend/
+    - label: Source code walkthrough (源码剖析)
+      path: /internals/source-walkthrough/
+    - label: "tau_ai · Provider contract & events"
+      path: /internals/ai-provider-events/
+    - label: "tau_ai · Env configuration"
+      path: /internals/ai-env-config/
+    - label: "tau_ai · Provider implementations"
+      path: /internals/ai-providers/
+    - label: "tau_agent · Data models"
+      path: /internals/agent-models/
+    - label: "tau_agent · Loop & harness"
+      path: /internals/agent-loop-harness/
+    - label: "tau_agent · Session tree"
+      path: /internals/agent-session-tree/
+    - label: "tau_agent · Init & boundary"
+      path: /internals/agent-init-boundary/
+    - label: "tau_coding · Tools & prompt"
+      path: /internals/coding-tools-prompt/
+    - label: "tau_coding · CodingSession"
+      path: /internals/coding-session/
+    - label: "tau_coding · Slash commands"
+      path: /internals/coding-commands/
+    - label: "tau_coding · Session manager"
+      path: /internals/coding-session-manager/
+    - label: "tau_coding · Provider config"
+      path: /internals/coding-provider-config/
+    - label: "tau_coding · Rendering (print/json)"
+      path: /internals/coding-rendering-print/
+    - label: "tau_coding · TUI state & adapter"
+      path: /internals/coding-tui-state/
+    - label: "tau_coding · TUI app & widgets"
+      path: /internals/coding-tui-app/
+    - label: "tau_coding · Credentials"
+      path: /internals/coding-credentials/
+    - label: "tau_coding · OAuth flows"
+      path: /internals/coding-oauth/
+    - label: "tau_coding · CLI"
+      path: /internals/coding-cli/
+    - label: "tau_coding · Extensions"
+      path: /internals/coding-extensions/
+    - label: "tau_coding · Support modules (1)"
+      path: /internals/coding-support-1/
+    - label: "tau_coding · Support modules (2)"
+      path: /internals/coding-support-2/
+    - label: "tau_coding · Rendering layer"
+      path: /internals/coding-rendering/
+    - label: Source code walkthrough (衍生剖析)
+      path: /internals/source-walkthrough/
 - label: Release notes
   link: /releases/
 - label: Roadmap
