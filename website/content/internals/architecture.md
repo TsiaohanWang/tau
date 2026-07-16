@@ -52,9 +52,13 @@ TUI, or a frontend you build yourself — all by consuming the same event stream
 That's also what makes Tau readable: each layer answers one question, and you can
 study it without untangling the others.
 
-→ Next: [The agent loop & events]({{< relref "./agent-loop.md" >}}) ·
-[Design principles]({{< relref "./design-principles.md" >}}) ·
-[Build your own frontend]({{< relref "./custom-frontend.md" >}})
+ → Next: [The agent loop & events]({{< relref "./agent-loop.md" >}}) ·
+ [Design principles]({{< relref "./design-principles.md" >}}) ·
+ [Build your own frontend]({{< relref "./custom-frontend.md" >}})
+
+ For a file-by-file, bottom-up dissection of every module (derived from reading
+ the source), start at the
+ [Source code walkthrough]({{< relref "./source-walkthrough.md" >}}).
 
 {{% note title="Going deeper" %}}
 The phase-by-phase build journals, design docs, and ADRs live in the repo under

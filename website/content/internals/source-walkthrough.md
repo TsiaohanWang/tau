@@ -13,8 +13,13 @@ description: A bottom-up, file-by-file dissection of the Tau source — derived 
 
 ## 这份剖析的结构
 
-Tau 分三层,依赖方向单向:`tau_coding → tau_agent → tau_ai`。
-本剖析从最底层往上,逐文件拆解每个模块的设计。建议按下列顺序阅读:
+ Tau 分三层,依赖方向单向:`tau_coding → tau_agent → tau_ai`。
+ 本剖析从最底层往上,逐文件拆解每个模块的设计。建议按下列顺序阅读:
+
+ > **与本站其他文档的关系。** 上方的 `Architecture overview` / `Design principles` /
+ > `Build your own frontend` / `The agent loop` 等是官方视角的**概念性**介绍;
+ > 本页及其下链接的 24 个剖析页则是**逐文件、逐方法**的源码级拆解(衍生解读)。
+ > 概念页讲"为什么这样设计",剖析页讲"代码里具体怎么实现",二者互补、不重复。
 
 ### `tau_ai` — 与模型对话
 

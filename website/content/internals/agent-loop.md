@@ -47,5 +47,9 @@ include:
 Because the contract is *events*, a frontend's job is reduced to: send a prompt,
 consume the stream, draw what you see.
 
-→ See [Build your own frontend]({{< relref "./custom-frontend.md" >}}) for the concrete API, and
-[Architecture overview]({{< relref "./architecture.md" >}}) for where the loop sits.
+ → See [Build your own frontend]({{< relref "./custom-frontend.md" >}}) for the concrete API, and
+ [Architecture overview]({{< relref "./architecture.md" >}}) for where the loop sits.
+
+ For the actual implementation — `loop.py`'s `run_agent_loop` and `harness.py`'s
+ `AgentHarness`, method by method — see
+ [tau_agent · Loop & harness]({{< relref "./agent-loop-harness.md" >}}).
