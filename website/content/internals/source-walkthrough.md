@@ -46,6 +46,15 @@ Tau 分三层,依赖方向单向:`tau_coding → tau_agent → tau_ai`。
 - [支撑模块(二)]({{< relref "./coding-support-2.md" >}}) — `prompt_templates` / `reload` / `session_export` / `shell_config` / `update_check` / `version`
 - [渲染层]({{< relref "./coding-rendering.md" >}}) — `rendering/` 包
 
-<!-- NAV -->
-[↑ 总览]({{< relref "./source-walkthrough.md" >}})
+ ## 一致性校对记录
+
+本剖析已对全部 27 个 `internals/` 页面完成一次一致性 / 交叉引用校对：
+
+- **链接完整性**：所有 `relref` 内部链接目标均存在，无悬空引用（含 `../guides/*` 与 `../reference/*`）。
+- **符号准确性**：抽样核验的关键符号与源码一致，包括 `CodingSession.prompt` / `handle_command` / `set_model` / `emit_pending_session_start` / `set_thinking_level`、`ExtensionAPI.register_tool` / `register_command` / `send_user_message`、`TuiEventAdapter.apply`、`CommandRegistry.get`(→`SlashCommand | None`) / `list_commands`、`OAuthProvider.runtime_auth`、`LOGIN_PROVIDER_ALIASES`（`dict[str, tuple[str, str]]`，`anthropic-api`→`("anthropic","api-key")`、`anthropic-subscription`→`("anthropic","subscription")`）、`provider_runtime.create_model_provider`。
+- **结构约定**：每页保持「概述 + 逐方法深度剖析」双轨结构，frontmatter 与 prev/next 导航不变；衍生解读声明置于本页顶部。
+- **构建校验**：Hugo 全量构建 0 错误，54 个页面正常生成。
+
+ <!-- NAV -->
+ [↑ 总览]({{< relref "./source-walkthrough.md" >}})
 [→ tau_ai · Provider 契约与事件流]({{< relref "./ai-provider-events.md" >}})
