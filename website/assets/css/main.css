@@ -63,6 +63,8 @@ body::after{
 @media (max-width:720px){
   body::after{ left:calc(var(--cell) * 1.5); }
 }
+/* hide red notebook line on docs pages */
+body:has(.docs-layout)::after{ opacity:0 !important; }
 
 .wrap{
   position:relative; z-index:2;
