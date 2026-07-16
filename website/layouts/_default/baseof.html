@@ -18,6 +18,9 @@
       {{ $codeBrowserJs = $codeBrowserJs | js.Build | minify | fingerprint }}
     {{ end }}
     <script src="{{ $codeBrowserJs.RelPermalink }}"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
     {{ block "scripts" . }}{{ end }}
   </body>
 </html>

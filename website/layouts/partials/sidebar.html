@@ -1,31 +1,34 @@
  {{ $current := .RelPermalink }}
  {{ $base := "/tau" }}
- <nav class="docs-sidebar" aria-label="Documentation">
-   {{ range $group := site.Data.sidebar }}
-     {{ $link := "" }}
-     {{ if $group.link }}{{ $link = $group.link }}{{ else if $group.path }}{{ $link = $group.path }}{{ end }}
-     {{ if $group.items }}
-       <div class="sidebar-group">
-         <p class="sidebar-group-label">{{ $group.label }}</p>
-         <ul>
-           {{ range $item := $group.items }}
-             {{ if $item.items }}
-               {{/* nested subgroup: render as a non-link header, then its leaves */}}
-               <li class="sidebar-subgroup-label">{{ $item.label }}</li>
-               {{ range $leaf := $item.items }}
-                 {{ $href := printf "%s%s" $base ($leaf.path | relURL) }}
-                 <li><a href="{{ $href }}" {{ if eq $current $href }}class="active"{{ end }}>{{ $leaf.label }}</a></li>
+ <div class="docs-sidebar-wrap" id="sidebar-wrap">
+   <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">&#x276E;</button>
+   <nav class="docs-sidebar" aria-label="Documentation">
+     {{ range $group := site.Data.sidebar }}
+       {{ $link := "" }}
+       {{ if $group.link }}{{ $link = $group.link }}{{ else if $group.path }}{{ $link = $group.path }}{{ end }}
+       {{ if $group.items }}
+         <div class="sidebar-group">
+           <p class="sidebar-group-label">{{ $group.label }}</p>
+           <ul>
+             {{ range $item := $group.items }}
+               {{ if $item.items }}
+                 {{/* nested subgroup: render as a non-link header, then its leaves */}}
+                 <li class="sidebar-subgroup-label">{{ $item.label }}</li>
+                 {{ range $leaf := $item.items }}
+                   {{ $href := printf "%s%s" $base ($leaf.path | relURL) }}
+                   <li><a href="{{ $href }}" {{ if eq $current $href }}class="active"{{ end }}>{{ $leaf.label }}</a></li>
+                 {{ end }}
+               {{ else }}
+                 {{ $href := printf "%s%s" $base ($item.path | relURL) }}
+                 <li><a href="{{ $href }}" {{ if eq $current $href }}class="active"{{ end }}>{{ $item.label }}</a></li>
                {{ end }}
-             {{ else }}
-               {{ $href := printf "%s%s" $base ($item.path | relURL) }}
-               <li><a href="{{ $href }}" {{ if eq $current $href }}class="active"{{ end }}>{{ $item.label }}</a></li>
              {{ end }}
-           {{ end }}
-         </ul>
-       </div>
-     {{ else }}
-       {{ $href := printf "%s%s" $base ($link | relURL) }}
-       <a class="sidebar-toplink {{ if eq $current $href }}active{{ end }}" href="{{ $href }}">{{ $group.label }}</a>
+           </ul>
+         </div>
+       {{ else }}
+         {{ $href := printf "%s%s" $base ($link | relURL) }}
+         <a class="sidebar-toplink {{ if eq $current $href }}active{{ end }}" href="{{ $href }}">{{ $group.label }}</a>
+       {{ end }}
      {{ end }}
-   {{ end }}
- </nav>
+   </nav>
+ </div>

@@ -31,11 +31,9 @@
            aria-labelledby="tab-{{ $i }}">
         {{ if $resource }}
           {{ $content := $resource.Content }}
-          <pre><code class="code-lines">{{ range $lineNo, $line := split $content "\n" }}<span class="code-line"><span class="code-line-num"></span>{{ $line }}</span>
-{{ end }}</code></pre>
+          <pre><code class="language-python">{{ $content }}</code></pre>
         {{ else }}
-          <pre><code class="code-lines"><span class="code-line"><span class="code-line-num"></span># File not found: {{ $f }}</span>
-</code></pre>
+          <pre><code class="language-python"># File not found: {{ $f }}</code></pre>
         {{ end }}
       </div>
     {{ end }}
