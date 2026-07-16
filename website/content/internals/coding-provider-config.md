@@ -8,7 +8,7 @@ description: provider_catalog / provider_config / provider_runtime
 本文件定义了 Tau 开箱即知（out of the box）的 provider 的*静态*描述（名称、base URL、
 鉴权环境变量、模型、思考级别、成本档位）。它是数据，而非行为。
 
-### Type aliases
+### 类型别名
 
 - `ProviderKind` — `"openai-compatible" | "anthropic" | "openai-codex" |
   "google-generative-ai" | "mistral-conversations"`。
@@ -60,15 +60,7 @@ Tau 在登录/设置时可呈现的一个内建 provider：
 
 按 provider 名称做线性查找，返回一个目录条目。
 
-> **Why catalog and config are separate files with a one-way dependency.** The
-> *catalog* (this file) is static reference data — the providers Tau ships with.
-> The *config* (next file) is the user's durable, possibly-customized copy. The
-> config module imports the catalog; the catalog never imports the config. That
-> one-way edge is deliberate: reference data must not depend on user state, so a
-> new built-in provider can be added to the catalog and picked up by every
-> existing install without touching anyone's saved `providers.json`. Keeping the
-> two apart is the "Small layers beat magic" principle applied to
-> configuration — ship-time defaults and user overrides never entangle.
+> **为什么目录和配置是两个独立文件且只有单向依赖。** *目录*(本文件)是静态参考数据——Tau 自带的 provider 列表。*配置*(下一个文件)是用户持久化的、可能经过自定义的副本。配置模块导入目录;目录绝不导入配置。这条单向边是有意为之:参考数据不能依赖用户状态,这样新增一个内置 provider 只需加入目录,所有已安装的 Tau 都能自动获取,无须触碰任何人的 `providers.json`。将二者分开正是"小层胜于魔法"原则在配置领域的体现——出厂默认值与用户覆盖永远不会纠缠在一起。
 
 ---
 
@@ -77,17 +69,17 @@ Tau 在登录/设置时可呈现的一个内建 provider：
 这是本教程中最大的文件。它把目录数据 + 用户偏好 + 环境，转化为持久的 `ProviderConfig`
 对象，随后由 `provider_runtime.py` 将其转换为真正可用的 `tau_ai` provider。
 
-### Constants & error type
+### 常量与错误类型
 
 - `DEFAULT_PROVIDER_NAME = "openai"`, `DEFAULT_MODEL = "gpt-5.4"`.
-- `ProviderConfigError(ValueError)` — raised for any invalid provider config.
-- `CredentialReader` (Protocol) — anything with `get(name) -> str | None`,
-  used to read credentials while building runtime config.
+- `ProviderConfigError(ValueError)` — 任何无效 provider 配置时抛出的异常。
+- `CredentialReader` (Protocol) — 任何具有 `get(name) -> str | None` 方法的对象,
+  用于在构建运行时配置时读取凭据。
 
 ### `ProviderModelMetadata` (frozen)
 
-The *runtime* mirror of `ModelCatalogMetadata`: per-model metadata that lives
-on a durable provider config. Has a `to_json()` method for serialization.
+`ModelCatalogMetadata` 的*运行时*镜像:驻留在持久化 provider 配置上的每模型元数据。
+具有 `to_json()` 序列化方法。
 
 ### `OpenAICompatibleProviderConfig` / `AnthropicProviderConfig` / `OpenAICodexProviderConfig`
 
@@ -100,10 +92,9 @@ on a durable provider config. Has a `to_json()` method for serialization.
 - thinking: `thinking_levels`, `thinking_models`, `thinking_default`,
   `thinking_parameter`, `thinking_defaults` (per-model remembered level).
 
-Each has a `__post_init__` that validates numerics, context windows, model
-metadata, compat JSON, and thinking configuration, and a `to_json()` for
-persistence. `OpenAICodexProviderConfig` omits `model_metadata`/`compat`
-because Codex is OAuth-only and its metadata is not user-editable.
+每个类都有 `__post_init__` 来校验数值、上下文窗口、模型元数据、compat JSON 与 thinking 配置,
+以及一个用于持久化的 `to_json()` 方法。`OpenAICodexProviderConfig` 省略了
+`model_metadata`/`compat`,因为 Codex 仅通过 OAuth 认证,其元数据不可由用户编辑。
 
 ### `ProviderConfig` (type alias)
 
@@ -131,7 +122,7 @@ The top-level durable provider preferences loaded from Tau home:
 
 A resolved `provider` + `model` pair for one run.
 
-### Building configs from the catalog
+### 从目录构建配置
 
 - `builtin_provider_configs()` — one `ProviderConfig` per built-in catalog entry.
 - `provider_config_from_catalog_entry(name)` / `provider_config_from_entry(entry)`
@@ -171,7 +162,7 @@ def _default_api_for_kind(kind: str) -> ProviderApi:
 ```
 > 上面的代码展示了 catalog → config 的单向翻译：依据 `entry.kind` 分派到对应 frozen 子类，`thinking_defaults` 始终初始化为空（用户偏好是后来叠加的）。
 
-### Loading & saving `providers.json`
+### 加载与保存 `providers.json`
 
 - `provider_settings_path(paths)` — `paths.home / "providers.json"`.
 - `load_provider_settings(paths)` — if the file is absent, fall back to
@@ -210,7 +201,7 @@ def save_provider_settings(settings: ProviderSettings, paths=None) -> Path:
 ```
 > `load` 在文件缺失时只回退到 effective catalog 配置；存在则解析后把最新 catalog 合并进来。`save` 先落盘自定义 provider 定义，再经临时文件原子替换，写前备份 `.bak`。
 
-### Merging & preference application
+### 合并与偏好应用
 
 - `set_default_provider_model` / `set_provider_thinking_level` — immutable
   updates returning new `ProviderSettings`, validating the model exists and the
@@ -261,7 +252,7 @@ def _append_catalog_providers(providers, catalog_configs, *, paths):
 ```
 > 合并语义是"本地优先"：本地配置的值（头、compat、超时、thinking_defaults）覆盖 catalog 的 incoming 值，避免 catalog 刷新抹掉用户自定义。
 
-### Parsing JSON (`provider_settings_from_json` and friends)
+### 解析 JSON（`provider_settings_from_json` 及相关函数）
 
 本文件支持两种磁盘形态：
 
@@ -277,7 +268,7 @@ config via `replace`. A large family of private `_string` / `_string_tuple` /
 `_optional_*` / `_validate_*` helpers enforce types and ranges at parse time so
 a malformed `providers.json` fails loudly with a clear `ProviderConfigError`.
 
-### Thinking-level resolution
+### Thinking 级别解析
 
 A cluster of helpers decides what thinking modes a provider/model pair
 supports and how a `ThinkingLevel` maps to a wire value:
@@ -315,7 +306,7 @@ def _thinking_level_map_supports(thinking_level_map, level) -> bool:
 ```
 > 思考级别的可用性由两层决定：provider 是否声明了 `thinking_levels`，以及 per-model 的 `thinking_level_map` 是否把该级别映射到非空 wire 值。
 
-### Building runtime config (the `tau_ai` glue)
+### 构建运行时配置（`tau_ai` 胶水层）
 
 以下是 `provider_runtime.py` 所调用的函数：
 
@@ -377,15 +368,12 @@ def _detected_compat(provider, model) -> dict[str, Any]:
 ```
 > `openai_compatible_config_from_provider` 是"纯翻译"的收口：把持久化设置 + 环境（`OPENAI_BASE_URL`、凭据、thinking 映射）拼成 `tau_ai.OpenAICompatibleConfig`，全程不触网。
 
-> **Why this module never touches a model.** `provider_config.py` is a pure
-> translation layer: catalog data + user preferences + environment in, typed
-> `tau_ai` config objects out. It never opens a connection or streams a
-> response; that job belongs to `provider_runtime.py`. Isolating translation
-> from I/O means the entire config surface — merging, preference application,
-> thinking-level resolution — is testable with plain values and no network,
-> and a malformed `providers.json` fails loudly at parse time (a clear
-> `ProviderConfigError`) rather than mid-request. This is "Small layers beat
-> magic": each layer has one job and hands a typed value to the next.
+> **为什么本模块从不触碰模型。** `provider_config.py` 是一个纯粹的翻译层:
+> 目录数据 + 用户偏好 + 环境进去,类型化的 `tau_ai` 配置对象出来。它从不打开连接或
+> 流式传输响应;那是 `provider_runtime.py` 的职责。将翻译与 I/O 隔离意味着整个配置
+> 表面——合并、偏好应用、thinking 级别解析——都可以用纯值和无网络的方式测试,
+> 格式错误的 `providers.json` 会在解析时就大声报错(明确的 `ProviderConfigError`),
+> 而不是在请求中途失败。这就是"小层胜于魔法":每层只做一件事,把类型化的值交给下一层。
 
 ---
 
@@ -494,15 +482,12 @@ class OAuthRuntimeCredentialResolver:
 - `_oauth_credential(provider, store)` — 若 provider 注册了 OAuth 凭据则取之。
 - `_required_oauth_provider(name)` — 返回已注册的 `OAuthProvider`，没有则抛错。
 
-> **Why runtime construction is its own layer.** This file is where Tau finally
-> calls into `tau_ai`: everything above it is data translation, and this file
-> produces the live `ModelProvider` the agent loop actually streams from.
-> Concentrating credential resolution and OAuth refresh here — behind
-> `ClosableModelProvider` so Tau can `aclose()` and release resources at the end
-> of a run — keeps the durable config layer completely free of secrets and
-> network state. This is the "The core stays portable" principle at the edge:
-> the portable pieces (catalog, config, the agent harness) stay pure, and all
-> the environment-specific wiring lives in one clearly named boundary.
+> **为什么运行时构造是独立的一层。** 本文件是 Tau 最终调用 `tau_ai` 的地方:
+> 它上面的所有层都是数据翻译,而本文件产出的是 agent loop 真正流式消费的活的
+> `ModelProvider`。把凭据解析和 OAuth 刷新集中在这里——包裹在 `ClosableModelProvider`
+> 中以便 Tau 在运行结束时 `aclose()` 释放资源——使持久化配置层完全不包含密钥和
+> 网络状态。这是"核心保持可移植"原则在边界处的体现:可移植的部分(目录、配置、
+> agent harness)保持纯净,所有环境特定的连线都集中在一个命名清晰的边界中。
 
 ---
 

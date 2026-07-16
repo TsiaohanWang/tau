@@ -31,6 +31,29 @@ tau -p "list the public functions in src/app.py" -o transcript  # structured tra
 - **json** — machine-readable, for piping into other tools.
 - **transcript** — a structured record of the turn.
 
+### JSON output structure
+
+The `-o json` format returns a JSON object with the model's response and
+metadata. This is useful for scripting:
+
+```bash
+# Extract just the response text
+tau -p "what files changed?" -o json | jq -r '.response'
+
+# Check token usage
+tau -p "quick question" -o json | jq '.usage'
+```
+
+### Transcript output
+
+The `-o transcript` format includes the full conversation turn — user message,
+assistant response, tool calls, and tool results. This is useful for debugging
+or auditing what Tau did:
+
+```bash
+tau -p "fix the bug in auth.py" -o transcript > debug.json
+```
+
 ## Choosing provider, model, and directory
 
 The same selection flags work in print mode:
@@ -41,6 +64,21 @@ tau --provider local -p "explain this module"
 tau -p "audit for secrets" --cwd ./services/api
 ```
 
+## Chaining with other tools
+
+Print mode is designed for composition. Some examples:
+
+```bash
+# Feed file contents into a prompt
+cat src/app.py | tau -p "review this code for security issues" -o text
+
+# Use Tau output as input to another command
+tau -p "list all TODO comments" -o json | jq -r '.response' | grep -c "TODO"
+
+# Run Tau in CI to check for issues
+tau -p "do the tests pass? answer yes or no" -o text | grep -qi yes
+```
+
 ## Exit status
 
 Print mode exits non-zero if the run fails, so you can use it in scripts:
@@ -49,6 +87,19 @@ Print mode exits non-zero if the run fails, so you can use it in scripts:
 if tau -p "do the tests pass? answer yes or no" -o text | grep -qi yes; then
   echo "looks good"
 fi
+```
+
+## Session management
+
+Print-mode turns are saved to `~/.tau/sessions/` just like TUI turns. You can
+resume them later:
+
+```bash
+# Resume the last print-mode session in the TUI
+tau --resume
+
+# Or list sessions and pick one
+tau --session-picker
 ```
 
 {{% tip %}}

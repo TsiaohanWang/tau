@@ -3,7 +3,7 @@ title: tau_coding · 凭证存储
 description: credentials.py
 ---
 
-## 1. `credentials.py` — the credential store
+## 1. `credentials.py` — 凭证存储
 
 本模块是关于 *Tau 如何持久化认证资料* 的唯一事实来源。它定义了两个冻结的凭证 dataclass 以及一个基于 JSON 的小型存储。密钥存放在 `<Tau home>/credentials.json` 中,绝不放在 `providers.json`。
 
@@ -14,7 +14,7 @@ description: credentials.py
 > 版本控制或共享,而凭证文件保持私有(`0o600`)、可被 git 忽略,并且是唯一一旦泄露即构成
 > 安全事件的产物。若合并为单一文件,会迫使用户把每次配置编辑都当作密钥处理操作。
 
-### 1.1 The credential types
+### 1.1 凭证类型
 
 ```python
 @dataclass(frozen=True, slots=True)

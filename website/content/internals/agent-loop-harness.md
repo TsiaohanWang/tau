@@ -36,25 +36,76 @@ description: loop.py 纯循环 / harness.py 有状态大脑
 4. 若因 `max_turns` 耗尽退出 `while`：`yield` 可恢复 `ErrorEvent`。
 5. 最后 `yield AgentEndEvent()`。
 
+源码 (`loop.py:40-169`)——主循环完整骨架（节选关键路径）：
+
 ```python
-# loop.py:40 — 纯异步生成器，messages 由调用方拥有、循环只就地追加
-async def run_agent_loop(*, provider, model, system, messages, tools,
-                         max_turns=None, signal=None,
-                         get_steering_messages=None, get_follow_up_messages=None,
-                         get_queue_update=None) -> AsyncIterator[AgentEvent]:
+async def run_agent_loop(
+    *,
+    provider: ModelProvider,
+    model: str,
+    system: str,
+    messages: list[AgentMessage],
+    tools: list[AgentTool],
+    max_turns: int | None = None,
+    signal: CancellationToken | None = None,
+    get_steering_messages: Callable[[], Sequence[AgentMessage]] | None = None,
+    get_follow_up_messages: Callable[[], Sequence[AgentMessage]] | None = None,
+    get_queue_update: Callable[[], QueueUpdateEvent] | None = None,
+) -> AsyncIterator[AgentEvent]:
     yield AgentStartEvent()
     tool_by_name = {tool.name: tool for tool in tools}
     turn = 1
+
     while max_turns is None or turn <= max_turns:
-        ...
+        if signal is not None and signal.is_cancelled():
+            yield ErrorEvent(message="Agent run cancelled", recoverable=True)
+            break
+        yield TurnStartEvent(turn=turn)
+        assistant_message: AssistantMessage | None = None
+        saw_provider_error = False
+
         async for provider_event in provider.stream_response(
-            model=model, system=system, messages=messages, tools=tools, signal=signal
+            model=model, system=system, messages=messages, tools=tools, signal=signal,
         ):
-            if isinstance(provider_event, ProviderResponseEndEvent):
+            if isinstance(provider_event, ProviderResponseStartEvent):
+                yield MessageStartEvent()
+            elif isinstance(provider_event, ProviderTextDeltaEvent):
+                yield MessageDeltaEvent(delta=provider_event.delta)
+            elif isinstance(provider_event, ProviderThinkingDeltaEvent):
+                yield ThinkingDeltaEvent(delta=provider_event.delta)
+            elif isinstance(provider_event, ProviderRetryEvent):
+                yield RetryEvent(...)
+            elif isinstance(provider_event, ProviderResponseEndEvent):
                 assistant_message = provider_event.message
-                messages.append(assistant_message)   # 就地修改调用方的 transcript
+                messages.append(assistant_message)
                 yield MessageEndEvent(message=assistant_message)
-        ...
+            elif isinstance(provider_event, ProviderErrorEvent):
+                saw_provider_error = True
+                yield ErrorEvent(message=provider_event.message, recoverable=False, ...)
+
+        if assistant_message is None:
+            ...  # 取消/错误收尾
+            break
+
+        if not assistant_message.tool_calls:
+            yield TurnEndEvent(turn=turn)
+            # 排空 steering / follow_up 队列
+            queue_events = _drain_queued_messages(messages, get_steering_messages, ...)
+            if queue_events:
+                for queue_event in queue_events: yield queue_event
+                turn += 1; continue
+            break  # 模型认为任务完成
+
+        async for tool_event in _execute_tool_calls(
+            assistant_message.tool_calls, tool_by_name, messages, signal,
+        ):
+            yield tool_event
+
+        yield TurnEndEvent(turn=turn)
+        for queue_event in _drain_queued_messages(messages, get_steering_messages, ...):
+            yield queue_event
+        turn += 1
+
     yield AgentEndEvent()
 ```
 > Design note: transcript 列表由**调用方（harness）拥有**，loop 只往里 append。

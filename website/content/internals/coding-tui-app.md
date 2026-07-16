@@ -974,7 +974,40 @@ Textual 主题变化后若属内置主题且与当前设置不同,则 `_replace_
 在父类变量基础上叠加 `_theme_css_variables(resolved_theme)` 提供 Tau 专属 CSS 变量。
 
 ### `def compose(self) -> ComposeResult`
-布局:`Header` → 水平 `#workspace`(`SessionSidebar` `#sidebar` + 垂直 `#main-pane`)→ 主区依次放 `TranscriptView` `#transcript`、`#main-slot`、`#above-prompt-slot`、`#queued-messages`、`#prompt-row`(含 `prompt-prefix` "τ" 与 `PromptInput` `#prompt`)、`CompactSessionInfo`、`#autocomplete`、`#below-prompt-slot` → `Footer`。
+
+布局:`Header` → 水平 `#workspace`(`SessionSidebar` `#sidebar` + 垂直 `#main-pane`)→ 主区依次放 `TranscriptView` `#transcript`、`#main-slot`、`#above-prompt-slot`、`#queued-messages`、`#prompt-row`(含 `prompt-prefix` "τ" 与 `PromptInput` `#prompt`)、`CompactSessionInfo`、`#autocomplete`、`#below-prompt-slot` → `Footer`。源码 (`tui/app.py:2790`):
+
+```python
+def compose(self) -> ComposeResult:
+    """Compose the TUI widgets."""
+    yield Header()
+    with Horizontal(id="workspace"):
+        yield SessionSidebar(id="sidebar")
+        with Vertical(id="main-pane"):
+            yield TranscriptView(
+                id="transcript",
+                min_width=1,
+                wrap=True,
+                highlight=True,
+                markup=False,
+            )
+            # Component seam: host-managed mount points for
+            # extension widgets. Empty until an extension mounts into them.
+            yield Container(id="main-slot")
+            yield Container(id="above-prompt-slot")
+            yield Static("", id="queued-messages")
+            with Horizontal(id="prompt-row"):
+                yield Static("τ", id="prompt-prefix")
+                yield PromptInput(
+                    placeholder=PROMPT_PLACEHOLDER,
+                    id="prompt",
+                    tui_keybindings=self.tui_settings.keybindings,
+                )
+            yield CompactSessionInfo(id="compact-session-info")
+            yield Static("", id="autocomplete")
+            yield Container(id="below-prompt-slot")
+    yield Footer()
+```
 
 ### `async def on_mount(self) -> None`
 聚焦 prompt、设 shell 模式样式、算响应式布局、应用侧栏位置、`_refresh()`、`_sync_text_selection_state()`、`_refresh_completions()`;有 startup_message 则警告通知。随后 `await session.emit_pending_session_start()`(释放延迟的 session_start,使扩展能弹窗/通知);若有 `initial_prompt` 则提交。

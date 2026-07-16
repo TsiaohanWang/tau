@@ -463,5 +463,5 @@ supported; the host-provided `context.ui` dialogs *are* supported), custom
 entry renderers (non-context cards), keyboard shortcuts, CLI flag
 registration, system-prompt replacement, context rewriting, or a project trust
 store. The
-architecture document
-(`dev-notes/architecture/phase-21-extensions.md`) tracks these.
+[architecture document](https://github.com/huggingface/tau/blob/main/dev-notes/architecture/phase-21-extensions.md)
+tracks these.
