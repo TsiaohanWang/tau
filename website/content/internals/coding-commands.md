@@ -40,15 +40,22 @@ The central object that *owns* the available commands.
 - **`list_commands()`** — return the `tuple[SlashCommand, ...]` sorted by name,
   used by the TUI autocomplete and the `/help` listing.
 
-The registry is deliberately *dumb*: it does not know what each command does.
-That keeps the application wiring (which commands exist) separate from the
-`CodingSession` logic (what each command changes in the session). When you add a
-new slash command, you register it here; the `CodingSession` methods it calls
+The registry holds no per-command behavior: it does not know what each command
+does. That keeps the application wiring (which commands exist) separate from the
+`CodingSession` logic (what each command changes in the session). Adding a new
+slash command means registering it here; the `CodingSession` methods it calls
 were built in Part 3b.
 
-> Design note: this mirrors the AGENTS.md architecture principle — the TUI and
-> the command set are *frontends*; the `CodingSession` is the environment that
-> actually changes state. The registry is the adapter between them.
+> **Why the registry is behavior-free.** This follows Tau's layering rule —
+> `AgentHarness = reusable agent brain`, `CodingSession = coding-agent
+> environment`, `TUI = one possible frontend`. The command set is part of a
+> *frontend*: it decides which `/`-verbs exist and parses them, but it never
+> mutates durable state. The `CodingSession` is the environment that actually
+> changes state, and it is the only layer that writes to the append-only
+> session log. The registry is the thin adapter between the two, so a different
+> frontend (print-mode CLI, a future GUI) can reuse the exact same
+> `CodingSession` without inheriting any command-parsing assumptions. This is
+> the official principle "Small layers beat magic" applied to command dispatch.
 
 ### Command dispatch flow
 
@@ -61,8 +68,11 @@ were built in Part 3b.
 5. If the name is not registered, the line is treated as an unknown command and
    a help hint is shown.
 
-The net effect: commands are thin wrappers. All durable state change lives in
-`CodingSession`; all command *discovery* lives in `CommandRegistry`.
+Net effect: commands are thin wrappers. All durable state change lives in
+`CodingSession`; all command *discovery* lives in `CommandRegistry`. Most
+handlers do not even call `CodingSession` directly — they return a
+`CommandResult` whose `*_requested` flags tell the frontend which action to
+drive — which keeps the parse/dispatch layer free of any session semantics.
 
 ---
 

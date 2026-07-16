@@ -17,8 +17,11 @@ description: env.py —— 基于环境变量的 provider 配置
   code，再其次嵌套 mapping）。
 - **`_loads_object(value)`**：安全 `loads`，非 JSON 或非 mapping 返回 `None`。
 
-> 设计意图：把所有"为什么会失败"的细节收敛到一处，且**绝不把原始 body 里的密钥
-> 直接吐给用户**——只取结构化信息或截断的原文。
+> **为什么这样设计**：把所有"为什么会失败"的细节收敛到一处，且**绝不把原始 body 里的密钥
+> 直接吐给用户**——只取结构化信息或截断的原文。错误体可能来自任意 provider，其中包含
+> `api_key`、`Authorization` 等敏感字段的概率极高；集中、白名单式的字段提取（仅取
+> `message`/`code`/`detail`/`error`）可保证脱敏在单一处被强制执行，而非分散在各 provider
+> 中各自拼错。截断至 1000 字符则防止超大 body 污染日志与 UI。
 
 ---
 
@@ -77,7 +80,7 @@ Part 1a 建立了 `tau_ai` 的全部"规则"：
 
 ## 文件:env.py
 
-本文件提供一组"从环境变量读取 provider 配置"的辅助函数与数据类。它让 Tau 在不写任何配置文件的情况下,仅凭进程环境变量即可构造出各 LLM provider 的连接配置,是整个 `tau_ai` 层"无配置即可运行"的入口之一。文件开头从 `os.environ` 直接导入,因此所有配置读取都实时反映进程环境。
+本文件提供一组"从环境变量读取 provider 配置"的辅助函数与数据类。它让 Tau 在不写任何配置文件的情况下,仅凭进程环境变量即可构造出各 LLM provider 的连接配置,是整个 `tau_ai` 层"无配置即可运行"的入口之一。文件开头从 `os.environ` 直接导入,因此所有配置读取都实时反映进程环境——这正是 Tau **"The core stays portable"** 原则的体现：核心不绑定具体部署形态，配置完全由运行环境注入，从而可在本地、CI、容器间无缝迁移。
 
 ### 模块级常量
 
@@ -231,7 +234,7 @@ def _non_negative_float_from_env(name: str, default: float) -> float:
 3. 若 `value < 0`,抛 `RuntimeError("Environment variable must be 0 or greater: {name}")`。
 4. 返回浮点。
 
-> 注意:本文件实际只定义了 `openai_compatible_config_from_env` 一个 `from_env` 入口(以及三个私有解析辅助)。源码中**并没有** `anthropic_env_config` / `google_env_config` / `mistral_env_config` / `openai_codex_env_config` 这些独立函数——Anthropic/Google/Mistral/Codex 的环境读取由各 provider 模块自身负责,此处仅提供共用的 OpenAI 兼容入口与三个数值解析助手。剖析严格基于现有源码。
+> **为什么这样设计**：本文件实际只定义了 `openai_compatible_config_from_env` 一个 `from_env` 入口(以及三个私有解析辅助)。源码中**并没有** `anthropic_env_config` / `google_env_config` / `mistral_env_config` / `openai_codex_env_config` 这些独立函数——Anthropic/Google/Mistral/Codex 的环境读取由各 provider 模块自身负责。其原因在于：OpenAI 兼容类 provider 共享同一套 `base_url`/`api_key`/`timeout` 等字段，故可提炼出单一通用入口；而 Anthropic 需 `x-api-key`、Codex 走 OAuth 会话令牌、Google 把 key 放在 query 中，各厂鉴权形态差异显著，其配置构造逻辑与 provider 实现紧耦合，留在各自模块内反而更内聚、更易维护。
 
 ## 文件:http_errors.py
 
@@ -301,7 +304,7 @@ def _loads_object(value: str) -> Mapping[str, Any] | None:
 
 ### 安全脱敏说明
 
-本模块不读取、不打印任何 `Authorization`/`api_key`/`x-api-key` 类字段:它只从 `error/message/detail/code` 等"错误描述"字段取值,且对任何提取结果不附加凭证信息;即便回退到原始 body,也只是截断文本透出——调用方传入的 `body` 本就不该包含密钥,模块设计上不主动接触敏感数据。
+本模块不读取、不打印任何 `Authorization`/`api_key`/`x-api-key` 类字段:它只从 `error/message/detail/code` 等"错误描述"字段取值,且对任何提取结果不附加凭证信息;即便回退到原始 body,也只是截断文本透出。其设计依据是"最小暴露面"：调用方传入的 `body` 本就可能包含密钥,模块以白名单字段提取 + 长度截断两道防线确保敏感数据不会经错误路径外泄,从而让上层的错误展示与日志收集默认即安全。
 
 ## 文件:__init__.py
 

@@ -69,8 +69,13 @@ description: openai_compatible / anthropic / google / mistral / openai_codex / f
   `stop`/`length`/`tool_calls`）、`_parse_chunk_usage` / `_usage_from_responses_event`
   （把各家 usage 解析进 `Usage`，并遵守"None=未上报"约定，cost 一律留空）。
 
-> 这个文件的复杂之处在于"一套代码适配很多 OpenAI 兼容后端"。Rust `tau-rs` 的
-> `tau-ai/src/openai.rs` 只覆盖了主路径，未做这么多的 `compat` 分支。
+> **为什么这样设计**：这个文件的复杂之处在于"一套代码适配很多 OpenAI 兼容后端"。其根源是
+> OpenAI 的 chat/completions 协议虽被各厂商"兼容"，但推理（reasoning）字段、`max_tokens`
+> 的字段名、thinking 格式、usage 上报位置在 Mistral/DeepSeek/Qwen/OpenRouter/Together 等
+> 实现间各不相同（见 OpenAI 官方 API 文档 https://platform.openai.com/docs）。统一信封
+> 只承载真正不变的 HTTP/重试/取消逻辑，而把所有"兼容差异"压进 `_apply_chat_reasoning` 等
+> `compat` 分支，使新增后端只改一处而非重写整条流。Rust `tau-rs` 的 `tau-ai/src/openai.rs`
+> 只覆盖了主路径，未做这么多的 `compat` 分支。
 
 ---
 
@@ -79,13 +84,18 @@ description: openai_compatible / anthropic / google / mistral / openai_codex / f
 - **`ANTHROPIC_VERSION = "2023-06-01"`、`DEFAULT_MAX_TOKENS = 4096`**。
 - **`AnthropicProvider`**：结构与 OpenAI 系一致（`__init__`/`aclose`/
   `stream_response`/`_get_client`/`_should_retry`），但**没有拆出共享 `_stream`**
-  ——它把流式外壳直接写进 `iterator()`。值得注意：
-  - `credential_resolver` 解析后，若 `base_url` 不以 `/v1` 结尾会补上。
-  - 鉴权默认用 `x-api-key`，`bearer_auth=True` 时改用 `Authorization: Bearer`。
+  ——它把流式外壳直接写进 `iterator()`。这套差异并非随意，而是 Anthropic Messages API
+  的硬性约束（见官方文档 https://docs.anthropic.com）：
+  - 鉴权默认用 `x-api-key`（Anthropic 的专属请求头，而非 OpenAI 的 Bearer 体系），
+    `bearer_auth=True` 时改用 `Authorization: Bearer`；`anthropic-version` 头是
+    Anthropic API 强制要求的协议版本标识，必须随每个请求发送。
+  - `credential_resolver` 解析后，若 `base_url` 不以 `/v1` 结尾会补上，以匹配
+    Anthropic 端点约定。
   - 逐事件处理 Anthropic 的 SSE 类型：`message_start`（取初始 usage）、
     `content_block_start`（tool_use 块起）、`content_block_delta`
     （`text_delta`/`thinking_delta`/`input_json_delta`）、`message_delta`
-    （`stop_reason` + usage）、`error`。思考内容走 `thinking_delta`。
+    （`stop_reason` + usage）、`error`。思考内容走 `thinking_delta`——这是 Anthropic
+    扩展思考（extended thinking）原生的事件通道。
 - **`_AnthropicToolBuilder`**：同 OpenAI 的 builder，拼接 tool call。
 - **`_build_messages_payload`**：`system` 可为纯字符串或（带 oauth 前缀时）两段
   text 列表；`thinking` 支持两种模式——`adaptive`（发 `{"type": "adaptive",
@@ -105,6 +115,9 @@ description: openai_compatible / anthropic / google / mistral / openai_codex / f
 
 - **`GoogleGenerativeAIProvider`**：URL 形如
   `{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`。
+  这是 Gemini Generative Language API 的固有形态（见官方文档 https://ai.google.dev）：
+  API key 通过 query 参数 `key=` 而非 `Authorization` 头传递，且流式通过 `alt=sse`
+  触发。provider 严格按此约定拼接，不引入自定义鉴权头。
 - **`_GoogleStreamParser`**：按 `candidates[0].content.parts` 解析；`text` 部分若
   `part.thought is True` 当作思考（`ProviderThinkingDeltaEvent`），否则正文；
   `functionCall` 部分直接构造 `ToolCall`（支持 `thoughtSignature`）。
@@ -122,7 +135,10 @@ description: openai_compatible / anthropic / google / mistral / openai_codex / f
 ## `tau_ai/mistral.py` — Mistral Conversations
 
 - **`MistralConversationsProvider`**：拆出了自己的 `_stream(...)` 外壳（与 OpenAI
-  的类似），URL 为 `{base_url}/chat/completions`（自动补 `/v1`）。
+  的类似），URL 为 `{base_url}/chat/completions`（自动补 `/v1`）。Mistral 的 Conversations
+  API 在兼容 OpenAI chat-completions 形态的基础上，额外支持 `content` 为列表的混合
+  text / thinking 分块（见官方文档 https://docs.mistral.ai），因此解析器需扩展
+  `_content_deltas` / `_thinking_deltas` 以兼容列表形式的 delta。
 - **`_MistralStreamParser`**：与 chat-completions 解析几乎一致；额外支持
   `content` 为 list（混合 text / `type: "thinking"` 块）的情况
   （`_content_deltas` / `_thinking_deltas`），以及 `tool_calls` 或 `toolCalls`
@@ -138,7 +154,11 @@ description: openai_compatible / anthropic / google / mistral / openai_codex / f
 
 - **`DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"`。
 - **`OpenAICodexCredentials`**（frozen dataclass）：`access_token` + `account_id`
-  —— Codex 不走普通 API key，而是 ChatGPT 会话令牌。
+  —— Codex 不走普通 API key，而是 ChatGPT 订阅会话令牌。其根因是 Codex 后端
+  （`chatgpt.com/backend-api`）面向 ChatGPT 登录用户而非独立 API 使用者，鉴权
+  依赖浏览器/设备 OAuth 流程换发的会话令牌，故 `credential_resolver` 必填、且每次
+  请求都重新解析以处理令牌刷新；终端限流还需靠 `_is_terminal_rate_limit` 识别
+  "余额不足/额度耗尽"等不可重试文案（普通 HTTP 429 可重试，但计费耗尽不应无限重试）。
 - **`OpenAICodexCredentialResolver`**：`Callable[[], Awaitable[OpenAICodexCredentials]]`。
 - **`OpenAICodexConfig`**（frozen dataclass）：`credential_resolver` 必填，
   另含 `base_url`（默认 `DEFAULT_OPENAI_CODEX_BASE_URL`）、`headers`、
@@ -179,6 +199,9 @@ description: openai_compatible / anthropic / google / mistral / openai_codex / f
 Codex，还是测试用的 Fake，它们的 `stream_response` 都只产出那 7 种
 `ProviderEvent`。差异被彻底吸收在各文件的 parser 与 payload 构造里。这正是
 Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用的是哪家模型"。
+其设计动机是 Tau 的核心分离原则——**"Events are the contract"** 与
+**"Small layers beat magic"**：把 provider 间的全部差异封进薄薄的适配层，让 agent
+循环只依赖一份稳定、可枚举的事件词汇，从而新增或替换模型后端时无需触动上层逻辑。
 
 下一任务（Part 2a）进入 `tau_agent`，先看它定义的"数据模型"——这些
 `AgentMessage` / `ToolCall` / 事件类型正是 provider 的输入与输出所依赖的结构。

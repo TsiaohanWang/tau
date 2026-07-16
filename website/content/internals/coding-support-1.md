@@ -36,9 +36,13 @@ codebase.
   by the TUI's "cycle thinking" key; wraps with modulo; unknown → first
   available.
 
-> Design note: the module separates the *UI level* (stable, friendly) from the
-> *provider parameter* (wire-specific). That is why adding a new provider later
-> only means adding a mapping here plus a catalog entry, not touching the TUI.
+> **Why this design.** The module separates the *UI level* (stable, friendly,
+> provider-independent vocabulary surfaced in the TUI) from the *provider
+> parameter* (wire-specific name each backend expects). This follows Tau's
+> "Small layers beat magic" principle — each layer agrees on one shared vocabulary
+> instead of threading provider quirks through the UI. Adding a new provider later
+> therefore means adding one mapping here plus a catalog entry; the TUI and session
+> layers remain unchanged, because they only ever speak the abstract level.
 
 ---
 
@@ -89,10 +93,13 @@ by `provider_catalog.py`.
   human-readable `providers.<name>.<field>` paths (resolving the array index to
   the provider name).
 
-> Design note: the catalog is *data, not code*. The loader's job is to make data
-> authoritative and code-derived: providers are validated once here, then the
-> runtime never re-checks them. Strict Pydantic models + a single `CatalogError`
-> type keep that contract airtight.
+> **Why this design.** The catalog is *data, not code*. The loader's job is to
+> make data authoritative and code-derived: providers are validated once here,
+> then the runtime never re-checks them. This embodies Tau's "Documentation follows
+> implementation" stance — the catalog is the single source of truth that the
+> runtime simply consumes. Strict Pydantic models (frozen, `extra="forbid"`) plus a
+> single `CatalogError` type keep that contract airtight: malformed TOML fails
+> loudly at load time rather than producing subtle runtime misbehavior.
 
 ---
 
@@ -132,9 +139,13 @@ prompt and parses the result.
   file list. `read_only` files (read but not modified) are separated from
   `modified`.
 
-> Design note: the summarizer is deliberately *lossy but structured*. It trades
-> verbatim fidelity for a bounded, schema-shaped summary plus the file-set, which
-> is what an agent actually needs when it later returns to a branch.
+> **Why this design.** The summarizer is deliberately *lossy but structured*. It
+> trades verbatim fidelity for a bounded, schema-shaped summary plus the file-set,
+> which is what an agent actually needs when it later returns to a branch. The hard
+> character caps (`MAX_SUMMARY_SOURCE_MESSAGE_CHARS`, `MAX_SUMMARY_SOURCE_TOTAL_CHARS`)
+> guarantee the summarize request itself can never exhaust the context window,
+> regardless of how long the abandoned branch grew. This keeps branch recovery
+> cheap and predictable instead of replaying full transcripts.
 
 ---
 
@@ -160,9 +171,13 @@ debugging can reconstruct what happened without secrets.
   context fields. The `phase` argument lets callers record *where* in the loop
   the failure happened (provider call, tool execution, compaction, …).
 
-> Design note: diagnostics are separated from user-facing errors. They are
-> append-only, secret-free, and structured so they can be grepped/parsed later;
-> nothing here is shown to the user unless explicitly surfaced.
+> **Why this design.** Diagnostics are deliberately separated from user-facing
+> errors. They are append-only, secret-free, and structured so they can be
+> grepped/parsed later without risk of leaking credentials — the context dataclass
+> carries `provider_name`/`model`/`cwd`/`session_id`/`run_id` but never API keys or
+> message content. Because entries are appended as single JSON lines, a crash
+> mid-write cannot corrupt prior entries. Nothing here is shown to the user unless
+> a failure path explicitly surfaces the log path.
 
 ---
 
@@ -172,7 +187,7 @@ debugging can reconstruct what happened without secrets.
 
 ## 文件:thinking.py
 
-该模块定义了 Tau 编码会话中"思考模式(thinking mode)"的一系列基础类型、常量与映射函数。核心职责是把用户在 UI 上选择的、与具体 provider 无关的"思考级别"(off/minimal/low/medium/high/xhigh)转换成各 provider 实际请求所需的参数(OpenAI 的 `reasoning_effort`、Anthropic 的扩展思考 token 预算)。
+该模块定义 Tau 编码会话中"思考模式(thinking mode)"的基础类型、常量与映射函数。核心职责是:把用户在 UI 上选择的、与具体 provider 无关的"思考级别"(off/minimal/low/medium/high/xhigh)转换为各 provider 实际请求所需的参数。OpenAI 风格 provider 接收 `reasoning_effort` 取值(推理强度),Anthropic 接收扩展思考(extended thinking)的 token 预算整数,二者由不同的映射函数分别产出。
 
 ### ThinkingLevel
 
@@ -229,7 +244,7 @@ THINKING_LEVEL_DESCRIPTIONS: dict[ThinkingLevel, str] = {
 }
 ```
 
-`ThinkingLevel -> 人类可读描述` 的字典。供 UI(状态栏、帮助信息)展示每个级别的语义,便于用户理解强度差异。注意该模块本身没有 `thinking_level_label` / `thinking_level_description` 之类的包装函数,描述直接由该字典在 UI 层读取。
+`ThinkingLevel -> 人类可读描述` 的字典。供 UI(状态栏、帮助信息)展示每个级别的语义,便于用户理解强度差异。该模块本身不提供 `thinking_level_label` / `thinking_level_description` 之类的包装函数,描述由 UI 层直接读取此字典。
 
 ### normalize_thinking_level
 
@@ -271,8 +286,10 @@ def reasoning_effort_for_level(level: str | None) -> ReasoningEffort:
 
 **关键实现**:
 1. 先 `normalize_thinking_level(level)` 得到规范化级别。
-2. 若为 `"off"`,返回 `"none"`(OpenAI 无 off)。
+2. 若为 `"off"`,返回 `"none"`(OpenAI 的 API 以 `"none"` 表示关闭推理,没有 `"off"` 这一档)。
 3. 否则原样返回该级别字符串(它天然属于 `ReasoningEffort` 的取值集合)。
+
+映射动机:OpenAI 的 Chat Completions / Responses API 通过 `reasoning_effort`(`"none"`/`"minimal"`/`"low"`/`"medium"`/`"high"`)控制推理强度,而 Tau 的 UI 词汇用 `"off"` 表示"不推理"。该函数把 `"off"` 归一为 `"none"` 后,其余级别名称与 OpenAI 的取值一一对应,无需额外换算。
 
 此函数在 `provider_config.py:1582` 和 `provider_runtime.py:176` 中被调用,用于向 OpenAI 风格 provider 的请求体注入 `reasoning_effort`。
 
@@ -282,17 +299,19 @@ def reasoning_effort_for_level(level: str | None) -> ReasoningEffort:
 def anthropic_thinking_budget_for_level(level: str | None) -> int | None:
 ```
 
-**作用**:把 Tau 的 UI 思考级别映射为 Anthropic 扩展思考(extended thinking)的 token 预算整数。
+**作用**:把 Tau 的 UI 思考级别映射为 Anthropic 扩展思考(extended thinking)的 token 预算整数(`thinking.budget_tokens`)。
 
 **关键实现**:
 1. `normalize_thinking_level(level)` 得到规范化级别。
 2. 若为 `"off"`,返回 `None`(不开启扩展思考)。
 3. 否则按下表查表返回 token 数:
-   - `"minimal"`: `1024`
-   - `"low"`: `2048`
-   - `"medium"`: `4096`
-   - `"high"`: `8192`
-   - `"xhigh"`: `16384`
+    - `"minimal"`: `1024`
+    - `"low"`: `2048`
+    - `"medium"`: `4096`
+    - `"high"`: `8192`
+    - `"xhigh"`: `16384`
+
+映射动机:Anthropic 的 extended thinking 以一个 token 预算(而非命名档位)控制推理深度,且该预算须低于请求的总 `max_tokens`。Tau 用一组固定预算值把抽象的 UI 级别线性映射到推理深度,使同一级别在不同 provider 下获得可比较的思考投入;预算随级别按 2 倍递增,从 `minimal` 的 1024 到 `xhigh` 的 16384。
 
 在 `provider_config.py:1609` 调用,用于向 Anthropic provider 注入 `thinking` 预算参数。
 

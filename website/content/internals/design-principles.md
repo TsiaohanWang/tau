@@ -4,7 +4,13 @@ description: The handful of rules that keep Tau small, portable, and readable.
 ---
 
 Tau follows a few principles consistently. They're why the codebase stays
-approachable as it grows.
+approachable as it grows. These principles are stated verbatim in the project
+README (section "Design principles") and are the contract every layer obeys;
+the pages below explain what each one looks like in the code. They are derived
+from — and largely mirror — [Pi](https://pi.dev)'s minimalist separation of
+*agent brain*, *coding session*, and *frontend*, which is the architecture Tau
+is explicitly inspired by (see the project README and
+[Architecture overview]({{< relref "./architecture.md" >}})).
 
 ## Small layers beat magic
 

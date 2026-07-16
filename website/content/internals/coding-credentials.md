@@ -9,6 +9,16 @@ This module is the single source of truth for *how Tau persists authentication
 material*. It defines two frozen credential dataclasses plus a small JSON-backed
 store. Secrets live in `<Tau home>/credentials.json`, never in `providers.json`.
 
+> **Why separate `credentials.json` from `providers.json`?** `providers.json`
+> holds static *configuration* (base URL, model list, client id, timeouts) that
+> is safe to commit, sync across machines, and edit by hand. `credentials.json`
+> holds *secrets* (access/refresh tokens, API keys) that must never travel with
+> configuration. Separating the two enforces a clear security boundary: the
+> configuration file can be version-controlled or shared, while the credential
+> file stays private (`0o600`), can be git-ignored, and is the only artifact
+> whose exposure is a breach. A single merged file would force users to treat
+> every config edit as a secret-handling operation.
+
 ### 1.1 The credential types
 
 ```python
@@ -67,7 +77,11 @@ class FileCredentialStore:
   directory with `0o600`, then `rename`s into place and chmods the final file
   `0o600`. This limits credential exposure to the owning user.
 - There is **no encryption**: like Pi, Tau relies on OS file permissions. The
-  `0o600` chmod is the only confidentiality mechanism.
+  `0o600` chmod is the only confidentiality mechanism. This is a deliberate
+  decision: at-rest encryption of a local credential file would require a
+  keystore or passphrase prompt, adding friction without meaningfully raising
+  the bar above OS-level protection of the user's home directory. The threat
+  model is a non-owner reading the file, which `0o600` already defeats.
 
 ### 1.3 How it connects
 
@@ -85,7 +99,7 @@ building a live `ModelProvider`. Refresh flows (`oauth*.py`) return a fresh
 
 ## 文件:credentials.py
 
-本文件实现 Tau 在本地家目录下基于 JSON 文件的凭证存储。它定义了两类凭证的 dataclass(`OAuthCredential`、`ApiKeyCredential`)、一个可注入的存储抽象(`CredentialStore` 的对应实现 `FileCredentialStore`)、内存型实现,以及一批模块级序列化/校验辅助函数。凭证统一持久化到 `credentials.json`(由 `credentials_path()` 决定),而不是 provider 配置所用的 `providers.json`。
+本文件实现 Tau 在本地家目录下基于 JSON 文件的凭证存储。它定义了两类凭证的 dataclass(`OAuthCredential`、`ApiKeyCredential`)、一个可注入的存储抽象(`CredentialStore` 的对应实现 `FileCredentialStore`)、内存型实现,以及一批模块级序列化/校验辅助函数。凭证统一持久化到 `credentials.json`(由 `credentials_path()` 决定),而不是 provider 配置所用的 `providers.json`。(`providers.json` 仅含可共享、可版本化的静态配置,如 base URL、模型列表、client id;`credentials.json` 含访问/刷新令牌与 API key 这类机密,按 `0o600` 权限落盘且不随配置同步——这是"配置"与"密钥"两个安全边界的拆分,合并为单一文件会把每次编辑配置都变成一次密钥处理操作,扩大泄漏面。)
 
 ### CredentialStoreError
 
@@ -738,7 +752,7 @@ URL 安全的 base64 编码并去掉填充(`=`)。
 
 ## 串联:凭证持久化、OAuth 无缝续期、registry 与 provider_runtime 的衔接
 
-1. **持久化到 `credentials.json` 而非 `providers.json`**:所有具体 flow(`AnthropicOAuthProvider`/`GitHubCopilotOAuthProvider`/`OpenAICodexOAuthProvider`)登录成功后返回 `OAuthCredential`,调用方(CLI/TUI)通过 `FileCredentialStore.set_oauth(provider.id, credential)` 写入。默认路径由 `credentials_path()` 决定为 `TauPaths().home / "credentials.json"`,与 provider 静态配置 `providers.json` 完全隔离。`_save` 用临时文件 + 原子 `replace` + `chmod 0o600` 保证落盘安全,但内容为明文(仅依赖文件权限)。
+1. **持久化到 `credentials.json` 而非 `providers.json`**:所有具体 flow(`AnthropicOAuthProvider`/`GitHubCopilotOAuthProvider`/`OpenAICodexOAuthProvider`)登录成功后返回 `OAuthCredential`,调用方(CLI/TUI)通过 `FileCredentialStore.set_oauth(provider.id, credential)` 写入。默认路径由 `credentials_path()` 决定为 `TauPaths().home / "credentials.json"`,与 provider 静态配置 `providers.json` 完全隔离。**为何如此**:`providers.json` 是"配置"——base URL、模型列表、client id 等可共享、可版本化、可手编的值;而令牌与 API key 是"密钥",泄漏即等于账户失陷。把两者拆成独立文件,使得配置可自由提交/同步、被多人引用,而密钥文件保持 `0o600` 私有、可 git-ignore、不会随配置扩散。`_save` 用临时文件 + 原子 `replace` + `chmod 0o600` 保证落盘安全,但内容为明文(仅依赖文件权限)。
 
 2. **OAuth 无缝续期**:每个 provider 的 `refresh(credential)` 都先看 `oauth_credential_is_expired`(带 `TOKEN_REFRESH_SKEW_MS`/`ANTHROPIC_TOKEN_SKEW_MS`/`GITHUB_COPILOT_TOKEN_SKEW_MS` 提前量),未过期直接返回原凭证(零开销);过期时:
    - Codex/Anthropic 用 refresh token 调令牌端点换新 access 且通常在响应中更新 refresh token;

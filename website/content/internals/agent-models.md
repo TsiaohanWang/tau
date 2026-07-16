@@ -5,7 +5,7 @@ description: types / messages / tools / events
 
 ## `tau_agent/types.py` — JSON 值类型别名
 
-只有 8 行，但 everywhere 用到：
+只有 8 行，但整个 agent 包各处都用得到：
 
 - **`JSONPrimitive = str | int | float | bool | None`**
 - **`JSONValue = JSONPrimitive | list[JSONValue] | dict[str, JSONValue]`**（递归）
@@ -19,7 +19,7 @@ description: types / messages / tools / events
 ## `tau_agent/messages.py` — 对话 transcript 的消息模型
 
 一组 pydantic `BaseModel`（`extra="forbid"`），描述在模型、工具、持久化之间
-流动的"消息"。注意所有消息都带 `role` 字面量判别字段。
+流动的"消息"。所有消息都带 `role` 字面量判别字段，以保证反序列化时能路由到正确的具体类型。
 
 - **`UsageCost`**（frozen 语义的数据类）：单次响应的 USD 费用拆分
   `input`/`output`/`cache_read`/`cache_write`/`total`。Tau 目前**没有按模型定价
@@ -56,9 +56,8 @@ description: types / messages / tools / events
 
 - **`ToolCancellationToken`**（Protocol）：工具的取消句柄，`is_cancelled()`。
 - **`ToolUpdateCallback`**（Protocol）：`(message: str, data: dict[str, JSONValue] | None = None) -> None`，工具在执行
-  中上报进度的火忘式回调（`data` 是有结构的可选字典，不是任意值）。loop 把它桥接成
-  `ToolExecutionUpdateEvent`。注意：必须
-  在事件循环线程调用（桥接用 `asyncio.Queue`，非线程安全）；worker 线程里的
+  中上报进度的 fire-and-forget 回调（`data` 是有结构的可选字典，不是任意值）。loop 把它桥接成
+  `ToolExecutionUpdateEvent`。必须在事件循环线程调用（桥接用 `asyncio.Queue`，非线程安全）；worker 线程里的
   执行器要先跳回 loop 再报告。
 - **`ToolCallRenderer`**（Protocol）：`(arguments) -> str | None`，把工具参数渲染
   成一行友好展示（如 subagent 工具的 description），返回 `None` 则回落默认。
@@ -132,6 +131,8 @@ agent loop 对外 emit 的"高层事件"（区别于 `tau_ai` 的 `ProviderEvent
 - **`ErrorEvent`**（`error`）：错误，`recoverable: bool`（决定 agent 是否重试或
   上抛）、`message`、`data`。
 - **`AgentEvent`**：以上 14 个类的联合类型，是 `run_agent_loop` 的产出元素类型。
+
+> Design note: 事件流是各层之间的契约。Tau 的设计原则之一即"Events make agents teachable"——agent 对外 emit 的不是埋在回调里的控制流，而是一条可被渲染、测试、导出的强类型事件流。provider、渲染层、TUI、以及自定义前端都在这条 `AgentEvent` 流上相遇：UI 只消费事件、绝不反向耦合到 loop 内部。这使同一份 agent 核心既能驱动 print 模式，也能驱动 Rich 或 Textual TUI，无需改动 `run_agent_loop`。
 
 ---
 
@@ -598,7 +599,7 @@ type AgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEven
 
 ### events.py 的 agent 事件词汇如何被 loop/harness 使用
 - loop 在每个阶段产出对应的 `AgentEvent`:运行级(`AgentStartEvent`/`AgentEndEvent`)、轮次级(`TurnStartEvent`/`TurnEndEvent`/`RetryEvent`)、消息级(`MessageStartEvent`/`MessageDeltaEvent`/`ThinkingDeltaEvent`/`MessageEndEvent`)、工具级(`ToolExecutionStartEvent`/`ToolExecutionUpdateEvent`/`ToolExecutionEndEvent`)、以及 `QueueUpdateEvent`、`ErrorEvent`。
-- 这些事件是“agent 层词汇”,UI(Textual/Rich/print)只订阅事件流来渲染,绝不反向耦合到 loop 内部,符合 AGENTS.md 强调的“harness 发射事件、UI 消费事件”的 adapter 边界。
+- 这些事件是“agent 层词汇”,UI(Textual/Rich/print)只订阅事件流来渲染,绝不反向耦合到 loop 内部,符合 AGENTS.md 强调的“harness 发射事件、UI 消费事件”的 adapter 边界。事件流的稳定性正是 README “Events make agents teachable” 原则在代码中的体现。
 
 ### agent 事件与 provider 事件的层次差异
 - **provider 事件**(位于 `tau_ai`,不属于本包)是底层、provider 特定的流式原语(如 token 块、tool_call delta、usage 块),与某个具体模型/SDK 的流式格式绑定。

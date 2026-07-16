@@ -52,6 +52,27 @@ TUI, or a frontend you build yourself — all by consuming the same event stream
 That's also what makes Tau readable: each layer answers one question, and you can
 study it without untangling the others.
 
+These are not incidental choices. The project states its design principles
+explicitly in the repository README, and they are the contract every layer below
+obeys:
+
+> - **Small layers beat magic.** Each package has one job and can be read alone.
+> - **Events are the contract.** Providers, renderers, the TUI, and custom
+>   frontends meet at a typed event stream.
+> - **The core stays portable.** The reusable harness does not depend on the CLI,
+>   Textual, Rich, or Tau's file layout.
+> - **Tools are ordinary typed functions.** A tool is a schema plus an async
+>   executor returning a structured result.
+> - **Sessions are durable and inspectable.** History is append-only JSONL;
+>   active context can be compacted without rewriting the record.
+>
+> — Tau README, "Design principles"
+
+This is why `tau_agent` is forbidden from importing Textual or Rich, why the
+provider stream is a *neutral* event vocabulary rather than vendor-shaped
+objects, and why `CodingSession` (not `AgentHarness`) is where slash commands and
+file tools live. The boundary is the feature; everything else is its consequence.
+
  → Next: [The agent loop & events]({{< relref "./agent-loop.md" >}}) ·
  [Design principles]({{< relref "./design-principles.md" >}}) ·
  [Build your own frontend]({{< relref "./custom-frontend.md" >}})

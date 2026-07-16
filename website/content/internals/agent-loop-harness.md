@@ -36,9 +36,8 @@ description: loop.py 纯循环 / harness.py 有状态大脑
 4. 若因 `max_turns` 耗尽退出 `while`：`yield` 可恢复 `ErrorEvent`。
 5. 最后 `yield AgentEndEvent()`。
 
-> 注意一个精妙处：transcript 列表由**调用方（harness）拥有**，loop 只往里 append。
-> 这让 loop 保持"无状态"，而未来的 harness 可以拥有 transcript 状态——这正是
-> Part 2a 文档里那句"keeps the loop stateless"的含义。
+> Design note: transcript 列表由**调用方（harness）拥有**，loop 只往里 append。
+> 这是 loop/harness 边界的核心分工。Tau 的设计原则明确 **`AgentHarness = reusable agent brain`** 且 **`The core stays portable`**——`run_agent_loop` 因此被实现为纯 `async` 生成器：它不持有 transcript、不绑定工具、不感知会话文件或终端，所有状态都由调用方注入、就地修改。这样循环本身保持"无状态"，可被任意 harness、测试或嵌入场景复用；而真正有状态的大脑（持有 transcript、运行标志、取消令牌、排队与订阅）由 `AgentHarness` 叠加在循环之上。把"算法"与"状态"拆开，正对应 README 的 agent 拆分原则——可复用的 harness 绝不能依赖终端、文件路径或 Rich 渲染，那些只是包裹 harness 的外层。
 
 ### 排队消息：`_drain_queued_messages`
 
@@ -75,8 +74,11 @@ description: loop.py 纯循环 / harness.py 有状态大脑
   `ToolResultMessage`；失败时把 `error` 拼进 `content`（`error not in content` 时），
   无 content 且有 data 时以 `str(data)` 兜底。
 
-> 这段"进度桥接"代码是 loop.py 最精巧的部分，也是 Rust `tau-rs` 用 channel +
-> `tokio::select!` 实现 `ToolExecutionUpdateEvent` 流时所对应的逻辑。
+> Design note: 这段"进度桥接"是 loop.py 最精巧的部分，也是 Rust `tau-rs` 用 channel +
+> `tokio::select!` 实现 `ToolExecutionUpdateEvent` 流时所对应的逻辑。把同步的 `on_update`
+> 回调桥接进异步事件流，是为了让工具进度以统一的 `AgentEvent` 形式对外广播——前端无论用
+> print、Rich 还是 TUI，都从同一条事件流消费进度，无需直接触碰 worker 线程里的执行器。
+> "工具进度即事件"正落实了 README 的 "Events make agents teachable" 原则。
 
 ---
 
@@ -144,8 +146,11 @@ UI 在工具还在跑时取消 worker，正常循环可能来不及补取消结�
 补一条 `ok=False`、`content="Tool call interrupted by user"` 的 `ToolResultMessage`。
 `prompt`/`continue_` 一开始就调它，保证 transcript 永远可被模型接受。
 
-> 这个修复逻辑对应 Rust `tau-rs` 的 `harness` 在发起新一轮前重放/补全中断的工具结果
-> 的部分。
+> Design note: 这个修复逻辑对应 Rust `tau-rs` 的 `harness` 在发起新一轮前重放/补全中断的工具结果
+> 的部分。其动机在于 transcript 必须是模型可接受的完整记录：OpenAI 兼容 provider 会拒绝
+> "助手调了工具却没有对应工具结果" 的历史，否则下一轮请求直接失败。`AgentHarness` 在
+> `prompt`/`continue_` 入口处主动补齐中断结果，就能保证任意时刻暂停、再恢复，transcript
+> 都始终合法——这是会话"可持久化、可恢复"承诺在 harness 层的落地。
 
 ---
 
@@ -441,7 +446,7 @@ JSONL 树"，以及从磁盘重建回 `harness` 需要的状态。
 
 ### 边界与关系小结
 
-- **`loop.py` 的「纯」**:`run_agent_loop` 是纯 `async` 生成器,不持有 transcript、不持有 tools 绑定、不持有会话;一切(`messages`/`tools`/`provider`/`signal`/队列来源函数)都靠参数注入,`messages` 由调用方拥有且就地修改——因此可脱离任何 UI、用 fake 实现做确定性单元测试。
+- **`loop.py` 的「纯」**:`run_agent_loop` 是纯 `async` 生成器,不持有 transcript、不持有 tools 绑定、不持有会话;一切(`messages`/`tools`/`provider`/`signal`/队列来源函数)都靠参数注入,`messages` 由调用方拥有且就地修改。**为什么这样设计**:README 把 agent 拆成 `AgentHarness = reusable agent brain / AgentSession = coding-agent environment / TUI = one possible frontend`,并规定 "The core stays portable"。若循环本身持有 transcript 或会话状态,它就无法脱离具体环境复用。把状态全部外推给调用方,循环就退化为一个纯算法函数——这正是 "Small layers beat magic" 原则的体现:每一层只做一件事,循环只负责"请求模型→翻译事件→执行工具→回灌→续跑"。因此循环可脱离任何 UI、用 fake 实现做确定性单元测试。
 - **`harness.py` 的「状态叠加」**:`AgentHarness` 把 `self._messages` 作为 transcript 直接交给 loop,loop 每轮就地追加;harness 额外维护 `tools`、`system`、运行标志、取消令牌、steering/follow-up 队列与订阅者,把「多轮会话、运行中注入消息、事件广播、运行保护、中断修复」叠加在纯循环之上,自身仍与 CLI/Rich/Textual/session 文件解耦。
 - **与 `CodingSession` 的关系**:`tau_coding` 的 `CodingSession` 是更上层,负责把 harness 接入 TUI、资源/技能加载、命令与文件操作;harness 完全不知道 TUI 的存在,只通过 `AgentEvent` 向外发事件、`subscribe` 接收回调。`CodingSession` 调用 harness 的 `prompt()` 并消费其 `AgentEvent` 流,从而把「可复用 agent 大脑」与「具体前端/环境」解耦,符合 Pi 的 `AgentHarness = reusable agent brain / AgentSession = coding-agent environment / TUI = one possible frontend` 三层划分。
 

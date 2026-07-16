@@ -207,6 +207,8 @@ Supporting types: `ExtensionHandler`, `ExtensionCommandHandler`,
 ### 类定义
 `class ExtensionGeneration` — 一次扩展加载代(generation)的存活令牌。移植 Pi 的 `assertActive`/`invalidate` 失活性守卫:每个 `ExtensionAPI` 方法、每个 `ExtensionContext`/`ExtensionUi` 读取都在触碰 runtime 前检查此令牌,使 `/reload` 前捕获的状态响亮失败,而非静默作用于新注册集。**仅 reload 使其失效**;会话重绑(resume/new/branch)按设计保持代存活(见 phase-21 生命周期 Ruling)。
 
+  > **为何用代(generation)失效机制而非全局重载?** 扩展在 `setup(tau)` 时捕获的 `tau` API 对象、`context`、`ui` 句柄都绑定到某一加载代。若 `/reload` 只是替换注册表而不让旧对象失效,旧扩展仍会用已被新注册集取代的世界状态——产生静默、难以追查的错配。代令牌把"失效"显式化:任一被旧代捕获的引用在下次调用时即抛 `ExtensionError`,旧扩展被安全地隔离出来,新扩展则在 fresh API 上运行。这同时满足了两条需求——运行时可重载(新代重建一切)与旧扩展出错隔离(旧代对象立即报错而非污染新注册集)。会话重绑保持代存活则避免 resume/new/branch 这种高频操作无谓地中断扩展。
+
 ### `__slots__ = ("_stale_message",)`
 限制实例仅含 `_stale_message` 属性,节省内存并防止随意添加属性。
 
@@ -670,6 +672,13 @@ diagnostics).
 - Import errors, missing `setup`, or an **async** `setup` are all caught and
   turned into `ResourceDiagnostic`s — one bad extension never kills the others
   (the "extensions are an isolation boundary" principle).
+  > **Why are extensions an isolation boundary?** Third-party `setup` code runs
+  > inside the host process and can raise, hang, or register broken handlers. If
+  > a failure in one extension aborted loading of the rest, a single misbehaving
+  > extension would disable the whole session. Catching every import/setup error
+  > into a non-fatal `ResourceDiagnostic` keeps the remaining extensions alive and
+  > surfaces the problem to the user, so extensibility does not become a
+  > single-point-of-failure.
 - `unload_extension_modules()` removes the synthetic modules so a `/reload`
   re-imports fresh objects.
 

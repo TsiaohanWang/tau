@@ -79,15 +79,24 @@ Important methods:
 - `format_terminal_command_result_block` — formats `!!` terminal-command output
   for the transcript.
 
-> The state module is pure data + formatting. It has no Textual imports, which
-> is the whole point: it is testable and reusable independent of the UI.
+> Design note: the state module is pure data + formatting, with no Textual
+> imports. This is deliberate, not incidental — it keeps the model independent of
+> any UI framework so it can be unit-tested and reused from any frontend. The
+> boundary also enforces Tau's layering rule that the portable core must not
+> depend on Textual or Rich: `state.py` describes *what to display*, and only
+> `app.py` knows about the widget layer. Because the view is a read-only
+> projection of this model (see the widgets page), re-rendering on every event
+> never duplicates formatting logic. This mirrors the Tau README design
+> principles — "The core stays portable" and "Events are the contract": the
+> event stream mutates `TuiState`, and views consume that state rather than the
+> events directly.
 
 ---
 
 ## `tui/adapter.py` — events → state
 
-`TuiEventAdapter` is the only place that maps `AgentEvent`s onto `TuiState`.
-Its `apply(event)` is a big `isinstance` chain:
+`TuiEventAdapter` is the sole boundary that maps `AgentEvent`s onto `TuiState`.
+Its `apply(event)` is a single `isinstance` dispatch over the event hierarchy:
 
 - `AgentStartEvent` → `running = True`, clear error.
 - `AgentEndEvent` → flush assistant buffer, `running = False`.
@@ -106,7 +115,10 @@ Its `apply(event)` is a big `isinstance` chain:
 
 `_flush_assistant_buffer` pushes any accumulated streamed text into a final
 assistant item. This separation means the *same* adapter could feed any view;
-only `app.py` knows about Textual.
+only `app.py` knows about Textual. The adapter is the single boundary that maps
+`tau_agent`'s portable `AgentEvent` stream onto `TuiState`, so the event→state
+translation is fully decoupled from any rendering concern ("Small layers beat
+magic" — the adapter does one job and does it behind a narrow interface).
 
 ---
 

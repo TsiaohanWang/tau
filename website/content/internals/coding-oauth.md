@@ -118,6 +118,14 @@ async def poll_oauth_device_code[T](
   `wait_before_first_poll`), loops until `complete`/`failed`/timeout, handles
   `slow_down` (bumps the interval by 5s or to the server's suggested value), and
   honors a `cancel_event` (raising `OAuthError("Login cancelled")`).
+  > **Why RFC 8628 (OAuth 2.0 Device Authorization Grant)?** The device-code
+  > flow lets a user authenticate on a *second* device (e.g. a browser on a
+  > phone) when the agent host has no usable browser or input surface — the exact
+  > situation for a headless CLI. The spec mandates the `authorization_pending` →
+  > keep polling, `slow_down` → back off and increase interval, and
+  > `expires_in` → hard timeout semantics that `poll_oauth_device_code` encodes
+  > verbatim, so the loop is interop-correct against any compliant authorization
+  > server (see <https://datatracker.ietf.org/doc/html/rfc8628>).
 - Injectable `sleep`/`monotonic` make it unit-testable without real time.
 - `GitHubCopilotOAuthProvider` is the only built-in that uses it today; it passes
   a `poll` closure that POSTs to GitHub's token endpoint and maps the response to
@@ -158,6 +166,16 @@ TOKEN_REFRESH_SKEW_MS = 60_000
   extracts `account_id` from the access JWT's
   `https://api.openai.com/auth` → `chatgpt_account_id` claim
   (`account_id_from_access_token`).
+  > **Why Authorization Code + PKCE (RFC 6749)?** The OAuth 2.0 Authorization
+  > Framework (RFC 6749, <https://datatracker.ietf.org/doc/html/rfc6749>) defines
+  > the authorization-code grant as the redirect-based flow for confidential and
+  > public clients. A CLI is a *public* client with no safe place to store a
+  > client secret, so Tau uses PKCE (the S256 `code_challenge`/`code_verifier`
+  > pair) to bind the token exchange to the same client that initiated the
+  > request, defeating authorization-code interception. The random `state`
+  > parameter is the CSRF countermeasure required by the framework. Together
+  > these let a browser-based login terminate at a `localhost` redirect without
+  > any embedded secret.
 - `refresh` is a no-op if `oauth_credential_is_expired` is false (skew 60s);
   otherwise `refresh_openai_codex_token` POSTs `grant_type=refresh_token` and
   re-extracts `account_id`.

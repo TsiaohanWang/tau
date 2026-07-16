@@ -28,7 +28,7 @@ description: __init__.py 与 tau_ai 的边界
 
 ## `tau_agent` 与 `tau_ai` 的边界
 
-把前面读过的代码串起来，依赖关系如下：
+综合前面读过的代码，依赖关系如下：
 
 ```
 tau_coding  ──►  tau_agent  ──►  tau_ai
@@ -59,8 +59,16 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 
 这种"**下层 import 上层的数据类型，但上层只认下层的 Protocol**"的安排，让 `tau_agent`
 在单元测试里能用 `FakeProvider`（Part 1b）完全替代真实网络，也让 `tau_ai` 可以独立
-演进各家 API 而不波及 agent 逻辑。正是 AGENTS.md 里强调的"保持核心 agent 包独立于
-CLI、Textual、Rich、会话文件位置、应用特定资源加载"。
+演进各家 API 而不波及 agent 逻辑。
+
+> Design note: 这套边界正是 README 的 agent 拆分原则——`AgentHarness = reusable agent brain`、
+> `AgentSession = coding-agent environment`、`TUI = one possible frontend`——在依赖方向上的落实。
+> 把"消息/工具"作为纯数据类型下沉到 `tau_agent`，`tau_ai` 只接收结构而不依赖 agent 行为；
+> `tau_agent` 反过来只依赖 `tau_ai` 的 `ModelProvider` / `ProviderEvent` 等 Protocol，不碰任何
+> 具体 provider 或 HTTP。结果是核心 agent 包满足 AGENTS.md 强调的"独立于 CLI、Textual、Rich、
+> 会话文件位置、应用特定资源加载"——`tau_coding` 把具体 provider 注入 harness、把事件接到
+> 前端，而 harness 自身对这些上层结构一无所知。这也是"Small layers beat magic"的直接后果:
+> 每个包只暴露一个稳定的抽象面,边界清晰到可以用 fake 实现做确定性测试。
 
 ---
 
@@ -98,7 +106,7 @@ CLI、Textual、Rich、会话文件位置、应用特定资源加载"。
 - 定义 `from tau_agent import *` 时的可见集合;
 - 作为包公共契约的权威清单(谁在列,谁就是稳定的对外 API;谁不在列,谁就是内部实现)。
 
-注意:本文件 **re-export 的全部 51 个符号都进了 `__all__`**,没有"静默导出但不在 `__all__` 中"的遗漏——`__all__` 与文件实际 import 的符号一一对应、完全同步。
+本文件 **re-export 的全部 51 个符号都进了 `__all__`**,没有"静默导出但不在 `__all__` 中"的遗漏——`__all__` 与文件实际 import 的符号一一对应、完全同步。
 
 ### 导出项:`AgentHarness`
 
@@ -271,7 +279,7 @@ CLI、Textual、Rich、会话文件位置、应用特定资源加载"。
 
 **共同契约**:全部是 `pydantic.BaseModel` 且 `ConfigDict(extra="forbid")`,每个都用 `Literal` 的 `type` 字段作为判别标签——这让它们能安全地作为 `AgentEvent` Union 的成员被反序列化与分发。
 
-**如何构成公共面**:`AgentEvent`(以及这些具体类)是 agent 向外广播的**统一事件协议**。harness 的订阅者、TUI/Rich 渲染层都只消费 `AgentEvent`,从而与 provider 实现、工具实现彻底解耦——这正是 AGENTS.md 要求的"agent harness 发事件、UI 层消费事件"边界的核心载体。
+**如何构成公共面**:`AgentEvent`(以及这些具体类)是 agent 向外广播的**统一事件协议**。harness 的订阅者、TUI/Rich 渲染层都只消费 `AgentEvent`,从而与 provider 实现、工具实现彻底解耦——这正是 README "Events make agents teachable" 原则的体现:agent 的对外边界是一条可被渲染、测试、导出的事件流,而非埋在回调里的控制流。AGENTS.md 中"agent harness 发事件、UI 层消费事件"的约定即由此而来。
 
 ### 导出项:`SessionEntry`(Union 类型别名)
 

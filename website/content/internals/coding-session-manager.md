@@ -79,9 +79,15 @@ Module-level helper: given possibly-overlapping records from multiple indexes,
 keep one per id, preferring the one with the newer `updated_at`. This handles
 the case where a session appears in both the global and a project index.
 
-> Note the migration story: the global `index.jsonl` is legacy; new sessions are
-> written to per-project indexes. The manager reads both so old installs keep
-> working.
+> **Why two index locations, and why reads merge them.** The global
+> `index.jsonl` is the legacy layout; new sessions are written to per-project
+> indexes. Rather than migrate old files eagerly, the manager reads both and
+> `_deduplicate_records` collapses any overlap, so an existing install keeps
+> resolving its old sessions with no migration step. This reflects Tau's
+> "Sessions are durable and inspectable" principle: the session index is plain,
+> append-oriented JSONL that stays readable across versions, and forward
+> compatibility is handled by `ConfigDict(extra="ignore")` dropping unknown
+> fields instead of rewriting the file.
 
 ---
 

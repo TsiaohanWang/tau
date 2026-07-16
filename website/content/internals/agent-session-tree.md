@@ -19,8 +19,15 @@ description: session/ 包的 entries / tree / jsonl / storage / memory
   - **`BranchSummaryEntry`**（`type="branch_summary"`）：分支点的摘要（`summary` +
     `branch_root_id`）。
   - **`LabelEntry`**（`type="label"`）：用户给会话打的标签（`label`）。
-  - **`LeafEntry`**（`type="leaf"`）：**当前分支的叶指针**，指 `entry_id`。可以有很多个；
-    "导航当前分支"就是从一个 leaf 沿 `parent_id` 往回走到 root。
+- **`LeafEntry`**（`type="leaf"`）：**当前分支的叶指针**，指 `entry_id`。可以有很多个；
+  "导航当前分支"就是从一个 leaf 沿 `parent_id` 往回走到 root。
+
+> Design note: 为什么用 `parent_id` 指针而非显式树对象来表达分支？因为会话历史以
+> append-only JSONL 落盘——每产生一个节点就追加一行，已写的节点永不被改写。在只追加的
+> 结构里，分支天然就是"同一父节点下出现多个子节点"，用 `parent_id` 指针即可完整表达，
+> 而无需重写任何历史记录。Tau 的会话设计遵循同一思路：历史是 append-only JSONL，活跃上下文
+> 可以通过 compaction 压缩，但绝不重写已落盘的整条记录。这让任意历史节点都能被无损保留，
+> 并能沿 `parent_id` 回溯出任意分支的完整路径（见 `tree.py` 的 `path_to_entry`）。
   - **`SessionInfoEntry`**（`type="session_info"`）：根节点元数据——`created_at`、
     `cwd`、`title`。
   - **`CustomEntry`**（`type="custom"`）：扩展/应用私有数据（`namespace` + `data`）。
@@ -60,6 +67,12 @@ description: session/ 包的 entries / tree / jsonl / storage / memory
   中途崩溃留下的半行）都会抛 `SessionJsonlError`。append-only 的设计保证了已落盘的
   整行节点是完整的，风险只来自最后一次写操作被中断的那一行。
 
+> Design note: 一行一个节点的追加式存储，是"会话可持久化、可检查"的前提。Tau 的会话设计
+> 原则是历史为 append-only JSONL——节点只增不改，因此任何已完整写入的行都是自洽、可被
+> `entries_from_json_lines` 独立还原的记录；即使进程在写最后一行时崩溃，也只会损失那一行，
+> 不会污染已有历史。active context 的压缩（compaction）同样不重写旧记录，而是追加一条
+> `CompactionEntry` 在重放时把被替换消息折叠成摘要，从而保持记录的不可变性。
+
 ---
 
 ## `session/storage.py` — 存储接口与实现
@@ -70,7 +83,9 @@ description: session/ 包的 entries / tree / jsonl / storage / memory
   （调用方必须 `await` 这两个方法——它们是协程，不能直接同步调用。）
 - **`JsonlSessionStorage`**：本地文件实现，`__init__(path: str | Path)` 记 `Path`。
   - `async append(entry)`：`parent.mkdir(parents=True)`，以 `"a"` 追加模式写一行
-    （`entry_to_json_line`）。**追加式**保证已写节点永不被改写，符合"append-only 树"。
+    （`entry_to_json_line`）。**追加式**保证已写节点永不被改写，符合"append-only 树"。这样
+  会话历史天然不可变：分支、压缩、标签等所有变更都表现为新节点的追加，而非对旧行的就地修改，
+  从而让会话既能耐久落盘、又能无损恢复与检查。
   - `async read_all()`：文件不存在 → 返回 `[]`（空会话）；否则 `splitlines()` 后
     `entries_from_json_lines`。
 
@@ -101,8 +116,13 @@ description: session/ 包的 entries / tree / jsonl / storage / memory
       消息替换成摘要 `UserMessage`；
     - `branch_summary` → 插入一条 `UserMessage`（带 `<summary>` 包裹的分支摘要）。
 - **`_apply_compaction(message_rows, entry)`**：按 `replaces_entry_ids` 过滤旧消息，
-  在被替换区间的开头插入一条摘要消息（只插一次）。**这让"压缩历史"在重放时直接变成
-  模型看到的上下文**，从而控制 token 用量。
+   在被替换区间的开头插入一条摘要消息（只插一次）。**这让"压缩历史"在重放时直接变成
+   模型看到的上下文**，从而控制 token 用量。
+
+> Design note: compaction 不删除或改写已落盘的 `MessageEntry`，而是在重放阶段才把被替换的
+> 消息折叠成一条摘要。原因在于历史必须是 append-only 的——原始消息保留在 JSONL 中，可随时
+> 沿其他分支路径重放出未压缩的完整上下文；只有"当前活跃上下文"在内存重放时被摘要替代。这
+> 与 Tau 会话设计一致：active context 可以被 compacted，但记录本身不被重写。
 - **`_format_compaction_summary` / `_format_branch_summary`**：把摘要包成模型可读的
   文本前缀。
 

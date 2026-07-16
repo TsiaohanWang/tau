@@ -56,6 +56,16 @@ What `main` does:
 piece but contains no agent logic, no rendering internals, and no provider
 specifics beyond wiring names to config functions.
 
+> **Why a composition root with no logic?** Pi's architecture keeps the core
+> agent harness portable: it must not depend on a CLI, a TUI, or any specific
+> provider. `cli.py` is the one place that *assembles* those portable pieces into
+> a running program — parsing argv, choosing the frontend (TUI vs print mode),
+> and threading extension flags through. Keeping all decision-making (model
+> selection, session creation, prompt streaming) inside `run_openai_print_mode` /
+> `run_print_mode` rather than in `main` means the harness stays testable and
+> reusable: the README's "The core stays portable" guarantee holds because the
+> only non-portable wiring lives here, behind the entry point.
+
 ---
 
 ## 逐方法深度剖析（cli.py）

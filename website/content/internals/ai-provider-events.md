@@ -6,9 +6,11 @@ description: provider.py / events.py / retry.py / http.py / http_errors 之前�
 ## `tau_ai/provider.py` — 全栈依赖的两个 Protocol
 
 这是整个代码库最关键的一层契约。两个 `typing.Protocol` 类定义了下游所有代码
-使用的接口。注意它**从 `tau_agent` 反向 import** 了消息与工具类型——这是栈中
-唯一一处"下层 import 上层"的地方，因为 provider 需要把"消息"和"工具"当作纯数据
-来接收（消息/工具是结构性数据，不属于 provider 的职责）。
+使用的接口。它**从 `tau_agent` 反向 import** 了消息与工具类型——这是栈中
+唯一一处"下层 import 上层"的地方。其必要性的在于：provider 必须把"消息"和"工具"当作
+纯数据来接收，而这两类数据的权威定义在 `tau_agent` 中；让 `provider.py` 依赖
+agent 层的类型（而非自行定义私有格式），可保证转换只发生在 provider 内部，
+避免栈内出现两套并行的消息/工具表示。
 
 - **`CancellationToken`**（Protocol）：最小取消句柄，只有一个方法
   `is_cancelled() -> bool`。provider 与 agent loop 会轮询它（或基于它构造更
@@ -58,9 +60,12 @@ description: provider.py / events.py / retry.py / http.py / http_errors 之前�
 - **`ProviderEvent`**（类型别名）：上述 7 个类的联合类型，是
   `stream_response` 的产出元素类型。
 
-> 关键设计：消费者（agent loop）永远只看到这 7 种事件类型。provider 之间的差异
-> （chat/completions vs `/v1/responses`、SSE 形态、工具调用编码方式）全部被吸收
-> 在这一层之下。
+> **为什么这样设计**：消费者（agent loop）永远只看到这 7 种事件类型。provider 之间的
+> 差异（chat/completions vs `/v1/responses`、SSE 形态、工具调用编码方式）全部被吸收
+> 在这一层之下。这正是 Tau 的设计原则之一——**"Events are the contract"**：agent 循环
+> 只与事件流签订契约，而不与任何具体模型 SDK 耦合；新增 provider 时只需在其内部把原生
+> 响应归一化为这 7 种事件，上层逻辑无需改动。事件词汇表因此成为栈中最稳定的边界，
+> 也是 Pi 架构中 "AgentHarness 独立于 provider" 的具体落点。
 
 ---
 
@@ -80,8 +85,9 @@ description: provider.py / events.py / retry.py / http.py / http_errors 之前�
   构造一个 `ProviderRetryEvent`，把"第几次/共几次"换算成人类可读文案
   （注意 `next_attempt = attempt + 2`，`max_attempts = max_retries + 1`）。
 - **`wait_for_retry(delay_seconds, *, signal)`**：退避睡眠，但用轮询方式分段
-  睡眠，**允许在退避中途被 `signal.is_cancelled()` 打断**并返回 `False`（表示
-  被取消）。这是取消能力真正生效的地方——不是一次性 `sleep`，而是可被轮询中止。
+   睡眠，**允许在退避中途被 `signal.is_cancelled()` 打断**并返回 `False`（表示
+   被取消）。这是取消能力真正生效的地方——不是一次性 `sleep`，而是可被轮询中止，
+   因此用户在退避等待期间按下 Ctrl-C 能立即获得响应，而非卡在最长延迟上。
 
 ---
 
@@ -285,7 +291,7 @@ description: provider.py / events.py / retry.py / http.py / http_errors 之前�
   ```
 
 - 作用：把上述 7 个具体事件联合成一个判别联合类型（PEP 604 语法）。它是 `provider.py` 中 `ModelProvider.stream_response` 的产出元素类型，也是 `tau_agent` 消费事件流时的统一类型。
-- 关键实现/数据流：因为每一个具体事件都有 `type: Literal[...]` 字段，`tau_agent` 可以用 `match event.type:` 做精准的分派（response_start → 初始化 UI；text_delta / thinking_delta → 增量渲染；tool_call → 执行工具；response_end → 收尾；retry → 展示重试；error → 处理错误）。这整套“provider 无关事件词汇”正是 `tau_agent` 与具体模型解耦的关键——它只认 `ProviderEvent`，永不直接解析 OpenAI / Anthropic 私有的响应结构。
+- 关键实现/数据流：因为每一个具体事件都有 `type: Literal[...]` 字段，`tau_agent` 可以用 `match event.type:` 做精准的分派（response_start → 初始化 UI；text_delta / thinking_delta → 增量渲染；tool_call → 执行工具；response_end → 收尾；retry → 展示重试；error → 处理错误）。这整套“provider 无关事件词汇”正是 `tau_agent` 与具体模型解耦的关键——它只认 `ProviderEvent`，永不直接解析 OpenAI / Anthropic 私有的响应结构。其设计动机是 Tau 的 **“Small layers beat magic”** 原则：以一组显式、可枚举的事件作为唯一契约，比把各 SDK 的响应对象层层封装更易于推理、测试与替换。
 
 ---
 

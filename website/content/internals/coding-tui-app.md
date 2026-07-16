@@ -7,9 +7,9 @@ description: tui/app / widgets / terminal_title
 
 This is the largest file in `tau_coding` (5741 lines). It contains the
 `TauTuiApp` class plus a fleet of `ModalScreen` subclasses for every picker and
-dialog. It imports and orchestrates two substantial sibling modules we cover
-separately (see `tui/widgets.py` and `tui/terminal_title.py` below). We cover
-`app.py` in layers.
+dialog. It imports and orchestrates two substantial sibling modules covered
+separately (see `tui/widgets.py` and `tui/terminal_title.py` below). `app.py` is
+covered in layers.
 
 ### Module constants & small classes
 
@@ -167,7 +167,10 @@ Each event is first applied to `TuiState` via the adapter, then reflected onto
 the *mounted* transcript widgets by `_apply_streaming_transcript_event` —
 appending assistant deltas, thinking deltas, tool-call/result items, finishing
 the assistant message, and refreshing chrome. This two-step design (state then
-view) keeps the model pure and the view a projection of it.
+view) keeps the model pure and the view a projection of it: the adapter is the
+only writer of `TuiState`, while `_apply_streaming_transcript_event` only reads
+state to update widgets, so the event→state→view pipeline can be reasoned about
+and tested in isolation.
 
 **Extension delivery.** An extension can request a turn via
 `_on_extension_turn_requested` → `_deliver_extension_message`, which either
@@ -188,10 +191,22 @@ login picker → `_open_login` (API key via `LoginScreen`, OAuth via
 `_logout`. Cancel/compaction paths (`action_cancel`, `_cancel_active_prompt`,
 `_cancel_active_compaction`) stop the worker and notify.
 
-> The TUI's defining architectural choice: it owns **no agent logic**. Every
-> decision (what a command does, how to branch, which model, compacting) is
-> delegated to `CodingSession` (Part 3b). The TUI only translates events →
-> widgets and widgets → commands.
+> Design note: the TUI's defining architectural choice is that it owns **no
+> agent logic**. Every decision — what a command does, how to branch, which
+> model, whether to compact — is delegated to `CodingSession` (Part 3b). The TUI
+> only translates events → widgets and widgets → commands. This boundary is not
+> a stylistic preference but a load-bearing constraint inherited from Tau's
+> architecture: `TUI = one possible frontend`, and "The core stays portable…
+> Frontends consume events" (Tau README). The agent harness in `tau_agent`
+> emits portable `AgentEvent`s and must remain free of Textual, Rich, and any
+> UI concern, so that the same harness can drive the print renderer, the JSON
+> renderer, or this Textual frontend interchangeably. Concretely, `app.py`
+> calls `CodingSession` methods and consumes the `AgentEvent` stream; it never
+> re-implements branching, model selection, or compaction. The Textual
+> framework (https://textual.textualize.io/) is chosen as the interactive
+> frontend precisely because its `ModalScreen`/`Widget` composition model lets
+> the TUI stay a thin projection layer: pickers, dialogs, and the transcript are
+> all widgets that render from `TuiState`, never from embedded agent logic.
 
 ---
 
@@ -262,8 +277,13 @@ builds its layout by importing `TranscriptView`, `SessionSidebar`,
 
 > Design note: keeping `render_*` as pure functions means the widget layer never
 > reaches into `TuiState` mutable fields directly — `state.py` owns the model,
-> these functions only read it. That is why the TUI can re-render on every event
-> without duplicating formatting logic.
+> these functions only read it. This stateless, read-only projection is what
+> lets the TUI re-render on every event without duplicating formatting logic,
+> and it is the practical consequence of the event→state→view two-phase design:
+> events mutate the model (via the adapter), the view is derived from the model.
+> Because the renderers are pure (input: a `ChatItem`/`TuiState` + `TuiTheme`;
+> output: a Rich renderable), they are independently testable and reusable by
+> both the interactive transcript and any other consumer of `TuiState`.
 
 ## `tui/terminal_title.py` — terminal tab-title control
 
@@ -292,7 +312,12 @@ dependency) so it can be unit-tested and reused.
 
 > Design note: the controller's "write-on-change + self-disable-on-error" policy
 > keeps title updates cheap (no flicker, no redundant escape sequences) and safe
-> in environments where OSC writes are unsupported or noisy.
+> in environments where OSC writes are unsupported or noisy. The `_last_title`
+> guard prevents re-emitting an identical escape sequence on every activity tick,
+> and the permanent self-disable on `OSError`/`ValueError` means a broken or
+> unsupported terminal can never turn a cosmetic title update into a crash —
+> consistent with the module's deliberate lack of any Textual dependency, so it
+> remains unit-testable as pure stdlib.
 
 ## 逐方法深度剖析(app.py)
 
@@ -301,6 +326,8 @@ dependency) so it can be unit-tested and reused.
 # tau_coding/tui/app.py 源码逐方法剖析
 
 > 本文件是 Tau 编码会话的交互式 Textual 前端。它把 `CodingSession` 的 agent 事件流渲染到图形界面,并提供命令、登录、会话选择、补全、扩展 UI 桥等全套交互。下文按"类 → 方法"逐条展开,严格基于源码行为。
+
+> 设计要点:`TauTuiApp` 不持有任何 agent 决策逻辑,所有分支/模型选择/压缩等动作都委派给 `CodingSession`;本文件只负责把 `AgentEvent` 投影到 widget,以及把 widget 交互回传为命令(`TUI = one possible frontend`,与 README "The core stays portable… Frontends consume events" 一致)。
 
 ---
 

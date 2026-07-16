@@ -24,7 +24,13 @@ methods.
 > Tau can swap output formats (text / json / transcript) without touching the
 > agent loop or `CodingSession`. The loop just calls `render(event)` for each
 > event; the renderer decides what to print. This is the same event-consumer
-> boundary the TUI uses (Part 3d), just on stdout/stderr instead of widgets.
+> boundary the TUI uses (Part 3d), just on stdout/stderr instead of widgets. The
+> design directly realizes two Tau README principles: "Events are the contract"
+> — the `AgentEvent` union is the stable interface every frontend depends on —
+> and "Small layers beat magic" — the renderer is a narrow, single-purpose layer
+> with no knowledge of the harness internals. Because the agent loop never
+> imports a concrete renderer, the portable core stays free of stdout/JSON
+> formatting concerns.
 
 ---
 
@@ -76,7 +82,11 @@ pipe stdout to a file and still watch progress on stderr).
 > status) is a deliberate Unix-friendly choice — `tau … > out.txt` captures only
 > the assistant's words, while progress still appears on the terminal. Reusing
 > `format_tool_call_block` from `tui/state.py` means print mode and the TUI show
-> *identical* tool formatting from a single source of truth.
+> *identical* tool formatting from a single source of truth, so the two
+> frontends cannot drift apart in how a tool call is labeled. The renderer holds
+> no UI framework dependency (it uses only `typer`/`rich`), which keeps it within
+> the "core stays portable" boundary and lets the same formatting primitives
+> serve both the interactive and non-interactive paths.
 
 ---
 
@@ -92,7 +102,10 @@ path for piping/automation.
 
 > Design note: because every `AgentEvent` is a pydantic model, dumping to JSON is
 > a one-liner — JSON mode gets full event fidelity for free, with no custom
-> serialization.
+> serialization. This also makes the JSONL stream a faithful, lossless record of
+> the same `AgentEvent` union the TUI consumes, so downstream tools and the
+> interactive frontend observe identical events ("Events are the contract"). The
+> renderer never re-shapes the event, preserving the wire format end-to-end.
 
 ## `tau_coding/rendering/plain.py` — Pi-style final-text renderer
 
@@ -108,7 +121,11 @@ message** (or errors) once the run ends.
   returns `True`.
 
 > Design note: this is the most "silent" renderer — no tool calls, no progress.
-> It exists for users who want just the agent's answer, Pi-style.
+> It exists for users who want only the agent's final answer, Pi-style, treating
+> the agent as a text-generation function (for piping or capture). The renderer
+> buffers state during the run and emits exactly one write in `finish()`,
+> satisfying the same `EventRenderer` contract as the streaming renderers while
+> discarding all intermediate events.
 
 ## `tau_coding/rendering/__init__.py` — package boundary
 
@@ -125,7 +142,10 @@ Ties the renderers together and provides the factory:
 > Design note: `create_event_renderer` is the only place that hard-codes the
 > mode→renderer mapping. Adding a fourth output mode means editing this one
 > factory plus one new `EventRenderer`, and nothing else in the call chain
-> changes.
+> changes. Centralizing the mapping behind a single factory keeps the
+> "Small layers beat magic" principle: callers depend only on the `EventRenderer`
+> Protocol, never on a concrete renderer, so the wiring surface stays minimal and
+> the agent loop remains unaware of which output mode is active.
 
 ## How 3g fits the picture
 

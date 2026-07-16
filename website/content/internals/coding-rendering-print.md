@@ -13,8 +13,8 @@ print mode.
 - `finish()` prints the final assistant text (or each error to stderr) and
   returns whether the run succeeded.
 
-So in print mode, you see *only* the model's final answer, not the streaming
-intermediate events.
+So in print mode, the terminal shows *only* the model's final answer, not the
+streaming intermediate events.
 
 ## `tau_coding/rendering/json.py` — JSONL event stream
 
@@ -27,9 +27,13 @@ intermediate events.
 Every `AgentEvent` (defined in Part 2a) becomes one JSON object per line,
 which is exactly the stream the TUI and downstream tools can parse.
 
-> Both renderers consume the *same* `AgentEvent` union the agent loop emits.
-> This is the AGENTS.md boundary in action: the harness emits events; each
-> frontend (TUI, plain, json) consumes them independently.
+> Design note: both renderers consume the *same* `AgentEvent` union the agent
+> loop emits. This is the AGENTS.md boundary in action and a direct expression
+> of the Tau README principle "Events are the contract": the harness emits
+> events and stays portable, while each frontend (TUI, plain, json) consumes
+> them independently. Because the event stream is the stable interface, the
+> print and JSON backends can be added or changed without modifying
+> `tau_agent`; the agent core has no knowledge of which frontend is attached.
 
 ---
 

@@ -64,9 +64,15 @@ is frozen into `BUILTIN_PROVIDER_CATALOG` at import time.
 
 Linear lookup of a catalog entry by provider name.
 
-> Separation: the *catalog* (this file) is static reference data. The
-> *config* (next file) is the user's durable, possibly-customized copy. The
-> config module imports the catalog; the catalog never imports the config.
+> **Why catalog and config are separate files with a one-way dependency.** The
+> *catalog* (this file) is static reference data — the providers Tau ships with.
+> The *config* (next file) is the user's durable, possibly-customized copy. The
+> config module imports the catalog; the catalog never imports the config. That
+> one-way edge is deliberate: reference data must not depend on user state, so a
+> new built-in provider can be added to the catalog and picked up by every
+> existing install without touching anyone's saved `providers.json`. Keeping the
+> two apart is the "Small layers beat magic" principle applied to
+> configuration — ship-time defaults and user overrides never entangle.
 
 ---
 
@@ -221,9 +227,15 @@ These are the functions `provider_runtime.py` calls:
   `_model_max_tokens` — small accessors that consult both provider-level and
   model-level metadata, with sensible fallbacks.
 
-> The takeaway: `provider_config.py` is a *translation layer*. It never talks
-> to a model; it only produces the typed `tau_ai` config objects that
-> `provider_runtime.py` hands to `tau_ai`'s providers.
+> **Why this module never touches a model.** `provider_config.py` is a pure
+> translation layer: catalog data + user preferences + environment in, typed
+> `tau_ai` config objects out. It never opens a connection or streams a
+> response; that job belongs to `provider_runtime.py`. Isolating translation
+> from I/O means the entire config surface — merging, preference application,
+> thinking-level resolution — is testable with plain values and no network,
+> and a malformed `providers.json` fails loudly at parse time (a clear
+> `ProviderConfigError`) rather than mid-request. This is "Small layers beat
+> magic": each layer has one job and hands a typed value to the next.
 
 ---
 
@@ -285,9 +297,15 @@ copy), asks the OAuth provider for runtime auth, and returns
 - `_required_oauth_provider(name)` — returns the registered `OAuthProvider`,
   raising if none.
 
-> This file is where Tau *finally* calls into `tau_ai`. Everything above it is
-> data translation; this file produces the object the agent loop actually
-> streams from.
+> **Why runtime construction is its own layer.** This file is where Tau finally
+> calls into `tau_ai`: everything above it is data translation, and this file
+> produces the live `ModelProvider` the agent loop actually streams from.
+> Concentrating credential resolution and OAuth refresh here — behind
+> `ClosableModelProvider` so Tau can `aclose()` and release resources at the end
+> of a run — keeps the durable config layer completely free of secrets and
+> network state. This is the "The core stays portable" principle at the edge:
+> the portable pieces (catalog, config, the agent harness) stay pure, and all
+> the environment-specific wiring lives in one clearly named boundary.
 
 ---
 

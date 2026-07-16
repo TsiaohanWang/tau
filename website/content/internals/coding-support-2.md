@@ -32,10 +32,13 @@ dirs or a project's `.agents/`) and invoke them as `/name [arguments]`.
   captures read/decode errors as `ResourceDiagnostic` (severity "error"), and
   parses each file via `resources.parse_markdown_resource`.
 
-> Design note: prompt templates are a *resource discovery* concern, kept apart
-> from the command registry. They reuse the same `TauResourcePaths` precedence as
+> **Why this design.** Prompt templates are a *resource discovery* concern, kept
+> apart from the command registry. They reuse the same `TauResourcePaths`
+> precedence (last-write-wins across built-in, user, and project dirs) as
 > skills/context files, so a project can ship its own `/prompts` alongside its
-> `.agents/` skills.
+> `.agents/` skills. Keeping discovery separate from the command registry means a
+> template is just another discovered resource — adding one never requires editing
+> the command table or wiring up a new slash command.
 
 ---
 
@@ -51,10 +54,14 @@ reload (`/reload`), so the UI can report exactly what changed.
   `context_files`, `extensions`, `diagnostics`, plus a `system_prompt_rebuilt`
   flag.
 
-> Design note: a reload touches several independent resource systems; bundling
-> their counts into one summary lets the `/reload` command print a single,
-> scannable "reloaded N skills, M prompts, …" line without coupling to each
-> subsystem's internals.
+> **Why this design.** A reload touches several independent resource systems
+> (skills, prompt templates, context files, extensions, diagnostics). Bundling
+> their before/after counts into one `CodingReloadSummary` lets the `/reload`
+> command print a single, scannable "reloaded N skills, M prompts, …" line without
+> coupling to each subsystem's internals. Each subsystem only has to report its
+> `ReloadCategorySummary` (`before`, `after`, `changed`); the command layer
+> aggregates and formats them, so adding a new reloadable resource means adding one
+> field rather than rewriting the report.
 
 ---
 
@@ -99,9 +106,15 @@ used by `tau export` and the TUI export command.
   `_summarize_text`), `_entry_parent_html`, `_format_timestamp` (UTC), `_escape`
   (`quote=False`) and `_attr` (`quote=True`) for HTML/text escaping.
 
-> Design note: the export is a *pure function of immutable `SessionEntry`s* — no
-> `CodingSession` needed. That makes it trivially testable and lets `tau export`
-> run on any saved `.jsonl` offline.
+> **Why this design.** The export is a *pure function of immutable `SessionEntry`s*
+> — no `CodingSession` needed. This aligns with Tau's "Sessions are durable and
+> inspectable" principle: a session transcript is a plain, durable artifact that
+> remains readable by hand, so it can be re-rendered at any time without the
+> runtime that produced it. Both HTML and JSONL outputs are emitted — JSONL
+> preserves the raw, line-per-entry transcript (hand-inspectable and machine-
+> parseable), while HTML wraps the same entries in a self-contained, styled viewer
+> for human sharing. Purity makes the renderer trivially testable and lets
+> `tau export` run on any saved `.jsonl` offline.
 
 ---
 
@@ -121,8 +134,12 @@ shell command the agent runs) from `~/.tau/settings.json`.
   whitespace-only prefix to `None`. (The dual-name support lets older/newer
   tooling interop; the exclusivity check prevents ambiguous configs.)
 
-> Design note: only one durable shell setting exists today, but the dataclass +
-> `from_json` shape means new settings slots in without changing callers.
+> **Why this design.** Only one durable shell setting exists today, but the
+> `ShellSettings` dataclass plus the symmetric `from_json` / `to_json` shape means
+> new settings slot in as additional fields without changing callers. Persistence
+> lives in a single `~/.tau/settings.json` so the schema stays small and explicit;
+> the dual `shellCommandPrefix` / `shell_command_prefix` spelling is accepted only
+> one-at-a-time to let older and newer tooling interop without ambiguous configs.
 
 ---
 
@@ -165,9 +182,14 @@ notes — but *only* as a best-effort, never-blocking notice.
   `TAU_NO_UPDATE_CHECK` as disabled, and always disables under `CI`.
 - **`_utc_now`** — injectable clock default.
 
-> Design note: the *entire* module is written so that any failure (network,
-> cache corruption, bad version string, missing file) degrades to "say nothing."
-> That is the only acceptable behavior for a startup-time network call.
+> **Why this design.** The *entire* module is written so that any failure
+> (network error, cache corruption, bad version string, missing file) degrades to
+> "say nothing" — every failure path returns `None` quietly. This is the only
+> acceptable behavior for a startup-time network call: an update check must never
+> block startup, slow down launch, or surface errors to the user when the network
+> or PyPI is unavailable. The 1-day cache and the `TAU_NO_UPDATE_CHECK` / `CI`
+> disable switches keep the network touch rare and fully opt-out, reinforcing the
+> best-effort contract.
 
 ---
 
@@ -183,9 +205,12 @@ it.
   or `_UNKNOWN_VERSION` if the distribution isn't installed (e.g. running from a
   source checkout). Used by `update_check.py` and the CLI `--version`.
 
-> Design note: centralizing the distribution name + fallback here means the
-> update checker, the CLI, and any "about" UI all report one consistent version
-> string.
+> **Why this design.** Centralizing the distribution name (`tau-ai`) and the
+> `_UNKNOWN_VERSION` fallback here means the update checker, the CLI, and any
+> "about" UI all report one consistent version string. The installed distribution
+> is `tau-ai` (not the `tau_coding` import package), so an uninstalled source
+> checkout reports `0+unknown` instead of crashing — `current_version()` is the
+> single source of the version that `update_check.py` compares against.
 
 ---
 
@@ -424,7 +449,7 @@ class CodingReloadSummary:
 
 ## 文件:session_export.py
 
-会话导出工具:把 transcript 导出为自包含 HTML 或 JSONL,供人类阅读。依赖 `tau_agent.messages`(User/Assistant/ToolResult)与 `tau_agent.session`(各 Entry 类型、`path_to_entry`、`SessionTreeError`)以及 `pygments`(JSON 高亮)。
+会话导出工具:把 transcript 导出为自包含 HTML 或 JSONL。导出产物对应 Tau 的 "Sessions are durable and inspectable" 设计 —— 会话记录是可直接阅读的持久产物,两种格式分别面向机器与人工:JSONL 以每行一个 `SessionEntry` 的 `model_dump_json` 保留原始可解析记录,HTML 则把同样的条目渲染为自带样式、可离线打开的查看器。依赖 `tau_agent.messages`(User/Assistant/ToolResult)与 `tau_agent.session`(各 Entry 类型、`path_to_entry`、`SessionTreeError`)以及 `pygments`(JSON 高亮)。
 
 ### SessionExportError
 
@@ -749,7 +774,7 @@ def _attr(value: object) -> str
 ### 主流程调用
 
 - `session.py:596` 在导出逻辑中调用 `export_session_artifact(..., title=_session_export_title(self))` 完成导出;`session.py:2141`、`2152`、以及 `cli.py:49-51` 的 `export_session_command` 使用 `default_session_export_artifact_path` 计算输出路径。
-- `cli.py` 的 `export` 子命令据此导出 HTML/JSONL 文件,是“会话归档/分享”功能的底层实现。
+- `cli.py` 的 `export` 子命令据此导出 HTML/JSONL 文件,是会话归档与分享功能的底层实现。
 
 ---
 

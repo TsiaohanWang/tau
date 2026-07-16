@@ -66,8 +66,17 @@ description: tools / system_prompt / context / context_window / skills / resourc
 - `_file_lock` / `_FileLockContext`：基于全局 `_file_locks` 的异步上下文管理器。
 - `_write_temp_output`：写临时日志文件（截断时保存完整输出）。
 
-> 这套工具是 `tau_coding` 对 `tau_agent` 的"可移植大脑"做的**唯一文件系统/Shell 落地**
-> ——`tau_agent` 本身完全不碰磁盘与进程。
+**为什么工具是"schema + async executor 返回结构化结果"**：Tau 官方原则 "Tools are
+ordinary typed functions" 要求工具不是隐式魔法,而是带明确输入契约的普通异步函数。每个
+`ToolDefinition` 都携带 JSON Schema(`input_schema`,供 provider 做参数校验与函数调用)与
+一个 `async executor`(签名 `(arguments, signal) -> AgentToolResult`),执行器返回的是
+**结构化** `AgentToolResult`(`ok`/`content`/`error`/`data`),而非裸字符串。这样做的收益:
+参数在进入执行器前即被 schema 约束;结果里的 `data`(截断元数据、diff、退出码等)可被前端
+渲染、被会话落盘、被 agent 循环判定成败,全程类型清晰、可测试。
+
+结构与落地也印证了 "The core stays portable":这套 read/write/edit/bash 是 `tau_coding`
+为 `tau_agent` 的可移植内核做的**唯一文件系统/Shell 落地**——`tau_agent` 本身完全不碰磁盘
+与进程,工具作为普通 typed function 从外部注入。
 
 ---
 
@@ -81,6 +90,12 @@ description: tools / system_prompt / context / context_window / skills / resourc
   若给了 `custom_prompt` 则以其为基础；否则用标准开头（"你是 Tau 里的专家编程助手"）
   + 可用工具清单 + 指南。两者都拼上：`append_section`、项目上下文（XML 包裹的
   `<project_context>`）、skills（`read` 工具存在时才加）、当前日期、CWD。
+  - **为什么系统提示由确定性纯函数组装**：`build_system_prompt` 的输出只取决于
+    `BuildSystemPromptOptions` 的输入,无隐藏状态、无随机项,同样的工具/skills/上下文必得
+    同样的提示。这既服务 "Small layers beat magic"(提示的每一段都可追溯到某个显式输入,
+    而非藏在框架里的魔法),也让提示本身可 diff、可测试、可随 `/reload` 精确重建。工具清单
+    直接由注入的 `tools` 派生,skills 仅在 `read` 工具存在时才加——保证模型看到的能力清单
+    与实际可调用的工具严格一致,不会承诺一个不存在的工具。
 - **`format_available_tools`**：用 `prompt_snippet` 列工具。
 - **`collect_prompt_guidelines` / `format_guidelines`**：收集并去重指南——根据工具集
   智能补充（有 bash 但无探索工具 → "用 bash 做 ls/rg/find"；都有 → "优先用
@@ -129,9 +144,13 @@ description: tools / system_prompt / context / context_window / skills / resourc
 - **`serialize_messages_for_compaction`** / **`summarize_messages_for_compaction`**：把
   消息序列化成压缩器可读格式 / 生成一个确定性的极简摘要（无 LLM 时的兜底）。
 
-> `CodingSession` 用这里估算的用量决定何时 `auto_compact`，并在上下文溢出时用
-> `build_compaction_summary_prompt` 触发压缩（对应 Part 3b 的
-> `_try_auto_compact` / `_try_overflow_compact`）。
+**为什么估算与压缩逻辑独立成层**：token 估算(`estimate_context_usage`)与压缩提示构造
+(`build_compaction_summary_prompt`)都是纯函数,不持有会话状态,也不直接调用模型。
+`CodingSession` 用这里估算的用量决定何时 `auto_compact`,并在上下文溢出时用
+`build_compaction_summary_prompt` 触发压缩(对应 Part 3b 的 `_try_auto_compact` /
+`_try_overflow_compact`)。把"多少 token""该压缩哪些消息"从"如何落盘压缩结果"中拆开,
+既呼应 "Small layers beat magic",也让阈值与保留策略(如 `DEFAULT_COMPACTION_KEEP_RECENT_TOKENS`)
+可单独测试与调参,而不必启动一次真实会话。
 
 ---
 

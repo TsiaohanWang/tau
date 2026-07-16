@@ -40,8 +40,14 @@ description: session.py —— coding agent 的环境核心
   7. 最后 `_try_auto_compact`（prompt 后）。
 - **`continue_()`**：恢复后继续跑 harness，同样在每个 `MessageEndEvent` 落盘。
 
-> 这就是与 Rust `tau-rs` 的 `session.rs` 行为对应的地方：`/new` 的 guard（`is_running`
-> 时拒绝 steer/follow_up）、每次消息后写 `LeafEntry`、溢出压缩后重试。
+**为什么 `prompt` / `continue_` 是这样的结构**：Tau 官方设计原则 "Sessions are durable
+and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt` 在每个 `MessageEndEvent`
+处即调 `_persist_messages_since` 落盘，而不是等整个回合结束——即使进程中途崩溃，已完成
+的消息也已写入 append-only JSONL。`is_running` 时拒绝新 prompt（要求显式 `steer`/
+`follow_up`）保证同一时刻只有一条活跃的 harness 驱动链，避免并发写树导致父指针错乱。
+溢出后 `_try_overflow_compact` + `continue_()` 自动重试一次,是把"上下文超限"从不可恢复
+错误降级为可自愈事件。此结构与 Rust `tau-rs` 的 `session.rs` 一一对应:`/new` 的 guard、
+每次消息后写 `LeafEntry`、溢出压缩后重试。
 
 ---
 
@@ -84,6 +90,10 @@ description: session.py —— coding agent 的环境核心
   标签的 `SessionTreeChoice` 列表（标记 active / 是否 tool call）。
 - **`branch_to_entry(entry_id, *, summarize, custom_instructions, replace_instructions)`**：
   把活跃叶指针移到历史某个节点，**保留既有历史**（不删除）。
+  - **为什么分支只移动叶指针、不删除节点**：会话存储是 append-only JSONL,遵循 Tau 原则
+    "Sessions are durable and inspectable"。分支不是"回退删除",而是在树上追加一个新的
+    `LeafEntry` 把活跃 tip 指向历史节点;被放弃的分支仍完整保留在文件里,可再次导航或审查。
+    这使得任意一次分支都是可逆、可追溯的操作,而非破坏性编辑。
   - 若 `summarize` 且被放弃的消息非空 → 用 `_summarize_branch_messages` 生成
     `BranchSummaryEntry`（回溯分支摘要）作为新父节点；
   - 若该节点是 user `MessageEntry` → 把叶指到其父，并把原消息内容作为 `input_prefill`
@@ -108,6 +118,11 @@ description: session.py —— coding agent 的环境核心
   （`replaces_entry_ids` 记被替换节点）+ `LeafEntry`，刷新 `_state`，
   `harness.replace_messages`（重放后旧消息已被摘要替换——见 Part 2c 的
   `_apply_compaction`）。
+  - **为什么压缩追加 `CompactionEntry` 而不改写旧记录**：压缩若原地删改被摘要的消息,
+    历史就不再可回放,违反 "Sessions are durable and inspectable"。Tau 的做法是追加一个
+    `CompactionEntry`,用 `replaces_entry_ids` 声明"重放时这些节点由本摘要替代"。原始消息
+    仍留在 JSONL 中,压缩只影响重放视图(`harness.replace_messages` 看到的是摘要),而底层
+    记录完整无损——既节省了上下文窗口,又保留了完整审计与分支能力。
 - **`_try_auto_compact(context, phase)`** / **`_maybe_auto_compact`**：当
   `context_token_estimate > auto_compact_token_threshold` 时自动触发
   `_recent_preserving_compaction_plan` 压缩（包了异常保护，压缩失败也不丢 turn）。
@@ -122,11 +137,14 @@ description: session.py —— coding agent 的环境核心
   重新 `load` 一个 `CodingSession`，再 `_adopt_replacement(reason="resume")`。
 - **`new_session()`**：让 `session_manager.prepare_session` 准备一个新（未索引）会话，
   `load` 之，`_adopt_replacement(reason="new")`。`index_on_first_persist=True`。
-- **`_adopt_replacement(replacement, *, reason)`**：把"外部对象 `self`"的状态整体换成
-  `replacement` 的——因为扩展运行时是长生命周期、跨替换共享的，必须重新 `bind(self)` 并
-  `attach_harness_listener(self._harness.subscribe)`，先 `emit_session_shutdown` 再
-  `emit_session_start`，中间清掉扩展 UI 组件。这就是 Rust `tau-rs` 里 `/new` 拒绝在 turn
-  运行时调用、以及 harness 锁逻辑对应的根源：替换的是 `self` 上的 harness 实例。
+- **`_adopt_replacement(replacement, *, reason)`**：把外部持有的 `self` 的内部状态整体
+  替换为 `replacement` 的状态。**为什么 resume/new 用"替换 `self`"而非返回新对象**:调用方
+  （TUI、扩展）持有的是同一个 `CodingSession` 引用,且扩展运行时是长生命周期、跨会话切换
+  共享的;若返回新对象,所有外部引用都需重新接线。改为原地替换 `self` 的字段后重新
+  `bind(self)` 并 `attach_harness_listener(self._harness.subscribe)`,即可让既有引用继续
+  有效。先 `emit_session_shutdown` 再 `emit_session_start`、中间清掉扩展 UI 组件,保证扩展
+  生命周期事件成对触发。这也是 `/new` 拒绝在回合运行时调用的根源:被替换的正是 `self` 上
+  的 harness 实例,运行中替换会破坏正在进行的驱动链。
 - **`aclose()`**：发 `session_shutdown`，关闭 `_owned_providers`。
 
 ---
@@ -161,7 +179,8 @@ description: session.py —— coding agent 的环境核心
 
 ## 本部分小结
 
-`CodingSession` 把一切缝在一起：
+`CodingSession` 是 coding-agent 环境层的集成点(对照 Tau README 的 `CodingSession =
+coding-agent environment`——它属于应用层,而非 `AgentHarness` 那个可移植内核)：
 
 - 包住 `AgentHarness`，在每次 `MessageEndEvent` 把 transcript 落盘成"消息+叶指针"树；
 - 模型/思考级别/分支/压缩，都通过写对应 `SessionEntry` + `LeafEntry` 变成可持久化的
@@ -181,7 +200,7 @@ description: session.py —— coding agent 的环境核心
 
 # session.py 逐方法剖析
 
-本文件是 Tau 持久化编码会话环境的核心封装,建立在 `AgentHarness`(可复用 agent 大脑)之上。`CodingSession` 拥有 harness 之外的全部“环境”:持久化的会话条目、默认编码工具、命令接缝、扩展运行时,以及自动压缩、分支、命名、导出等围绕会话生命周期的逻辑。
+本文件是 Tau 持久化编码会话环境的核心封装,建立在 `AgentHarness`(可复用 agent 大脑)之上。按 Tau 的分层原则(对照 README `CodingSession = coding-agent environment`),可移植内核 `AgentHarness` 只负责与模型对话的循环,不感知磁盘、CLI 或资源路径;`CodingSession` 则拥有 harness 之外的全部"环境":持久化的会话条目、默认编码工具、命令接缝、扩展运行时,以及自动压缩、分支、命名、导出等围绕会话生命周期的逻辑。这一分工正是官方原则 "The core stays portable" 与 "Small layers beat magic" 的落地。
 
 ---
 
