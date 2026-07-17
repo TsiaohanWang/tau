@@ -13,7 +13,7 @@ code_files:
 **`run_agent_loop(*, provider, model, system, messages, tools, max_turns, signal, get_steering_messages, get_follow_up_messages, get_queue_update) -> AsyncIterator[AgentEvent]`**
 
 这是整座塔的算法核心。它是一个**异步生成器**（async generator）——你可以把它
-想象成一个"会逐步吐出结果的函数"：每产生一个事件就 yield 出来，调用方边迭代
+想象成一个"会逐步吐出结果的函数"：每产生一个事件就 `yield` 出来（`yield` 在 `async def` 函数中使函数成为异步生成器，调用方用 `async for` 逐个消费产出的值，类似 Go 的 channel 发送或 JavaScript 的 async generator），调用方边迭代
 边拿到 `AgentEvent`，并且可以在运行途中通过三个回调注入消息，而**不必打断流**。
 这种设计之所以重要，是因为 LLM 的流式输出可能持续数秒甚至数分钟，你需要在输出
 过程中实时显示进度、执行工具，而不是干等着全部完成。
@@ -28,8 +28,8 @@ code_files:
      即取消令牌——外部通过它通知循环"该停了"，循环每次轮询来决定是否退出），已取消则发可恢复
      `ErrorEvent` 并 `break`。
    - `yield TurnStartEvent(turn=turn)`。
-   - **`async for provider_event in provider.stream_response(...)`**：逐条消费
-     Part 1a 的 `ProviderEvent`，**翻译**成 agent 事件：
+   - **`async for provider_event in provider.stream_response(...)`**（`async for` 是异步迭代语法，每次迭代都可能 `await`，用于从 AsyncIterator 逐个获取值）：逐条消费
+      Part 1a 的 `ProviderEvent`，**翻译**成 agent 事件：
      - `ProviderResponseStartEvent` → `MessageStartEvent()`
      - `ProviderTextDeltaEvent` → `MessageDeltaEvent`
      - `ProviderThinkingDeltaEvent` → `ThinkingDeltaEvent`
@@ -139,7 +139,7 @@ async def run_agent_loop(
   - `messages.append(_tool_result_message(result))`，`yield ToolExecutionEndEvent`。
 - **`_execute_tool(tool, tool_call, signal)`**：把工具的"进度回调"桥接成本异步流。
   关键实现：
-  - 建一个无界 `asyncio.Queue`；`on_update` 同步回调里 `queue.put_nowait(
+  - 建一个无界 `asyncio.Queue`（Python 标准库的异步队列，用于协程之间安全通信，类似 Go 的 channel）；`on_update` 同步回调里 `queue.put_nowait(
     ToolExecutionUpdateEvent(...))`。
   - `task = asyncio.ensure_future(_run_tool(...))` 在后台跑工具；主协程用
     `asyncio.wait({task, getter}, FIRST_COMPLETED)` 在"工具结束"和"有更新"之间竞速：
@@ -201,7 +201,7 @@ yield task.result()                    # 必以恰好一个 AgentToolResult 收�
   `max_turns`/`queue_mode`（`"one_at_a_time"` 或 `"all"`）。
 - **`SimpleCancellationToken`**：`AgentHarness` 与 loop 共用的具体取消令牌，
   `cancel()`/`is_cancelled()`。
-- 模块级：`EventListener = Callable[[AgentEvent], Awaitable[None] | None]`、
+- 模块级：`EventListener = Callable[[AgentEvent], Awaitable[None] | None]`（`Callable[[参数类型], 返回类型]` 是 Python 的函数类型注解，类似 Go 的 `func(...)` 或 TypeScript 的 `(...) => ...`）、
   `QueueMode = Literal["one_at_a_time", "all"]`。
 
 ### `AgentHarness`

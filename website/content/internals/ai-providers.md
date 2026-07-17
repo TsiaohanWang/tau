@@ -172,7 +172,7 @@ OpenAI Codex 是面向 ChatGPT Plus/Pro 订阅用户的编码助手，它走的�
 
 用于单元测试的假 provider，不发起任何网络请求：
 
-- **`FakeProvider`**：构造时吃一组"脚本化事件流"。每次 `stream_response` **消费下一条脚本流**，原样 yield 出去；同时把入参 `(model, system, messages, tools)` 记进 `self.calls` 供测试断言。**无任何网络调用**。这是 agent-loop 测试的关键——让模型行为完全确定，测试可以可靠地验证 agent 的行为逻辑。
+- **`FakeProvider`**：构造时吃一组"脚本化事件流"。每次 `stream_response` **消费下一条脚本流**，原样 yield 出去（`yield` 是 Python 的生成器语法，函数每次 yield 一个值并暂停，调用方可以用 `for` 循环逐个消费，类似 Go 的 channel 发送或 JavaScript 的 generator `yield`）；同时把入参 `(model, system, messages, tools)` 记进 `self.calls` 供测试断言。**无任何网络调用**。这是 agent-loop 测试的关键——让模型行为完全确定，测试可以可靠地验证 agent 的行为逻辑。
 
 ---
 
@@ -289,7 +289,7 @@ def _stream(self, *, model, url, payload, parser_factory, signal=None):
 2. 若 `config.credential_resolver` 非空,`await` 解析出 `auth`,覆盖 `api_key`、合并 `auth.headers`;若 `auth.base_url` 非空,则按当前 url 末尾是 `/responses` 还是 `/chat/completions` 重建 `request_url`。
 3. 若 `config.omit_authorization_header` 为假且 headers 中没有(大小写不敏感)`authorization`,则补 `Authorization: Bearer {api_key}`。
 4. `attempt = 0` 进入重试循环,每轮先 `parser = parser_factory()`。
-5. `async with client.stream("POST", request_url, json=payload, headers=headers)`:若 `status_code >= 400`,`aread` 读 body,`decode(errors="replace")`;若 `_should_retry(attempt, status_code=...)` 则发 `provider_retry_event` 并 `wait_for_retry`,失败则返回、超时则 `continue`;否则发 `ProviderErrorEvent`(由 `provider_http_error_message` 生成)后 `return`。
+5. `async with client.stream("POST", request_url, json=payload, headers=headers)`（Python 的 `with` 语句是资源管理模式，确保代码块结束后自动释放资源，类似 Go 的 `defer` 或 Java 的 try-with-resources；`async with` 是其异步版本）:若 `status_code >= 400`,`aread` 读 body,`decode(errors="replace")`;若 `_should_retry(attempt, status_code=...)` 则发 `provider_retry_event` 并 `wait_for_retry`,失败则返回、超时则 `continue`;否则发 `ProviderErrorEvent`(由 `provider_http_error_message` 生成)后 `return`。
 6. 成功则先发 `ProviderResponseStartEvent(model)`,随后 `async for line in response.aiter_lines()`(每轮先检查 `signal.is_cancelled()`),用 `_parse_sse_line` 解析,非 None 则 `events, stop = parser.feed(event)`,逐个 `yield`,若 `stop` 跳出。
 7. 循环后若 `parser.fatal` 为真直接 `return`(解析器已发出终态错误事件,不再 `finalize`),否则 `yield from parser.finalize()`,再 `return`。
 8. `except httpx.HTTPError`:若 `not parser.emitted_content and _should_retry(attempt)` 则重试(发 retry event + `wait_for_retry`),否则发 `ProviderErrorEvent` 返回。

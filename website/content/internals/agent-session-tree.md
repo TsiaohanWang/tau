@@ -121,7 +121,7 @@ code_files:
 - **`SessionState.from_entries(entries, *, leaf_id=_UNSET_LEAF_ID)`**：重放核心。
   - `replay_all = leaf_id is _UNSET_LEAF_ID`；若给了 `leaf_id` 就用
     `path_to_entry(entries, leaf_id)` 只重放**该分支路径**，否则线性重放全部。
-  - 遍历 `replay_entries`，按 `entry.type` 用 `match` 处理：
+  - 遍历 `replay_entries`，按 `entry.type` 用 `match` 处理（Python 3.10+ 的模式匹配语法，类似 Go 的 `switch` 或 Rust 的 `match`，但支持解构和守卫条件）：
     - `message` → 记下 `(id, message)`；
     - `model_change` → 更新 `model`；
     - `thinking_level_change` → 更新 `thinking_level`；

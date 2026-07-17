@@ -172,7 +172,7 @@ and inspectable"（会话持久且可检视）要求每一步交互都可落盘�
 
 - **`_try_auto_name_session` / `_generate_session_name`**：首个用户消息后，用模型生成
   ≤4 词的会话标题（`SESSION_NAME_SYSTEM_PROMPT`），写入 `session_manager`。
-- 大量 `@property`：`cwd`/`model`/`provider_name`/`available_providers`/`available_models`/
+- 大量 `@property`（Python 的属性装饰器，把方法伪装成属性访问——调用时不需要加括号，类似 JavaScript 的 getter 或 Go 的 getter 方法）：`cwd`/`model`/`provider_name`/`available_providers`/`available_models`/
   `available_model_choices`/`scoped_model_choices`/`tools`/`messages`/`state`/
   `thinking_level`/`available_thinking_levels`/`storage`/`skills`/`prompt_templates`/
   `context_files`/`context_token_estimate`/`context_usage`/`system_prompt`/

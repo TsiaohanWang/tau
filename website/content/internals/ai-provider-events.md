@@ -13,7 +13,7 @@ code_files:
 
 ## `tau_ai/provider.py` — 全栈依赖的两个 Protocol
 
-这个文件定义了整个代码库最关键的一层契约：两个 `typing.Protocol` 类。Protocol（协议）是 Python 用"结构化子类型"来定义接口的方式——任何拥有对应方法的对象都自动满足协议，不需要显式继承。用 Protocol 而不是 ABC（抽象基类），好处是调用方可以传入任何"长得像"的对象，灵活性更高。
+这个文件定义了整个代码库最关键的一层契约：两个 `typing.Protocol` 类（Python 的结构化类型机制，类似 Go 的 interface——隐式实现，不需要显式声明"实现"该接口，只要对象拥有对应方法即可，也类似 TypeScript 的 structural typing）。Protocol（协议）是 Python 用"结构化子类型"来定义接口的方式——任何拥有对应方法的对象都自动满足协议，不需要显式继承。用 Protocol 而不是 ABC（抽象基类），好处是调用方可以传入任何"长得像"的对象，灵活性更高。
 
 这两个 Protocol 定义了下游所有代码使用的接口。它**从 `tau_agent` 反向 import** 了消息与工具类型——这是栈中唯一一处"下层 import 上层"的地方。这种设计看起来"反常"，但原因在于：provider 必须把"消息"和"工具"当作纯数据来接收，而这两类数据的权威定义在 `tau_agent` 中；让 `provider.py` 依赖 agent 层的类型（而非自行定义私有格式），可保证转换只发生在 provider 内部，避免栈内出现两套并行的消息/工具表示。
 
@@ -31,10 +31,10 @@ code_files:
       tools: list[AgentTool],
       signal: CancellationToken | None = None,
   ) -> AsyncIterator[ProviderEvent]:
-      ...
+      ...  # Python 的省略号字面量，在 Protocol 中表示"此方法由满足协议的具体类实现"，类似 Go interface 方法或 Java abstract method
   ```
 
-  给定模型名、系统提示、消息列表（对话历史）、工具清单（模型可以调用的外部函数）、取消令牌，以异步迭代器的形式产出 `ProviderEvent` 流。`signal` 默认为 `None`，让调用方可选地注入取消能力。所有具体 provider（OpenAI、Anthropic、Google 等）都只需实现这一个方法；上层 agent 循环只依赖这个接口，完全不感知背后用的是哪家模型。
+  给定模型名、系统提示、消息列表（对话历史）、工具清单（模型可以调用的外部函数）、取消令牌，以异步迭代器（Python 的异步迭代器类型，可以用 `async for` 逐个获取元素，类似 Go 的 channel 或 JavaScript 的 async generator）的形式产出 `ProviderEvent` 流。`signal` 默认为 `None`，让调用方可选地注入取消能力。所有具体 provider（OpenAI、Anthropic、Google 等）都只需实现这一个方法；上层 agent 循环只依赖这个接口，完全不感知背后用的是哪家模型。
 
 ---
 
@@ -42,7 +42,7 @@ code_files:
 
 这个文件定义了一套统一的"事件类型"，是 `ModelProvider.stream_response` 的产出格式。在 LLM 应用中，用户和模型之间的每一次问答来回叫做一个 **turn（轮次）**，而模型每次回应产生的文本、思考过程、工具调用请求等，都会被拆成一个个小的"事件"。使用事件（而非直接返回一整个字符串）的原因是：LLM 的输出是逐步生成的，事件机制让上层可以在文本刚产生时就实时渲染给用户，而不必等全部完成；同时，事件还能携带错误、重试进度等元信息。
 
-来自任何 provider 的每一个流式 token（LLM 处理文本的最小单位，大约 3/4 个英文单词或 1-2 个汉字）、工具调用、错误，都会被归一化成下列 `pydantic.BaseModel` 子类之一。每个子类都用 `Literal[...]` 固定了 `type` 字段，并设置 `model_config = ConfigDict(extra="forbid")`（严格禁止多余字段，保证线上格式稳定，版本升级时不会因多出字段而静默忽略）。
+来自任何 provider 的每一个流式 token（LLM 处理文本的最小单位，大约 3/4 个英文单词或 1-2 个汉字）、工具调用、错误，都会被归一化成下列 `pydantic.BaseModel` 子类之一（Pydantic 是 Python 最流行的数据验证库，`BaseModel` 子类自动进行类型校验和序列化，类似 Java 的 record 或 TypeScript 的 zod schema）。每个子类都用 `Literal[...]`（`typing.Literal` 限定字段只能取指定的字面值，类似 TypeScript 的字面量联合类型 `"a" | "b" | "c"`）固定了 `type` 字段，并设置 `model_config = ConfigDict(extra="forbid")`（禁止传入未声明的字段，防止拼写错误静默通过，保证线上格式稳定）。
 
 - **`ProviderResponseStartEvent`**（`type="response_start"`）：一次响应开始，带模型名。
 - **`ProviderRetryEvent`**（`type="retry"`）：遇到临时性故障（如网络抖动、速率限制）后准备重试，带当前尝试次数、最大次数、等待秒数等信息，方便 UI 显示"正在重试…"。
@@ -142,7 +142,7 @@ LLM 服务偶尔会过载或遇到速率限制（rate limit），直接报错对
 - 返回：`AsyncIterator[ProviderEvent]`，即逐个产出 `events.py` 中那 7 种事件之一。
 - 关键实现：
   - 作为 Protocol，仅含 `...` 桩体与文档串，无具体逻辑。
-  - 使用仅关键字参数（`*` 之后），强制调用方按名传参，避免位置参数错位。
+  - 使用仅关键字参数（`*` 后面的参数只能以关键字形式传递，如 `func(model="gpt-4")`，不能位置传参 `func("gpt-4")`，这是 Python 的 keyword-only 参数机制），强制调用方按名传参，避免位置参数错位。
   - 数据流向：`tau_agent` 把 agent 层的 `AgentMessage` / `AgentTool` 交给 provider，provider 内部转换为自有请求格式，再把模型原生流归一化成 `ProviderEvent` 流回给 agent 层。这正是“provider 无关事件词汇”的来源——`tau_agent` 永不解析 provider 私有响应对象。
 
 > 补充说明（基于源码结构）：任务描述中提及的 `supports_thinking` / `provider_name` / `model` 等方法或属性，在 `provider.py` 当前源码中**并未定义**——该 Protocol 实际只声明了 `stream_response` 一个成员（外加模块内定义的 `CancellationToken`）。本文严格依据真实源码，不臆测未出现的成员。同样，`ProviderErrorEvent` / `RetryEvent` / `ProviderEvent` 等并不在本文件定义，而是统一在 `events.py` 中定义并由本文件 `from tau_ai.events import ProviderEvent` 引入（见 `provider.py:10`）。模块顶部还引入了 `AgentMessage`（`tau_agent.messages`）与 `AgentTool`（`tau_agent.tools`），说明该协议刻意依赖 agent 层类型而非 provider 私有类型。
@@ -268,7 +268,7 @@ LLM 服务偶尔会过载或遇到速率限制（rate limit），直接报错对
   )
   ```
 
-- 作用：把上述 7 个具体事件联合成一个判别联合类型（PEP 604 语法）。它是 `provider.py` 中 `ModelProvider.stream_response` 的产出元素类型，也是 `tau_agent` 消费事件流时的统一类型。
+- 作用：把上述 7 个具体事件联合成一个判别联合类型（`type X = ...` 是 Python 3.10+ 的类型别名语法，类似 TypeScript 的 `type X = ...`；`X | Y` 是 PEP 604 的联合类型语法，类似 TypeScript 的 `X | Y`）。它是 `provider.py` 中 `ModelProvider.stream_response` 的产出元素类型，也是 `tau_agent` 消费事件流时的统一类型。
 - 关键实现/数据流：因为每一个具体事件都有 `type: Literal[...]` 字段，`tau_agent` 可以用 `match event.type:` 做精准的分派（response_start 初始化 UI；text_delta / thinking_delta 增量渲染；tool_call 执行工具；response_end 收尾；retry 展示重试进度；error 处理错误）。这整套事件词汇正是 `tau_agent` 与具体模型解耦的关键——它只认 `ProviderEvent`，永不直接解析 OpenAI / Anthropic 私有的响应结构。这种设计的好处是：新增或替换模型后端时，只需在其内部把原生响应转换为这 7 种事件，上层逻辑完全无需改动。
 
 ---
@@ -320,7 +320,7 @@ LLM 服务偶尔会过载或遇到速率限制（rate limit），直接报错对
 - 关键实现 / 数据流：
   1. `next_attempt = attempt + 2`：将“已经失败的次数 `attempt`”（0 计数）换算成“将要进行的总尝试序号”（从 1 计数）。例如 `attempt=0` → `next_attempt=2`，即“第 2 次尝试（首次之后的第 1 次重试）”。
   2. `max_attempts = max_retries + 1`：最大尝试总次数 = 允许的重试次数 + 首次。
-  3. `delay_suffix = f" in {delay_seconds:g}s" if delay_seconds else ""`：仅当延迟大于 0 时追加 `" in <延迟>s"` 后缀；`:g` 去掉无意义的小数尾零。
+  3. `delay_suffix = f" in {delay_seconds:g}s" if delay_seconds else ""`：仅当延迟大于 0 时追加 `" in <延迟>s"` 后缀（`f"..."` 是 Python 的字符串插值语法，类似 JavaScript 的模板字符串 `` `text ${variable}` ``）；`:g` 去掉无意义的小数尾零。
   4. 组装 `message`，形如 `"Retrying provider request 2/4 after rate limit in 0.5s."`，其中 `reason` 描述失败原因（如 `"rate limit"`、`"connection reset"`）。
   5. 把 `data` 原样透传进事件，供上层调试。
   - 最终返回 `ProviderRetryEvent(attempt=next_attempt, max_attempts=max_attempts, delay_seconds=delay_seconds, message=..., data=data)`。

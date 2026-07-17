@@ -31,7 +31,7 @@ code_files:
 
 ## `tau_ai/env.py` — 基于环境变量的 provider 配置
 
-用 `@dataclass(frozen=True, slots=True)` 定义配置与认证数据结构，并提供从环境变量（environment variables，即操作系统进程级别的键值对，如 `OPENAI_API_KEY=sk-xxx`）构建配置的函数。选择环境变量而非配置文件来传递 API 密钥和连接参数，是因为环境变量天然适合容器化部署和 CI/CD 场景——不需要在镜像中放入配置文件，也不需要担心配置文件被意外提交到代码仓库。
+用 `@dataclass(frozen=True, slots=True)` 定义配置与认证数据结构（`@dataclass` 是 Python 自动生成 `__init__`、`__repr__` 等方法的装饰器；`frozen=True` 使实例不可变，类似 Go 的 struct 值语义，创建后字段不可修改；`slots=True` 启用 `__slots__`，每个实例只允许声明的字段名存在，节省内存且加速属性访问，类似 Java 的 fields-only class），并提供从环境变量（environment variables，即操作系统进程级别的键值对，如 `OPENAI_API_KEY=sk-xxx`）构建配置的函数。选择环境变量而非配置文件来传递 API 密钥和连接参数，是因为环境变量天然适合容器化部署和 CI/CD 场景——不需要在镜像中放入配置文件，也不需要担心配置文件被意外提交到代码仓库。
 
 - 默认常量：`DEFAULT_OPENAI_COMPATIBLE_BASE_URL`、
   `DEFAULT_ANTHROPIC_BASE_URL`、`DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS=60.0`、
@@ -113,7 +113,7 @@ class RuntimeProviderAuth:
 type RuntimeProviderAuthResolver = Callable[[], Awaitable[RuntimeProviderAuth]]
 ```
 
-类型别名：一个无参、返回 `Awaitable[RuntimeProviderAuth]` 的可调用对象（`Awaitable` 表示可以通过 `await` 等待结果的异步对象）。它代表"按需异步解析运行时凭证"的回调，供 `OpenAICompatibleConfig` / `AnthropicConfig` 的 `credential_resolver` 字段使用。
+类型别名（`type X = ...` 是 Python 3.10+ 的类型别名语法，类似 TypeScript 的 `type X = ...`）：一个无参、返回 `Awaitable[RuntimeProviderAuth]` 的可调用对象（`Callable` 是函数类型注解，`Callable[[参数类型], 返回类型]`，类似 Go 的 `func(参数类型) 返回类型` 或 TypeScript 的 `(参数类型) => 返回类型`；`Awaitable` 表示可以通过 `await` 等待结果的异步对象）。它代表"按需异步解析运行时凭证"的回调，供 `OpenAICompatibleConfig` / `AnthropicConfig` 的 `credential_resolver` 字段使用。
 
 ### OpenAICompatibleConfig
 

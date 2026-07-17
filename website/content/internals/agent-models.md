@@ -32,7 +32,8 @@ code_files:
 就是这些消息按时间顺序排列的列表，模型每次回复前都会看到整个 transcript，才能
 "记住"之前发生了什么。
 
-这里定义了一组 pydantic `BaseModel`（`extra="forbid"`），描述在模型、工具、持久化之间
+这里定义了一组 pydantic `BaseModel`（`extra="forbid"`——禁止未知字段，保证序列化格式严格稳定），
+描述在模型、工具、持久化之间
 流动的"消息"。所有消息都带 `role` 字面量判别字段，以保证反序列化时能路由到正确的具体类型。
 
 > **为什么用 Pydantic 而不是 dataclass？** 消息需要从 JSON 序列化/反序列化——
@@ -114,6 +115,9 @@ code_files:
   `ok`、`content`，可选 `data`/`details`/`error`。
 
 ### `AgentTool`（frozen dataclass）
+
+> **`@dataclass(frozen=True, slots=True)`** 是 Python 3.10+ 的 `dataclasses` 装饰器：
+> `@dataclass` 自动生成 `__init__`、`__eq__`、`__repr__` 等样板方法；`frozen=True` 使实例不可变（类似 Go 的 struct literal once set）；`slots=True` 启用 `__slots__`，限制实例只能有声明的字段、节省内存。
 
 工具的能力单元，把"声明"与"实现"打包：
 

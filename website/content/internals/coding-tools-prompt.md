@@ -26,7 +26,7 @@ code_files:
 - **`ToolDefinition`**（frozen dataclass）：完整工具定义（name/description/
   prompt_snippet/prompt_guidelines/input_schema/executor）；`to_agent_tool()` 转成
   更精简的 `AgentTool`（保留 prompt 元数据供渲染用）。
-- `_file_locks: dict[Path, asyncio.Lock]`：进程内**每路径写/改锁**，防同一文件并发修改交错。这个锁确保同一个文件不会被两个并发的写操作同时修改，否则内容会交错混乱。
+- `_file_locks: dict[Path, asyncio.Lock]`（`Path` 来自 Python 的 `pathlib` 模块，是面向对象的路径处理方式，替代传统的 `os.path` 字符串拼接）：进程内**每路径写/改锁**，防同一文件并发修改交错。这个锁确保同一个文件不会被两个并发的写操作同时修改，否则内容会交错混乱。
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -52,8 +52,7 @@ class ToolDefinition:
 
 ### `create_coding_tools(*, cwd, shell_command_prefix) -> list[AgentTool]`
 
-返回默认工具集，顺序固定为 `read, write, edit, bash`。`cwd` 缺省用进程 CWD；相对路径
-都相对 `cwd` 解析。
+返回默认工具集，顺序固定为 `read, write, edit, bash`。`cwd` 缺省用进程 CWD；相对路径都相对 `cwd` 解析。Python 函数签名中 `*` 后面的参数必须以关键字方式传递（不能按位置传），相当于 Go 的 option struct 或 JavaScript 的解构参数（`{ cwd, shell_command_prefix }`）。
 
 ```python
 def create_coding_tools(*, cwd=None, shell_command_prefix=None) -> list[AgentTool]:
@@ -90,7 +89,7 @@ def create_coding_tools(*, cwd=None, shell_command_prefix=None) -> list[AgentToo
 
 ```python
 async def _communicate_with_cancellation(process, *, timeout, signal):
-    communicate = asyncio.create_task(process.communicate())
+    communicate = asyncio.create_task(process.communicate())  # 把协程包装成可取消的 Task（类似 Go 的 goroutine 或 JavaScript 的 Promise）
     wait_for = {communicate}
     if signal is not None:
         wait_for.add(asyncio.create_task(_wait_for_cancel(signal)))
@@ -165,6 +164,8 @@ System prompt（系统提示词）是每次对话开始时发给模型的一段"
 - **`format_project_context`**：用 Pi 风格 XML 包裹项目指令文件。
 - **`format_skills_for_prompt`**：`<available_skills>` 列出每个 skill 的
   name/description/location。
+
+Python 的 f-string（`f"..."` 语法）可以在字符串内直接嵌入变量和表达式，类似 JavaScript 的模板字符串（`` `${var}` ``）。
 
 ```python
 def build_system_prompt(options: BuildSystemPromptOptions) -> str:
