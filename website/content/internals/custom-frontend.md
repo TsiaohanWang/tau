@@ -1,6 +1,6 @@
 ---
-title: Build your own frontend
-description: Advanced — drive Tau's coding session from your own UI by consuming its event stream.
+title: 构建你自己的前端
+description: 进阶——通过消费事件流，从你自己的 UI 驱动 Tau 的编码会话。
 code_files:
   - tau_coding/session.py
   - tau_coding/events.py

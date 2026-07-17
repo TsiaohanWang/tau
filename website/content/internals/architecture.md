@@ -1,6 +1,6 @@
 ---
 title: Architecture overview
-description: How Tau is split into three layers — and why that boundary is the whole point.
+description: Tau 如何拆分为三层——以及为什么这道边界才是重点。
 ---
 
 Tau 在设计上有意保持精简且分层。最重要的设计理念是一道**边界**:可复用的智能体"大脑"对终端、文件路径或渲染一无所知。所有与应用相关的部分都包裹在它外围。

@@ -1,9 +1,9 @@
 ---
 title: Design principles
-description: The handful of rules that keep Tau small, portable, and readable.
+description: 使 Tau 保持小巧、可移植且可读的少数几条原则。
 ---
 
-Tau 始终遵循少数几条原则。这正是代码库在增长过程中仍能保持易读的原因。这些原则在项目的 README("Design principles" 一节)中原样列明,是每一层都必须遵守的契约;下面各页解释了每一条在代码中是什么样子。它们源自——并在很大程度上映照了——[Pi](https://pi.dev) 对*智能体大脑*、*编码会话*与*前端*的极简分离,而这一架构正是 Tau 明确借鉴的对象(参见项目 README 与 [Architecture overview]({{< relref "./architecture.md" >}}))。
+Tau 始终遵循少数几条原则。这正是代码库在增长过程中仍能保持易读的原因。这些原则在项目的 README("Design principles" 一节)中原样列明,是每一层都必须遵守的契约;下面各页解释了每一条在代码中是什么样子。它们源自——并在很大程度上映照了——[Pi](https://pi.dev)(一个 TypeScript 编码智能体,详见[与 Pi 的关系]({{< relref "./_index.md#与-pi-的关系" >}}))对*智能体大脑*、*编码会话*与*前端*的极简分离,而这一架构正是 Tau 明确借鉴的对象(参见项目 README 与 [Architecture overview]({{< relref "./architecture.md" >}}))。
 
 ## 小层胜过魔法
 

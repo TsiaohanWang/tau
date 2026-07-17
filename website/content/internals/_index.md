@@ -11,6 +11,18 @@ cascade:
 本节是 Tau 源码的**逐文件剖析**，基于对 `huggingface/tau` Python 仓库的实际阅读，
 而非官方文档的复述。每一章对应一个或一组源文件，解释"这段代码做了什么、为什么这样设计"。
 
+## 与 Pi 的关系
+
+Tau 的架构直接借鉴了 [Pi](https://pi.dev)——一个由 [Earendil Inc.](https://earendil.com) 开发的 TypeScript 编码智能体。Pi 以其极简的三层分离著称：
+
+```text
+AgentHarness = 可复用的大脑（纯 agent 逻辑，不依赖 UI）
+AgentSession = 编码会话环境（工具、持久化、资源）
+TUI          = 一个可能的前端（终端界面只是消费事件的消费者之一）
+```
+
+Tau 用 Python 重新实现了这套架构，保留了相同的核心边界：`tau_agent` 对应 Pi 的 AgentHarness，`tau_coding` 对应 AgentSession + TUI。项目 README 明确标注"inspired by [Pi](https://pi.dev)"，`AGENTS.md` 也写道"Tau is a Python implementation of Pi's minimalist coding-agent harness architecture"。教程中多次提及"Pi 兼容"即指沿用 Pi 定义的事件语义与分层约定。
+
 ## 建议阅读顺序
 
 Tau 分为三层，阅读顺序**从底层到上层**：

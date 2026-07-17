@@ -1,6 +1,6 @@
 ---
 title: Source code walkthrough (源码剖析)
-description: A bottom-up, file-by-file dissection of the Tau source — derived from reading the code, not official documentation.
+description: 自底向上、逐文件剖析 Tau 源码——基于阅读源码得出，而非官方文档。
 ---
 
 > **衍生解读声明 / Derived-work notice.**
