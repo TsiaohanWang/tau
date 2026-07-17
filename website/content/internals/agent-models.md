@@ -597,6 +597,31 @@ def message_text(message: AgentMessage) -> str
 - **作用**:从任意 `AgentMessage` 提取用户可见文本。
 - **关键字段/实现**:根据消息类型返回 `.text`、`.summary` 或 `.output`。
 
+### message_to_user
+
+```python
+def message_to_user(message: AgentMessage) -> UserMessage
+```
+
+- **作用**:将任意 `AgentMessage` 转换为 `UserMessage`，用于把内部消息（如 `BranchSummaryMessage`、`CompactionSummaryMessage`、`BashExecutionMessage`）转换为 provider 可接受的用户上下文格式。
+- **实现**:调用 `message_text(message)` 提取文本，用原消息的 `timestamp` 构造 `UserMessage(content=..., timestamp=...)`。
+
+### StopReason
+
+```python
+StopReason = Literal["stop", "length", "toolUse", "error", "aborted"]
+```
+
+模型停止生成的原因，作为 `AssistantMessage.stop_reason` 的值：
+
+| 值 | 含义 |
+|---|---|
+| `"stop"` | 模型自然结束（正常完成） |
+| `"length"` | 达到 token 上限被截断 |
+| `"toolUse"` | 模型请求调用工具（循环将继续执行工具） |
+| `"error"` | 模型或 provider 出错 |
+| `"aborted"` | 用户或系统取消 |
+
 ### assistant_content
 
 ```python
