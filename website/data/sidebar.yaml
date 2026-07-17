@@ -44,61 +44,61 @@
       path: /internals/architecture/
     - label: Design principles
       path: /internals/design-principles/
-    - label: Build your own frontend
+    - label: "构建你自己的前端"
       path: /internals/custom-frontend/
-    - label: Source code walkthrough (源码剖析)
+    - label: "Source code walkthrough (源码剖析)"
       path: /internals/source-walkthrough/
     - label: "tau_ai — 与模型对话"
       items:
-        - label: Provider contract & events
+        - label: "tau_ai · Provider 契约与事件流"
           path: /internals/ai-provider-events/
-        - label: Env configuration
+        - label: "tau_ai · 环境配置"
           path: /internals/ai-env-config/
-        - label: Provider implementations
+        - label: "tau_ai · 各 Provider 实现"
           path: /internals/ai-providers/
     - label: "tau_agent — agent 内核"
       items:
-        - label: Data models
+        - label: "tau_agent · 数据模型"
           path: /internals/agent-models/
-        - label: Loop & harness
+        - label: "tau_agent · 执行核心"
           path: /internals/agent-loop-harness/
-        - label: Session tree
+        - label: "tau_agent · 会话持久化树"
           path: /internals/agent-session-tree/
-        - label: Init & boundary
+        - label: "tau_agent · 公共导出与边界"
           path: /internals/agent-init-boundary/
-        - label: The agent loop (概念)
+        - label: "代理循环与事件"
           path: /internals/agent-loop/
     - label: "tau_coding — coding agent 应用"
       items:
-        - label: Tools & prompt
+        - label: "tau_coding · 工具与提示组装"
           path: /internals/coding-tools-prompt/
-        - label: CodingSession
+        - label: "tau_coding · CodingSession"
           path: /internals/coding-session/
-        - label: Slash commands
+        - label: "tau_coding · Slash 命令"
           path: /internals/coding-commands/
-        - label: Session manager
+        - label: "tau_coding · 会话索引"
           path: /internals/coding-session-manager/
-        - label: Provider config
+        - label: "tau_coding · Provider 配置"
           path: /internals/coding-provider-config/
-        - label: TUI state & adapter
+        - label: "tau_coding · TUI 状态与适配"
           path: /internals/coding-tui-state/
-        - label: TUI app & widgets
+        - label: "tau_coding · TUI 界面与控件"
           path: /internals/coding-tui-app/
-        - label: Credentials
+        - label: "tau_coding · 凭证存储"
           path: /internals/coding-credentials/
-        - label: OAuth flows
+        - label: "tau_coding · OAuth 登录流程"
           path: /internals/coding-oauth/
-        - label: CLI
+        - label: "tau_coding · CLI 入口"
           path: /internals/coding-cli/
-        - label: Extensions
+        - label: "tau_coding · 扩展系统"
           path: /internals/coding-extensions/
-        - label: Rendering layer
+        - label: "tau_coding · 渲染层"
           path: /internals/coding-rendering/
-        - label: Rendering (print/json)
+        - label: "tau_coding · 渲染层(print/json)"
           path: /internals/coding-rendering-print/
-        - label: Support modules (1)
+        - label: "tau_coding · 支撑模块(一)"
           path: /internals/coding-support-1/
-        - label: Support modules (2)
+        - label: "tau_coding · 支撑模块(二)"
           path: /internals/coding-support-2/
 - label: Release notes
   link: /releases/
