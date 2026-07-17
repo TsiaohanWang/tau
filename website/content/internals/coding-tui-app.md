@@ -980,7 +980,7 @@ Textual 主题变化后若属内置主题且与当前设置不同,则 `_replace_
 
 ### `def compose(self) -> ComposeResult`
 
-布局:`Header` → 水平 `#workspace`(`SessionSidebar` `#sidebar` + 垂直 `#main-pane`)→ 主区依次放 `TranscriptView` `#transcript`、`#main-slot`、`#above-prompt-slot`、`#queued-messages`、`#prompt-row`(含 `prompt-prefix` "τ" 与 `PromptInput` `#prompt`)、`CompactSessionInfo`、`#autocomplete`、`#below-prompt-slot` → `Footer`。源码 (`tui/app.py:2790`):
+布局:`Header` → 水平 `#workspace`(`SessionSidebar` `#sidebar` + 垂直 `#main-pane`)→ 主区依次放 `TranscriptView` `#transcript`、`#main-slot`、`#above-prompt-slot`、`#queued-messages`、`#prompt-row`(含 `prompt-prefix` "τ" 与 `PromptInput` `#prompt`)、`CompactSessionInfo`、`#autocomplete`、`#below-prompt-slot` → `Footer`。源码 (`tui/app.py:2833`):
 
 ```python
 def compose(self) -> ComposeResult:
