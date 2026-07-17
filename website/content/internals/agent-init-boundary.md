@@ -293,14 +293,14 @@ async def run_agent_loop(
 ### 导出项:`UserMessage`
 
 - **来源**:`tau_agent.messages`(第 26–43 行导入)。
-- **契约**:`messages.py:92` 的 `WireModel`。字段:`role: Literal["user"] = "user"`、`content: UserContent`（`str | list[TextContent | ImageContent]`）、`timestamp: int`。带 `text` 属性用于快速提取纯文本。
+- **契约**:`messages.py:92` 的 `WireModel`（Pydantic 模型基类，含义见[速查表]({{< relref "./_index.md#pydantic-速查" >}})）。字段:`role: Literal["user"] = "user"`、`content: UserContent`（`str | list[TextContent | ImageContent]`）、`timestamp: int`。带 `text` 属性用于快速提取纯文本。
 - **如何构成公共面**:用户输入与 `harness.steer`/`prompt` 产生的消息类型。
 
 ### 导出项:`AssistantMessage`
 
 - **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:119` 的 `WireModel`。字段:`role: Literal["assistant"] = "assistant"`、`content: list[AssistantContent]`（`TextContent | ThinkingContent | ToolCall` 的有序列表）、`api: str`、`provider: str`、`model: str`、`response_model: str | None`、`response_id: str | None`、`diagnostics: list[AssistantMessageDiagnostic] | None`、`usage: Usage`、`stop_reason: StopReason`、`error_message: str | None`、`timestamp: int`。带 `text`、`thinking_text`、`tool_calls` 属性用于快速提取各类内容。
-- **注意**:构造时可以传 `content: str` 作为便利写法——`model_validator` 会自动把字符串包装成 `[TextContent(text=content)]`,但存储和序列化始终使用块列表格式。
+- **注意**:构造时可以传 `content: str` 作为便利写法——`model_validator`（Pydantic 模型校验器，见[速查表]({{< relref "./_index.md#pydantic-速查" >}})）会自动把字符串包装成 `[TextContent(text=content)]`,但存储和序列化始终使用块列表格式。
 - **如何构成公共面**:模型回复,可能携带工具调用、思考过程与用量统计。
 
 ### 导出项:`ToolResultMessage`
