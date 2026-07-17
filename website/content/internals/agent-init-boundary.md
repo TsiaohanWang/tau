@@ -170,7 +170,7 @@ from tau_agent.harness import (
 
 - **来源**:`tau_agent.harness`(第 18–24 行导入)。
 - **契约**:`harness.py:39` 定义的 `@dataclass(slots=True)`,是 `AgentHarness` 的配置对象。
-- **字段**:`provider: ModelProvider`、`model: str`、`system: str`、`tools: list[AgentTool]`(默认空)、`max_turns: int | None`(默认 `None` 表示不限)、`queue_mode: QueueMode`(默认 `"one_at_a_time"`)、`before_tool_call: BeforeToolCall | None`、`after_tool_call: AfterToolCall | None`。其中 `QueueMode = Literal["one_at_a_time", "all"]`(`harness.py:25`)。
+- **字段**:`provider: ModelProvider`、`model: str`、`system: str`、`tools: list[AgentTool]`(默认空)、`max_turns: int | None`(默认 `None` 表示不限)、`queue_mode: QueueMode`(默认 `"one_at_a_time"`)、`before_tool_call: BeforeToolCall | None`、`after_tool_call: AfterToolCall | None`。其中 `QueueMode = Literal["one_at_a_time", "all"]`(`harness.py:25`)。(`Literal` 等 typing 构造的含义见[速查表]({{< relref "./_index.md#python-typing-速查" >}}))。
 - **如何构成公共面**:它是把 `tau_ai` 的 `ModelProvider` 与 agent 的 `tools`/系统提示/轮次上限绑定在一起的"接线配置",是构造 `AgentHarness` 的唯一入口参数。
 
 ```python
@@ -395,7 +395,7 @@ async def run_agent_loop(
 ### 导出项:`SessionEntry`(Union 类型别名)
 
 - **来源**:`tau_agent.session`(第 44–57 行导入)。`session/__init__.py` 又从 `session.entries` 导入。
-- **契约**:`entries.py:103` 的 `Annotated[MessageEntry | ModelChangeEntry | ThinkingLevelChangeEntry | CompactionEntry | BranchSummaryEntry | LabelEntry | LeafEntry | SessionInfoEntry | CustomEntry, Field(discriminator="type")]`。即以 `type` 字段判别的"追加式会话条目"联合类型。
+- **契约**:`entries.py:103` 的 `Annotated[MessageEntry | ModelChangeEntry | ThinkingLevelChangeEntry | CompactionEntry | BranchSummaryEntry | LabelEntry | LeafEntry | SessionInfoEntry | CustomEntry, Field(discriminator="type")]`。即以 `type` 字段判别的"追加式会话条目"联合类型。（`Annotated` 的含义见[速查表]({{< relref "./_index.md#python-typing-速查" >}})）。
 - **如何构成公共面**:会话持久化的原子单位。下面 9 个具体 entry 都是它的成员,被 `SessionStorage` 逐条追加。
 
 ### 导出项:`MessageEntry`

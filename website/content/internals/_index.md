@@ -81,6 +81,26 @@ Tau 分为三层，阅读顺序**从底层到上层**：
 
 ---
 
+## Python typing 速查
+
+Tau 源码大量使用 Python 类型注解。以下是你会在教程中反复遇到的几个 `typing` 构造：
+
+| 构造 | 示例 | 含义 |
+|---|---|---|
+| **`Literal["a", "b"]`** | `stop_reason: Literal["stop", "tool_use"]` | 值**必须**是引号内的某一个精确字符串，不能是其他值 |
+| **`X \| Y`**（联合类型） | `content: str \| list[TextContent]` | 值要么是 `str`，要么是 `list[TextContent]`，二选一 |
+| **`list[T]` / `dict[K, V]`** | `tools: list[AgentTool]` | Python 内置容器的泛型写法，`list[AgentTool]` 即"元素全是 AgentTool 的列表" |
+| **`T \| None`**（可选） | `model: str \| None` | 值可以是 `str`，也可以是 `None`（空），等价于 `Optional[str]` |
+| **`Protocol`** | `class ModelProvider(Protocol)` | 结构化接口：一个类只要实现了 Protocol 声明的方法，就自动满足该接口，无需显式继承 |
+| **`AsyncIterator[T]`** | `-> AsyncIterator[AgentEvent]` | 异步迭代器：函数返回一个可以 `async for` 循环逐个获取 `T` 值的对象 |
+| **`Annotated[T, ...]`** | `Annotated[str, Field(...)]` | 在类型 `T` 上附加元数据（如 Pydantic 字段约束），运行时可读取 |
+| **`Sequence[T]`** | `messages: Sequence[AgentMessage]` | 只读的有序集合（list 或 tuple 均可），比 `list` 更严格——调用方不能 `.append()` |
+| **`cast(T, value)`** | `cast(AgentMessage, raw)` | 告诉类型检查器"我确信这个值是 T 类型"，运行时不做任何转换 |
+
+> **`typing` 是什么？** Python 的标准库模块，提供类型注解工具。类型注解不影响运行行为，但能帮助 IDE 提示和静态检查（如 `mypy`）。
+
+---
+
 ## 术语表（Glossary）
 
 | 术语 | 含义 |
