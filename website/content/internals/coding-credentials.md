@@ -72,7 +72,7 @@ class FileCredentialStore:
   一个刻意的决策:对本地凭证文件做静态加密需要密钥库或口令提示,在用户家目录的 OS 级保护之上
   并不会显著提升安全门槛,却增加了摩擦。威胁模型是"非属主读取该文件",而这已被 `0o600` 挫败。
 
-### 1.3 How it connects
+### 1.3 如何衔接
 
 `provider_config.py`(3c)与 `provider_runtime.py`(3c)是 *消费方*:`/login` 通过 `set_oauth`
 在此写入一个 `OAuthCredential`,而 `create_model_provider` 在构建活动的 `ModelProvider` 时

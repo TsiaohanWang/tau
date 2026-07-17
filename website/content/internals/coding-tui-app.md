@@ -2424,7 +2424,7 @@ def _short_path(path: Path) -> str:
 
 ---
 
-## How 3d fits the picture
+## 整体衔接：3d 如何融入全貌
 
 - `state.py` + `adapter.py` = the pure transcript model and the event→state
   mapping (no Textual dependency).

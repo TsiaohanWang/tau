@@ -821,7 +821,7 @@ class TurnEndEvent:
 
 ---
 
-## 7. How 3e fits the whole picture
+## 整体衔接：扩展系统如何融入全貌
 
 Putting the entire `tau_coding` layer together (parts 3a–3e):
 

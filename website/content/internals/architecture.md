@@ -5,28 +5,28 @@ description: How Tau is split into three layers — and why that boundary is the
 
 Tau 在设计上有意保持精简且分层。最重要的设计理念是一道**边界**:可复用的智能体"大脑"对终端、文件路径或渲染一无所知。所有与应用相关的部分都包裹在它外围。
 
-## Three packages
+## 三个包
 
 ```text
 tau_coding  →  tau_agent  →  tau_ai
 ```
 
-### `tau_ai` — talking to models
+### `tau_ai` — 与模型对话
 
 负责与提供方相关的模型流式传输。它把各提供方(OpenAI、Anthropic 等)的 API 转换为 Tau 的**提供方无关事件流**,因而其上层无需关心当前使用的是哪家模型厂商。
 
-### `tau_agent` — the portable brain
+### `tau_agent` — 可移植的大脑
 
 负责可复用的智能体核心:消息、工具、事件、[agent loop]({{< relref "./agent-loop.md" >}})、harness 与会话原语。该包**禁止**引入 CLI、Rich、Textual 或资源加载代码。这正是它保持可移植的原因。
 
-### `tau_coding` — the coding application
+### `tau_coding` — 编码应用
 
 负责让 Tau 成为"你运行的编码智能体"的一切:CLI、内置[工具]({{< relref "../reference/tools.md" >}})、[项目指令]({{< relref "../guides/project-instructions.md" >}})、
 [技能与提示]({{< relref "../guides/skills-and-prompts.md" >}})、
 [磁盘上的会话]({{< relref "../guides/sessions.md" >}})、提供方配置,以及
 Textual TUI。
 
-## Dependency direction
+## 依赖方向
 
 依赖只指向一个方向:`tau_coding → tau_agent → tau_ai`。UI 代码*消费*事件;核心绝不向上伸手去渲染任何东西。简言之:
 
@@ -36,7 +36,7 @@ CodingSession = coding-agent environment
 TUI = one possible frontend
 ```
 
-## Why the boundary matters
+## 为什么边界很重要
 
 因为核心是 UI 无关的,同一个智能体可以驱动打印模式、Textual TUI,或你自己构建的前端——全都通过消费同一条事件流实现。这也正是 Tau 易于阅读的原因:每一层只回答一个问题,你可以单独研究它而无需理清其他层。
 

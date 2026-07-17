@@ -29,6 +29,44 @@ code_files:
   `index_on_first_persist`/`shell_command_prefix`/`skills_enabled`/`extension_paths`/
   `extensions_enabled`/`project_extensions_enabled`/`extension_runtime`。
 
+### CodingSession 属性速查表
+
+| 属性 | 返回类型 | 说明 |
+|---|---|---|
+| `cwd` | `Path` | 会话工作目录 |
+| `model` | `str` | 当前活跃模型 |
+| `provider_name` | `str` | 当前活跃 provider 名称 |
+| `available_providers` | `tuple[str, ...]` | 有凭证可用的 provider 列表 |
+| `available_models` | `tuple[str, ...]` | 当前 provider 下可用的模型列表 |
+| `available_model_choices` | `tuple[ModelChoice, ...]` | 所有可用的 provider/model 组合 |
+| `scoped_model_choices` | `tuple[ModelChoice, ...]` | 配置的快速切换模型（当前可用） |
+| `tools` | `tuple[AgentTool, ...]` | agent 可用的工具列表 |
+| `messages` | `tuple[AgentMessage, ...]` | 当前 transcript 快照 |
+| `state` | `SessionState` | 最近一次重放的持久化会话状态 |
+| `thinking_level` | `ThinkingLevel` | 当前思考模式 |
+| `available_thinking_levels` | `tuple[ThinkingLevel, ...]` | 当前模型支持的思考模式 |
+| `thinking_unavailable_reason` | `str \| None` | 思考模式不可用的原因（或 `None`） |
+| `storage` | `SessionStorage` | 底层会话存储 |
+| `skills` | `tuple[Skill, ...]` | 已加载的技能 |
+| `prompt_templates` | `tuple[PromptTemplate, ...]` | 已加载的提示模板 |
+| `context_files` | `tuple[ProjectContextFile, ...]` | 活跃的项目上下文文件 |
+| `context_token_estimate` | `int` | 当前上下文的粗略 token 估算 |
+| `context_usage` | `ContextUsageEstimate` | 结构化的上下文用量统计 |
+| `system_prompt` | `str` | 实际发送给模型的系统提示 |
+| `auto_compact_token_threshold` | `int \| None` | 自动压缩阈值（如有） |
+| `context_window_tokens` | `int` | 当前模型的上下文窗口大小 |
+| `command_registry` | `CommandRegistry` | 斜杠命令注册表 |
+| `resource_diagnostics` | `tuple[ResourceDiagnostic, ...]` | 非致命资源/扩展诊断 |
+| `extension_runtime` | `ExtensionRuntime` | 绑定到此会话的扩展运行时 |
+| `session_id` | `str \| None` | 会话管理器 id（如已索引） |
+| `session_title` | `str \| None` | 会话标题（如已命名） |
+| `session_manager` | `SessionManager \| None` | 会话管理器（如可用） |
+| `is_running` | `bool` | 是否有活跃的 agent 运行 |
+| `queued_messages` | `QueuedMessages` | 排队的转向/后续消息 |
+| `queued_steering_messages` | `tuple[str, ...]` | 排队的转向消息文本 |
+| `queued_follow_up_messages` | `tuple[str, ...]` | 排队的后续消息文本 |
+| `last_diagnostic_log_path` | `Path \| None` | 最近一次诊断日志路径 |
+
 ---
 
 ## 会话级事件：`tau_coding/events.py`
@@ -193,6 +231,41 @@ and inspectable"（会话持久且可检视）要求每一步交互都可落盘�
 ---
 
 ## 会话生命周期：resume / new_session / adopt
+
+会话的生命周期由三个操作驱动，核心模式是"原地替换 self"：
+
+```
+                    ┌─────────────────────────────────┐
+                    │         CodingSession            │
+                    │  (持有 harness + state + storage)│
+                    └──────────┬──────────────────────┘
+                               │
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+         resume(id)      new_session()      aclose()
+              │                │                │
+              ▼                ▼                ▼
+     session_manager    prepare_session    emit_shutdown
+       .get_record()     (新未索引)       close providers
+              │                │
+              ▼                ▼
+          load(config)    load(config)
+              │                │
+              └───────┬────────┘
+                      ▼
+            _adopt_replacement()
+          ┌─────────────────────┐
+          │ 1. emit_shutdown    │  ← 旧会话关闭事件
+          │ 2. 替换 self 字段   │  ← harness/state/storage/...
+          │ 3. bind(self)       │  ← 重新绑定扩展运行时
+          │ 4. attach_listener  │  ← 重新订阅 harness 事件
+          │ 5. emit_session_start│ ← 新会话启动事件
+          └─────────────────────┘
+```
+
+**为什么用"替换 self"而非返回新对象**：调用方（TUI、扩展）持有的是同一个 `CodingSession`
+引用，且扩展运行时是长生命周期、跨会话共享的；若返回新对象，所有外部引用都需重新接线。
+原地替换后重新 `bind(self)` 即可让既有引用继续有效。
 
 - **`resume(session_id)`**：从 `session_manager` 取记录，用其 `path`/`model`/`provider`
   重新 `load` 一个 `CodingSession`，再 `_adopt_replacement(reason="resume")`。

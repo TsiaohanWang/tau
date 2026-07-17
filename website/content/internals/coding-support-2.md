@@ -172,7 +172,7 @@ Tau 在执行 shell 命令时，有时需要在每条命令前插入一个环境
 - `prompt_templates.py` —— 加载并渲染 Markdown 提示模板，把 `{{ variable }}` 占位符替换为运行时值，是 `/skill:` 和自定义 prompt 的基础设施。
 - `reload.py` —— 在不重启进程的情况下热重载扩展、资源和技能，让开发迭代更快速。
 - `session_export.py` —— 将不可变的 `SessionEntry`s 序列化为可分享的 HTML 或 JSONL 格式，供离线审查和分享。
-- `shell_config.py` —— 生成 shell 集成代码（如 `eval "$(tau shell-init bash)"`），让 Tau 的命令和补全融入用户终端环境。
+- `shell_config.py` —— 加载并保存持久化的 shell 命令前缀设置（如 `conda activate myenv`），存储在 `~/.tau/settings.json` 中。
 - `update_check.py` —— 以尽力而为的方式检查 Tau 发行版是否有新版本，全部无密钥、不阻塞启动。
 - `version.py` —— 集中管理发行包名（`tau-ai`）与版本字符串，为 update_check 和 CLI `--version` 提供唯一来源。
 
@@ -601,7 +601,7 @@ def _render_message_entry(entry: MessageEntry) -> str
 
 - `UserMessage` → 角色行(user 图标)+ 内容 `<pre>`。
 - `AssistantMessage` → 若有 `tool_calls` 生成 "Tool calls" `<ul>`(每个调用名/id + `_render_json_block(arguments)`);内容 `<pre>`(无文本时 "(no assistant text)")。
-- `ToolResultMessage` → 角色行 + `_render_metadata([("tool",name),("tool_call_id",...),("ok",...),可选("error",...)])` + 内容 `<pre>`;若有 `data`/`details` 各加一个 JSON 块。
+- `ToolResultMessage` → 角色行 + `_render_metadata([("tool",name),("tool_call_id",...),("is_error",str(is_error))])` + 内容 `<pre>`;若有 `details`(dict) 则加一个 JSON 块。
 - 其它消息 → 兜底 `model_dump_json` `<pre>`。
 
 ### _render_metadata

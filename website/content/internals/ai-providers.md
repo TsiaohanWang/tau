@@ -204,6 +204,15 @@ OpenAI Codex 是面向 ChatGPT Plus/Pro 订阅用户的编码助手，它走的�
 
 > 以下是各 provider 实现的逐方法展开。如果你已经理解了上面的概述，可以跳过本节；如果你需要知道每个函数的具体实现细节，请继续阅读。
 
+| 文件 | Provider | 核心特点 |
+|---|---|---|
+| [openai_compatible.py](#文件openai_compatiblepy) | OpenAI 系"总管" | 双协议路由（chat/completions + responses），stream.py 桥接 |
+| [anthropic.py](#文件anthropicpy) | Anthropic Messages API | 独立请求体、tool_use/tool_result schema、extended thinking |
+| [google.py](#文件googlepy) | Google Generative AI | Gemini API、functionCall/functionResponse、thought 标签 |
+| [mistral.py](#文件mistralpy) | Mistral Conversations | 与 OpenAI 兼容但独立 parser、tool_calls 格式 |
+| [openai_codex.py](#文件openai_codexpy) | ChatGPT 订阅版 Codex | Responses API items 格式、细粒度 content blocks |
+| [fake.py](#文件fakepy) | 确定性测试 provider | 脚本化事件流、无网络、用于 agent-loop 测试 |
+
 ## 文件:openai_compatible.py
 
 该文件是覆盖绝大多数 OpenAI 兼容端点的"总适配器"。核心策略：通过 `stream_response` 在请求时按模型名路由到两种底层协议——标准 `/chat/completions` 或 `/v1/responses`——二者共用同一个 HTTP/重试/取消信封（由 `OpenAICompatibleProvider._stream` 实现），只是各自提供不同的 `_StreamParser` 解析器。其余 provider（anthropic/google/mistral/codex）都偏离了这一基类：它们没有这种端点路由，且各自有独立的请求体构造、工具 schema 格式和流式事件映射。
