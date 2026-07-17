@@ -41,14 +41,14 @@ code_files:
 事件类型包括：
 
 - `AgentStartEvent` / `AgentEndEvent` —— 一次运行开始 / 结束
-- `MessageStartEvent` / `MessageDeltaEvent` / `MessageEndEvent` —— 流式输出的
-  助手文本
-- `ThinkingDeltaEvent` —— 可选的流式推理内容（默认隐藏）
+- `TurnStartEvent` / `TurnEndEvent` —— 一次助手回复及其工具结果
+- `MessageStartEvent` / `MessageUpdateEvent` / `MessageEndEvent` —— 一条消息的生命周期
 - `ToolExecutionStartEvent` / `ToolExecutionUpdateEvent` / `ToolExecutionEndEvent`
   —— 一次工具运行
-- `QueueUpdateEvent` —— 待处理的 steering（转向——运行中插入新指令）/
-  follow-up（后续——运行将停时插入的追加指令）消息
-- `ErrorEvent` —— 可恢复或致命的错误
+
+流式细节嵌套在 `MessageUpdateEvent.assistant_message_event` 下。这些 provider 中立的嵌套事件涵盖文本、推理内容以及工具调用的开始/增量/结束更新。Provider 的完成或失败通过 `MessageEndEvent` 传递的最终助手消息来表示。
+
+`tau_coding.events.CodingSessionEvent` 在此基础上为前端和 SDK 用户扩展了 `agent_settled`（智能体真正空闲——注意：`agent_end` 之后可能还有自动压缩、重试或排队续接，只有 `agent_settled` 才表示完全结束）、队列更新、压缩、会话条目变更、推理级别变更以及自动重试等事件。扩展也能观察这些事件名，但会话到扩展的适配器会在 `turn_start` 中注入零起始的 `turn_index` 和毫秒级 `timestamp`，在 `turn_end` 中注入匹配的索引。详见 [扩展]({{< relref "../guides/extensions.md#events" >}}) 的完整事件载荷表。
 
 既然契约是*事件*，前端的工作就被简化为：发送一个提示、消费这条流、把看到的内容画出来。
 
