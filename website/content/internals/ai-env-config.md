@@ -5,9 +5,11 @@ code_files:
   - tau_ai/env.py
 ---
 
+本页介绍 `tau_ai` 层的配置与错误处理：环境变量配置（通过环境变量而非配置文件来设置 provider 参数，这样在本地开发、CI、容器部署等不同环境下无需修改代码即可切换配置）和 HTTP 错误提取（从 provider 返回的错误信息中安全地提取可读的错误描述，同时确保 API 密钥等敏感信息不会泄露）。
+
 ## `tau_ai/http_errors.py` — 安全的 HTTP 错误细节提取
 
-从 provider 的错误响应体里提取**不含密钥**的可读错误细节。
+从 provider（模型服务商）的错误响应体里提取**不含密钥**的可读错误细节。LLM 服务的错误响应可能包含 `api_key`、`Authorization` 等敏感字段，这个模块只从 `message`/`code`/`detail` 等"错误描述"字段取值，确保脱敏在单一处被强制执行。
 
 - `_MAX_ERROR_DETAIL_LENGTH = 1000`：错误体截断上限。
 - **`provider_http_error_message(*, provider_name, status_code, body, model)`**：
@@ -29,8 +31,7 @@ code_files:
 
 ## `tau_ai/env.py` — 基于环境变量的 provider 配置
 
-用 `@dataclass(frozen=True, slots=True)` 定义配置与认证数据结构，并提供从
-环境变量构建配置的函数。
+用 `@dataclass(frozen=True, slots=True)` 定义配置与认证数据结构，并提供从环境变量（environment variables，即操作系统进程级别的键值对，如 `OPENAI_API_KEY=sk-xxx`）构建配置的函数。选择环境变量而非配置文件来传递 API 密钥和连接参数，是因为环境变量天然适合容器化部署和 CI/CD 场景——不需要在镜像中放入配置文件，也不需要担心配置文件被意外提交到代码仓库。
 
 - 默认常量：`DEFAULT_OPENAI_COMPATIBLE_BASE_URL`、
   `DEFAULT_ANTHROPIC_BASE_URL`、`DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS=60.0`、
@@ -65,20 +66,18 @@ code_files:
 
 ## 本部分小结
 
-Part 1a 建立了 `tau_ai` 的全部"规则"：
+这组模块建立了 `tau_ai` 的全部"规则"：
 
-- `provider.py` 给出两个 Protocol：`CancellationToken` 与 `ModelProvider`；
+- `provider.py` 给出两个 Protocol（`CancellationToken` 与 `ModelProvider`），定义了 provider 的最小接口；
 - `events.py` 给出 7 种 `ProviderEvent`，是所有 provider 的**统一输出格式**；
-- `retry.py` / `http.py` / `http_errors.py` 是共享的退避、HTTP、错误基建；
-- `env.py` 给出 frozen 配置类与从环境变量构建配置的方式。
+- `retry.py` / `http.py` / `http_errors.py` 是共享的退避重试、HTTP 客户端、错误提取基建；
+- `env.py` 给出 frozen dataclass（不可变数据类）配置与从环境变量构建配置的方式。
 
-任何具体 provider（下一任务 Part 1b）都只需：实现 `ModelProvider.stream_response`，
-把提供方原生流翻译成 `ProviderEvent`，复用 `retry`/`http` 助手，并吃进 `env.py`
-里的配置类。
+任何具体 provider（下一篇将介绍）都只需：实现 `ModelProvider.stream_response` 方法，把模型服务商的原生响应流翻译成 `ProviderEvent`，复用 `retry`/`http` 共享助手，并读取 `env.py` 里的配置类。
 
 ## 逐方法深度剖析（env / http_errors / __init__）
 
-> 以下为环境变量配置、HTTP 错误提取与包导出面的逐方法展开。
+> 以下是环境变量配置、HTTP 错误提取与包导出面的逐方法展开。如果你已经理解了上面的概述，可以跳过本节；如果你需要知道每个函数的具体实现细节，请继续阅读。
 
 ## 文件:env.py
 
@@ -101,7 +100,7 @@ Part 1a 建立了 `tau_ai` 的全部"规则"：
 class RuntimeProviderAuth:
 ```
 
-请求发起前"立即解析"出的运行时鉴权信息,用于支持动态凭证(例如 OAuth token 刷新)。`frozen=True` 表示不可变,`slots=True` 节省内存。
+请求发起前"立即解析"出的运行时鉴权信息，用于支持动态凭证（例如 OAuth token 刷新）。`frozen=True` 表示不可变（创建后字段值不能修改），`slots=True` 节省内存。
 
 字段逐一:
 - `api_key: str`:必填的 API key(或 bearer token)。
@@ -114,7 +113,7 @@ class RuntimeProviderAuth:
 type RuntimeProviderAuthResolver = Callable[[], Awaitable[RuntimeProviderAuth]]
 ```
 
-类型别名:一个无参、返回 `Awaitable[RuntimeProviderAuth]` 的可调用对象。它代表"按需异步解析运行时凭证"的回调,供 `OpenAICompatibleConfig` / `AnthropicConfig` 的 `credential_resolver` 字段使用。
+类型别名：一个无参、返回 `Awaitable[RuntimeProviderAuth]` 的可调用对象（`Awaitable` 表示可以通过 `await` 等待结果的异步对象）。它代表"按需异步解析运行时凭证"的回调，供 `OpenAICompatibleConfig` / `AnthropicConfig` 的 `credential_resolver` 字段使用。
 
 ### OpenAICompatibleConfig
 
@@ -123,7 +122,7 @@ type RuntimeProviderAuthResolver = Callable[[], Awaitable[RuntimeProviderAuth]]
 class OpenAICompatibleConfig:
 ```
 
-描述一个 OpenAI 兼容 chat completions 端点的完整配置。`frozen=True, slots=True`。
+描述一个 OpenAI 兼容（即遵循 OpenAI API 格式规范的第三方端点，如 DeepSeek、Qwen、OpenRouter 等）chat completions 端点的完整配置。`frozen=True, slots=True`。
 
 字段逐一:
 - `api_key: str`:必填 API key。
@@ -137,7 +136,7 @@ class OpenAICompatibleConfig:
 - `reasoning_effort: str | None = None`:可选推理强度(如 "low"/"high")。
 - `reasoning_effort_parameter: str = "reasoning_effort"`:发送到 API 的推理强度参数名。
 - `thinking_format: str = "openai"`:思考内容(chain-of-thought)的格式化方式。
-- `compat: Mapping[str, JSONValue] = field(default_factory=dict)`:传给底层 SDK 的额外兼容参数,默认为空 dict(`default_factory` 避免可变共享)。
+- `compat: Mapping[str, JSONValue] = field(default_factory=dict)`:传给底层 SDK 的额外兼容参数，默认为空 dict（`default_factory` 避免多个实例共享同一个可变对象）。
 - `include_reasoning_effort_none: bool = False`:是否显式发送 `reasoning_effort=null`。
 - `provider_name: str = "OpenAI-compatible provider"`:用于日志/错误的可读名称。
 - `omit_authorization_header: bool = False`:某些兼容端点不需要 `Authorization` 头时为 `True`。
@@ -240,7 +239,7 @@ def _non_negative_float_from_env(name: str, default: float) -> float:
 
 ## 文件:http_errors.py
 
-本文件负责把 provider 返回的 HTTP 错误响应,转换成"对使用者可读、且不含密钥"的错误信息。核心思路:优先从 JSON 体内提取结构化 message/code,提取不到再回退到原始 body 的截断文本;解析全程不触碰 `api_key` 等敏感字段,因此天然安全脱敏。
+本文件负责把 provider 返回的 HTTP 错误响应，转换成"对使用者可读、且不含密钥"的错误信息。核心思路：优先从 JSON 体内提取结构化 message/code，提取不到再回退到原始 body 的截断文本；解析全程不触碰 `api_key` 等敏感字段，因此天然安全脱敏。
 
 ### provider_http_error_message
 
@@ -306,11 +305,11 @@ def _loads_object(value: str) -> Mapping[str, Any] | None:
 
 ### 安全脱敏说明
 
-本模块不读取、不打印任何 `Authorization`/`api_key`/`x-api-key` 类字段:它只从 `error/message/detail/code` 等"错误描述"字段取值,且对任何提取结果不附加凭证信息;即便回退到原始 body,也只是截断文本透出。其设计依据是"最小暴露面"：调用方传入的 `body` 本就可能包含密钥,模块以白名单字段提取 + 长度截断两道防线确保敏感数据不会经错误路径外泄,从而让上层的错误展示与日志收集默认即安全。
+本模块不读取、不打印任何 `Authorization`/`api_key`/`x-api-key` 类字段：它只从 `error/message/detail/code` 等"错误描述"字段取值，且对任何提取结果不附加凭证信息；即便回退到原始 body，也只是截断文本透出。其设计依据是"最小暴露面"：调用方传入的 `body` 本就可能包含密钥，模块以白名单字段提取 + 长度截断两道防线确保敏感数据不会经错误路径外泄，从而让上层的错误展示与日志收集默认即安全。
 
 ## 文件:__init__.py
 
-本文件是 `tau_ai` 包的公开门面(facade)。它把各 provider 的实现类、环境配置辅助、事件类型、provider 抽象基类,统一 `import` 到一个命名空间下,并通过 `__all__` 声明导出面,使上层代码只需 `from tau_ai import ...` 即可拿到所有常用符号,无需深入子模块。
+本文件是 `tau_ai` 包的公开门面（facade，即统一的对外接口）。它把各 provider 的实现类、环境配置辅助、事件类型、provider 抽象基类，统一 `import` 到一个命名空间下，并通过 `__all__` 声明导出面，使上层代码只需 `from tau_ai import ...` 即可拿到所有常用符号，无需深入子模块。
 
 ### 导入聚合
 

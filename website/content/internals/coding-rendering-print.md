@@ -8,7 +8,9 @@ code_files:
 
 ## `tau_coding/rendering/plain.py` — print 模式的最终文本
 
-`FinalTextRenderer` 是最简单的输出后端，用于 `--no-tui` / print 模式。
+当 Tau 以非交互模式运行（比如通过命令行管道调用 `tau --no-tui`），它需要一种不依赖终端 UI 框架就能输出结果的方式。`FinalTextRenderer` 正是为这种场景设计的——它在整个运行过程中保持沉默，只在最后把模型的最终回答一次性打印出来。
+
+在 TUI 模式下，用户能实时看到模型逐字生成文本、工具调用的进度和结果。但在非交互场景（比如写脚本把 agent 当函数调用），用户只关心最终答案。`FinalTextRenderer` 会安静地忽略所有中间事件（工具调用、进度更新等），只在 `finish()` 时输出最后一轮助手消息——或者在出错时把错误信息写到 stderr。
 
 - 它监听 `MessageEndEvent` 并记住最后的助手文本。
 - 它收集 `ErrorEvent`；不可恢复的会把运行标记为失败。
@@ -46,14 +48,14 @@ class FinalTextRenderer:
 
 ## `tau_coding/rendering/json.py` — JSONL 事件流
 
-`JsonEventRenderer` 是机器可读的后端（用于脚本/CI）。
+有些场景下，程序需要消费 agent 的输出而不是人类来阅读——比如 CI/CD 流水线、自动化测试、或者日志分析工具。`JsonEventRenderer` 把每个事件序列化为一行 JSON（这种逐行 JSON 的格式叫 JSONL，全称 JSON Lines），方便下游程序逐行解析。
+
+每个 `AgentEvent`（在 2a 部分定义）都会变成每行一个 JSON 对象，
+这正是 TUI 和下游工具可以解析的那条流。
 
 - `render(event)` — 把 `event.model_dump_json()` 写成每行一个事件，
   并把不可恢复的错误标记为失败。
 - `finish()` — 返回运行是否成功。
-
-每个 `AgentEvent`（在 2a 部分定义）都会变成每行一个 JSON 对象，
-这正是 TUI 和下游工具可以解析的那条流。
 
 ```python
 class JsonEventRenderer:
@@ -75,15 +77,14 @@ class JsonEventRenderer:
 
 ---
 
-## 3c 部分如何契合整体
+## 本部分如何契合整体
 
-- `commands.py` 把用户输入（`/model`、`/new`、……）适配到 `CodingSession`
-  的方法（3b 部分）。
-- `session_manager.py` 为每一个 `CodingSession` 建立索引，以便 CLI 能跨运行列出和恢复。
-- `provider_catalog.py`（静态参考）→ `provider_config.py`（持久化、
-  用户可定制、已校验）→ `provider_runtime.py`（活动的 `tau_ai`
-  provider）。这个三步流水线就是 Tau 从"provider 名"走到"流式连接"的方式。
-- `rendering/*` 是把 agent 事件转换为文本或 JSONL 的非 TUI 输出后端。
+- `rendering/base.py` 定义 `EventRenderer` 协议和 `PrintOutputMode` 枚举，是整个渲染层的接口契约。
+- `rendering/transcript.py`（Part 3c 已介绍）处理 `PrintOutputMode.transcript`，把助手文本流式写入 stdout、工具活动写入 stderr。
+- `rendering/plain.py` 处理 `PrintOutputMode.text`，为非交互环境提供无着色、无装饰的纯文本输出。
+- `rendering/json.py` 处理 `PrintOutputMode.json`，把事件逐行序列化为 JSONL，便于管道和机器解析。
+
+plain 和 json 渲染器共享 transcript 的事件分发结构，但各自把 `render()` 中的格式化逻辑替换为自己的目标格式。三者共同覆盖了从人类可读终端输出到机器可消费日志的完整光谱，且都通过同一 `EventRenderer` 接口与 agent 循环解耦。
 
 接下来：**Part 3d** 讲解 Textual TUI（`tui/state.py`、`tui/adapter.py`、
 `tui/app.py`、`tui/config.py`、`tui/autocomplete.py`）——最丰富的前端，

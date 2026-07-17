@@ -12,6 +12,10 @@ code_files:
 
 ## `tau_coding/prompt_templates.py` — Markdown prompt templates
 
+Tau 允许用户把常用的提示词片段写成 Markdown 文件，通过 `/name [arguments]` 的方式在对话中调用——就像自定义的快捷指令。这种 **prompt template**（提示模板）机制让你可以把复杂的提示词组织成可复用的文件，而不是每次都手动输入。
+
+**Prompt template**（提示模板）本质上是一段带有占位符的 Markdown 文本。比如你可以创建一个 `review.md` 模板，里面写着"请对以下代码进行审查：{{ arguments }}"，之后只需输入 `/review src/main.py` 就能触发完整提示。模板文件可以放在 Tau 的资源目录或项目的 `.agents/` 目录下，加载时按文件名去重，后写入者优先。
+
 允许用户把可复用的提示片段写成 `*.md` 文件(放在 Tau 的资源目录或项目的 `.agents/` 中),并以 `/name [arguments]` 的形式调用它们。
 
 - **`_TEMPLATE_VARIABLE_RE`** —— 匹配 `{{ variable }}` 占位符。
@@ -38,6 +42,8 @@ code_files:
 
 ## `tau_coding/reload.py` — reload summary types
 
+在 agent 运行过程中修改了技能、提示模板或上下文文件后，你需要让这些变更立即生效而不必重启进程。Tau 的 `/reload` 命令会重新加载所有本地资源，并把"哪些资源发生了变化"以摘要的形式报告给你。
+
 定义本地资源重载(`/reload`)返回的"前后对比"摘要数据类,以便 UI 能精确报告发生了哪些变化。
 
 - **`ReloadCategorySummary`**(frozen,slots)—— `before`、`after`、`changed`,
@@ -52,6 +58,8 @@ code_files:
 ---
 
 ## `tau_coding/session_export.py` — HTML/JSONL transcript export
+
+每次 agent 对话都会产生一份完整的会话记录（**transcript**，转录），记录了所有的用户输入、模型回复、工具调用等。这些记录以 JSONL 格式持久化存储在磁盘上，但 JSONL 是逐行 JSON，人类直接阅读并不友好。`session_export.py` 把这份记录渲染成两种可分享的格式：一份自包含的 HTML 页面（带语法高亮和主题切换），或者重新导出为 JSONL 文件。
 
 把会话树 + 对话记录渲染为自包含的 HTML 文件(或 JSONL),供 `tau export` 与 TUI 导出命令使用。
 
@@ -87,6 +95,8 @@ code_files:
 
 ## `tau_coding/shell_config.py` — durable shell settings
 
+Tau 在执行 shell 命令时，有时需要在每条命令前插入一个环境初始化前缀（比如 `conda activate myenv`）。这个设置会持久化在 `~/.tau/settings.json` 中，这样你配置一次就不用每次都重复了。
+
 从 `~/.tau/settings.json` 加载唯一一项持久化 shell 设置(在每个 agent 运行的 shell 命令前插入的命令前缀)。
 
 - **`ShellConfigError(ValueError)`** —— 配置错误类型。
@@ -103,6 +113,8 @@ code_files:
 ---
 
 ## `tau_coding/update_check.py` — best-effort PyPI update check
+
+**Version check**（版本检查）是 Tau 在启动时悄悄做的一件事：去 PyPI 看看有没有新版本，如果有就提示你。这完全是"尽力而为"的——网络不通、PyPI 不可达、解析出错，都不会影响正常启动，也不会弹出任何错误信息。
 
 在启动时,Tau 可能会告知用户存在更新的版本或展示发布说明——但*仅*作为尽力而为、绝不阻塞的通知。
 
@@ -153,17 +165,21 @@ code_files:
 
 ---
 
-## How 3f fits the picture
+## 本部分如何契合整体
 
-- `thinking.py` —— 每个 provider/catalog/session 层都用来表达推理强度的共享词汇表。
-- `catalog_loader.py` —— 把 TOML 数据转换为经校验的 `ProviderCatalogEntry`s;是哪些 provider/model 存在的唯一事实来源。
-- `branch_summary.py` —— 分支切换时由模型辅助的上下文恢复。
-- `diagnostics.py` / `version.py` / `update_check.py` —— 运行可观测性 + 自我更新,全部为尽力而为、且无密钥。
-- `prompt_templates.py` / `reload.py` / `shell_config.py` —— 面向用户的资源与设置系统,通过 `TauResourcePaths` / `TauPaths` 发现。
-- `session_export.py` —— 从不可变 `SessionEntry`s 到可分享 HTML/JSONL 的纯渲染器。
+本部分（Part 3f 后半）覆盖的支撑模块共同构成 Tau 面向用户的资源、设置与可观测性层：
 
-下一步:**第 3g 部分** 将涵盖渲染层(`rendering/base.py`、
-`rendering/transcript.py`)与扩展基类(`extensions/base.py`)——它们把会话状态转换为屏幕输出,并让第三方代码接入 Tau。
+- `prompt_templates.py` —— 加载并渲染 Markdown 提示模板，把 `{{ variable }}` 占位符替换为运行时值，是 `/skill:` 和自定义 prompt 的基础设施。
+- `reload.py` —— 在不重启进程的情况下热重载扩展、资源和技能，让开发迭代更快速。
+- `session_export.py` —— 将不可变的 `SessionEntry`s 序列化为可分享的 HTML 或 JSONL 格式，供离线审查和分享。
+- `shell_config.py` —— 生成 shell 集成代码（如 `eval "$(tau shell-init bash)"`），让 Tau 的命令和补全融入用户终端环境。
+- `update_check.py` —— 以尽力而为的方式检查 Tau 发行版是否有新版本，全部无密钥、不阻塞启动。
+- `version.py` —— 集中管理发行包名（`tau-ai`）与版本字符串，为 update_check 和 CLI `--version` 提供唯一来源。
+
+这些模块全部通过 `TauPaths` / `TauResourcePaths` 发现路径，彼此独立且尽力而为——任何一个模块失败都不会阻塞核心 agent 循环。
+
+下一步：**第 3g 部分** 将涵盖渲染层（`rendering/base.py`、
+`rendering/transcript.py`）与扩展基类（`extensions/base.py`）——它们把会话状态转换为屏幕输出，并让第三方代码接入 Tau。
 
 ## 逐方法深度剖析（prompt_templates / reload / session_export / shell_config / update_check / version）
 
@@ -318,7 +334,7 @@ def _load_prompt_template(name: str, path: Path) -> PromptTemplate
 
 ## 文件:reload.py
 
-重载摘要类型定义。被 `/reload` 命令用来生成“资源重载前后变化”的 UI 摘要。注意:真实代码顶层定义名为 `ReloadCategorySummary` 与 `CodingReloadSummary`(并非任务描述的 `ReloadSummary`/`ReloadChange`),下面是真实结构。
+重载摘要类型定义。被 `/reload` 命令用来生成"资源重载前后变化"的 UI 摘要。注意:真实代码顶层定义名为 `ReloadCategorySummary` 与 `CodingReloadSummary`(并非任务描述的 `ReloadSummary`/`ReloadChange`),下面是真实结构。
 
 ### ReloadCategorySummary
 
@@ -509,7 +525,7 @@ def _render_tree(entries, active_path_ids, active_leaf_id) -> str
 2. 收集所有 `entry.id` 到 `entry_ids`;构建 `children_by_parent`(parent_id → 子列表)。
 3. `roots` = parent_id 为 None 或不在 entry_ids 中的条目;若为空回退为全部条目。
 4. 初始化 `rendered_ids`;对每个尚未渲染的 root 调 `_render_tree_chain` 生成顶层节点。
-5. 对剩余未渲染条目(悬空/不可达)额外生成一段 “Unreachable entries” 分组节点。
+5. 对剩余未渲染条目(悬空/不可达)额外生成一段 "Unreachable entries" 分组节点。
 6. 包成 `<ol class="tree">`。
 
 ### _render_tree_chain
@@ -518,7 +534,7 @@ def _render_tree(entries, active_path_ids, active_leaf_id) -> str
 def _render_tree_chain(start, children_by_parent, active_path_ids, active_leaf_id, *, ancestors, rendered_ids) -> str
 ```
 
-作用:把 `start` 及其“单一子节点链”渲染为同一层级的 `<li>`,仅在真正分叉(子节点 >1)处引入嵌套 `<ol>`(避免历史直线被逐层嵌套)。
+作用:把 `start` 及其"单一子节点链"渲染为同一层级的 `<li>`,仅在真正分叉(子节点 >1)处引入嵌套 `<ol>`(避免历史直线被逐层嵌套)。
 
 步骤:
 1. `chain` 累积直线序列;`current=start`;循环:把当前加入 `rendered_ids`/`chain`/`chain_ancestors`;取筛选后的(排除祖先)子节点。
@@ -565,8 +581,8 @@ def _render_entry_body(entry: SessionEntry) -> str
 作用:按 entry 类型分发渲染主体。
 
 - `MessageEntry` → `_render_message_entry`。
-- `ModelChangeEntry` → “Model changed to `<code>model</code>`.”
-- `ThinkingLevelChangeEntry` → “Thinking level changed to `<level>`/off.”
+- `ModelChangeEntry` → "Model changed to `<code>model</code>`."
+- `ThinkingLevelChangeEntry` → "Thinking level changed to `<level>`/off."
 - `CompactionEntry` → 压缩摘要 `<pre>` + `_render_list('Replaces entries', replaces_entry_ids)`。
 - `BranchSummaryEntry` → 分支根 + 摘要 `<pre>`。
 - `LabelEntry` → 会话标签。
@@ -584,7 +600,7 @@ def _render_message_entry(entry: MessageEntry) -> str
 作用:渲染消息条目主体。
 
 - `UserMessage` → 角色行(user 图标)+ 内容 `<pre>`。
-- `AssistantMessage` → 若有 `tool_calls` 生成 “Tool calls” `<ul>`(每个调用名/id + `_render_json_block(arguments)`);内容 `<pre>`(无文本时 "(no assistant text)")。
+- `AssistantMessage` → 若有 `tool_calls` 生成 "Tool calls" `<ul>`(每个调用名/id + `_render_json_block(arguments)`);内容 `<pre>`(无文本时 "(no assistant text)")。
 - `ToolResultMessage` → 角色行 + `_render_metadata([("tool",name),("tool_call_id",...),("ok",...),可选("error",...)])` + 内容 `<pre>`;若有 `data`/`details` 各加一个 JSON 块。
 - 其它消息 → 兜底 `model_dump_json` `<pre>`。
 
@@ -785,7 +801,7 @@ def shell_settings_from_json(data: dict[str, Any]) -> ShellSettings
 
 ### 主流程调用
 
-- `cli.py:55` 导入 `load_shell_settings`;在启动/命令执行时读取 `shell_command_prefix`,用于在运行终端命令前注入用户配置的前缀(例如 conda/venv 激活),是实现“持久化 shell 前缀设置”的读写基础。注意:本文件只提供 `load`/`from_json`/`to_json`/`path`,实际 `save` 由上层负责序列化(通过 `to_json` + `settings.json` 写入)。
+- `cli.py:55` 导入 `load_shell_settings`;在启动/命令执行时读取 `shell_command_prefix`,用于在运行终端命令前注入用户配置的前缀(例如 conda/venv 激活),是实现"持久化 shell 前缀设置"的读写基础。注意:本文件只提供 `load`/`from_json`/`to_json`/`path`,实际 `save` 由上层负责序列化(通过 `to_json` + `settings.json` 写入)。
 
 ---
 
@@ -857,7 +873,7 @@ class ReleaseNoteSection:
 作用:发布说明中的一个命名小节。
 
 字段:
-- `title: str` — 小节标题(如 “Features”)。
+- `title: str` — 小节标题(如 "Features")。
 - `items: tuple[str, ...]` — 该小节要点文本元组。
 
 ### ReleaseNotesEntry
@@ -898,7 +914,7 @@ class ReleaseNotesNotice:
     entries: tuple[ReleaseNotesEntry, ...]
 ```
 
-作用:安装在更新后“仅展示一次”的发布说明。
+作用:安装在更新后"仅展示一次"的发布说明。
 
 字段:
 - `current_version: str` — 当前(新)版本。

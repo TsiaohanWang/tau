@@ -10,8 +10,8 @@ code_files:
 
 ## 5. `extensions/` — the extension system
 
-这是 `tau_coding` 中架构上最有趣的部分。它让第三方代码无需 fork Tau 即可在运行时挂接到 agent。它
-被拆分为三个文件,分别对应"API 契约"、"发现/加载"和"运行时分派"。
+扩展（Extension）是允许第三方代码在不修改 Tau 源码的情况下，为 agent 添加新功能的机制——你可以把扩展想象成"插件"。比如，你可以写一个扩展来添加一个新的斜杠命令、注册一个自定义工具、或者在工具执行前后插入自定义逻辑。它
+被拆分为三个文件，分别对应"API 契约"、"发现/加载"和"运行时分派"。
 
 ### 5.1 `extensions/__init__.py`
 
@@ -20,10 +20,8 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 
 ### 5.2 `extensions/api.py` — 契约
 
-`ExtensionAPI` 是传给每个扩展的 `setup(tau)` 函数的对象。它暴露 *安全* 的能力面:`register_tool`、
-`register_command`、`register_message_renderer`、`register_prompt_guideline`、`subscribe`,以及
-`send_user_message` / `send_custom_message` / `append_custom_entry` 等动作。每个方法都会针对当前活跃的
-`ExtensionGeneration` 进行校验;来自已重载代(Generation)的 API 对象会抛出 `ExtensionError`。
+`ExtensionAPI` 是传给每个扩展的 `setup(tau)` 函数的对象——它就像一个"遥控器"，只暴露安全的能力面。扩展可以通过它注册工具（`register_tool`）、注册斜杠命令（`register_command`）、注册自定义消息渲染器（`register_message_renderer`）、订阅事件（`subscribe`）、发送消息（`send_user_message`）等等。每个方法都会针对当前活跃的
+`ExtensionGeneration` 进行校验；来自已重载代（Generation）的 API 对象会抛出 `ExtensionError`。
 
 辅助类型:`ExtensionHandler`、`ExtensionCommandHandler`、`ExtensionCommandContext`、
 `MessageRenderer`、`MessageRenderOptions`、`CustomMessageView`、`InputEvent`、
@@ -640,11 +638,11 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 
 ### 5.3 `extensions/loader.py` — discovery and import
 
-本文件回答"存在哪些扩展,以及如何安全地导入它们?"
+本文件回答"存在哪些扩展，以及如何安全地导入它们？"——这是扩展系统的"快递员"，负责在启动时扫描磁盘、找到扩展、并把它们加载进内存。
 
-**数据类型:** `DiscoveredExtension`(name、path、可选 package_dir)—— 导入前的候选;
-`LoadedExtension`(name、path、`setup` 可调用对象)—— 成功导入后;`ExtensionLoadResult`
-(已加载扩展 + 非致命诊断信息)。
+**数据类型：** `DiscoveredExtension`（name、path、可选 package_dir）—— 导入前的候选；
+`LoadedExtension`（name、path、`setup` 可调用对象）—— 成功导入后；`ExtensionLoadResult`
+（已加载扩展 + 非致命诊断信息）。
 
 **发现规则(`discover_extensions`):**
 
@@ -672,8 +670,7 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 
 ### 5.4 `extensions/runtime.py` — the orchestration core
 
-`ExtensionRuntime`(扩展运行时)是所有扩展的长生命周期所有者。它比任何单个 `CodingSession` 都活得久
-(resume/new 会重新绑定它;`/reload` 替换注册集)。
+`ExtensionRuntime`（扩展运行时）是所有扩展的长生命周期所有者。"长生命周期"意味着它比任何单个 `CodingSession`（会话）都活得久——resume/new 会重新绑定它；`/reload`（热重载命令）替换注册集。它就像扩展的"管家"，负责协调各个扩展之间的交互。
 
 **构建与生命周期:**
 
@@ -687,23 +684,23 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
   `provider_name`、`session_id`、`system_prompt`、`is_running`、`messages`,外加
   `queue_steering_message` / `queue_follow_up_message` / `append_custom_entry`)。
 
-**注册(经由 `ExtensionAPI` 调用):**
+**注册（经由 `ExtensionAPI` 调用）：**
 
 - `register_tool` / `register_command` / `register_message_renderer` /
-  `register_prompt_guideline` —— 全部"每个名称首次注册生效";重复项作为诊断上报,而非致命。
+  `register_prompt_guideline` —— 全部"每个名称首次注册生效"；重复项作为诊断上报，而非致命。这意味着扩展不会不小心覆盖其他扩展的功能——如果两个扩展注册了同名的工具，系统会记录警告但使用先到的那个。
 - `subscribe(event, handler)` 针对已知的 agent 与生命周期事件集合校验事件名,然后追加 handler。
 
-**工具包装(`compose_tools` / `_wrap_tool`):**
+**工具包装（`compose_tools` / `_wrap_tool`）：**
 
-- `compose_tools(builtin_tools)` 合并内置 + 扩展工具;扩展工具若与内置同名则 **就地覆盖**。
-- 每个工具都被包装,使得每次调用时 `tool_call` 钩子先运行(它们可以 **阻止** 调用或改写 `arguments`),
-  然后真正的执行器运行,随后 `tool_result` 钩子可以改写 `content`/`ok`/`details`。这就是围绕每个工具的
-  "钩子接缝" —— 扩展的核心能力特性。
+- `compose_tools(builtin_tools)` 合并内置 + 扩展工具；扩展工具若与内置同名则 **就地覆盖**。
+- 每个工具都被包装，使得每次调用时 `tool_call` 钩子先运行（它们可以 **阻止** 调用或改写 `arguments`），
+  然后真正的执行器运行，随后 `tool_result` 钩子可以改写 `content`/`ok`/`details`。这就是围绕每个工具的
+  "钩子接缝"（hook seam）——扩展的核心能力特性。钩子（hook）是一种编程模式，允许你在特定事件发生前插入自定义逻辑，就像在流水线上设置检查点。
 
-**事件分派:**
+**事件分派：**
 
 - `attach_harness_listener(subscribe)` 将 `_on_agent_event` 接入 harness 的事件流。`_on_agent_event`
-  分发给订阅了该事件类型的 handler **以及** `AGENT_EVENT_WILDCARD` 订阅者。
+  分发给订阅了该事件类型的 handler **以及** `AGENT_EVENT_WILDCARD` 订阅者（通配符订阅可以一次监听所有 agent 事件）。
 - `run_input_hooks(text, ...)` 在 prompt 文本上运行 `input` 钩子;transform 链式传递,而 `handled`
   结果会短路提交。
 - `emit_session_start` / `emit_session_shutdown` 分派生命周期事件。

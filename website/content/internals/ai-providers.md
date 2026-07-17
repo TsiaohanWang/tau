@@ -10,10 +10,11 @@ code_files:
   - tau_ai/fake.py
 ---
 
+本页介绍 `tau_ai` 层的六个具体 provider 实现：它们是 `ModelProvider` 接口的具体实现，负责与各家 LLM 服务通信，把各自原生的流式响应转换成统一的 `ProviderEvent` 事件流。每个 provider 内部处理了不同的 API 格式、鉴权方式、工具调用编码和思考（thinking，即模型在回答前的内部推理过程，如 o1、Claude 的扩展思考）格式差异，但对外暴露的接口完全一致。
+
 ## `tau_ai/openai_compatible.py` — OpenAI 系"总管"
 
-最大的 provider（1044 行），因为它要同时支持 **两个 API 形态** 与多种
-"思考格式"。
+最大的 provider（约 1000 行），因为它要同时支持 **两个 API 形态**（`/chat/completions` 和 `/v1/responses`）与多种"思考格式"（不同厂商对推理过程的编码方式各不相同）。这里所说的"OpenAI 兼容"指的是那些遵循 OpenAI API 格式规范的第三方服务——它们的请求/响应结构与 OpenAI 类似，但在推理字段名、工具调用格式、token（LLM 处理文本的最小单位）用量上报等细节上各有差异。
 
 - 模块常量 `_RESPONSES_ONLY_PREFIXES = ("gpt-5.5", "gpt-5.4")`。
 - **`_use_responses_api(model)`**：路由判断——`"codex"` 出现在模型名里，或模型名
@@ -43,56 +44,39 @@ code_files:
     就 `break`。
   - parser 若 `fatal`（如非法 JSON chunk），外壳直接 `return` 不再 `finalize()`。
 
-### 两个 parser
+### 两个 parser（解析器）
 
-- **`_ChatStreamParser`**：处理 `/chat/completions` 的 `choices[0].delta`
-  分块。累积 `content_parts`、`_tool_call_builders`（按 `index` 分桶）；`_thinking_delta_text`
-  依次尝试 `reasoning_content`/`reasoning`/`thinking` 字段；`finalize()` 把所有
-  tool call 拼成 `ProviderToolCallEvent`，再发 `ProviderResponseEndEvent`
-  （内含完整 `AssistantMessage`）。usage 优先从 chunk 顶层 `usage` 取，否则从
-  choice 的 `usage` 取（兼容 Moonshot 等）。
-- **`_ResponsesStreamParser`**：处理 `/v1/responses`（无 `[DONE]` 哨兵，靠
-  `response.completed/incomplete/failed` 收尾）。按 `response.output_text.delta`、
-  `response.reasoning_*.delta`、`response.function_call_arguments.delta/done`、
-  `response.output_item.added/done` 等事件类型累积；`finalize()` 类似。
+每个 API 形态有独立的 SSE（Server-Sent Events，服务端向客户端推送的事件流）解析器，负责把流式返回的原始 JSON 块转换成 `ProviderEvent`：
+
+- **`_ChatStreamParser`**：处理 `/chat/completions` 的 `choices[0].delta` 分块。累积文本片段、工具调用构建器（按 `index` 分桶）；思考内容依次尝试 `reasoning_content`/`reasoning`/`thinking` 三个字段名（因为不同厂商用不同的字段名传递思考过程）。`finalize()` 把所有工具调用拼成 `ProviderToolCallEvent`，再发 `ProviderResponseEndEvent`（内含完整 `AssistantMessage`）。token 用量优先从 chunk 顶层 `usage` 取，否则从 choice 的 `usage` 取（兼容 Moonshot 等厂商的不同上报位置）。
+- **`_ResponsesStreamParser`**：处理 `/v1/responses`（没有 `[DONE]` 哨兵行，靠 `response.completed/incomplete/failed` 终态事件收尾）。按事件类型累积文本、思考和工具调用；`finalize()` 类似。
 
 两个 `_ToolCallBuilder` / `_ResponsesToolCallBuilder`：把流式到达的零散
 `id`/`name`/参数片段拼接成完整 `ToolCall`；参数文本 `loads` 失败则回落到
 `{"_raw_arguments": 原文}`，保证事件永远可构造。
 
-### payload 构造与各家兼容
+### payload（请求体）构造与各家兼容
 
-- **`_build_chat_payload`**：组装 `model`/`stream`/`messages`，按 `compat` 配置
-  决定是否带 `stream_options.include_usage`、`store`、`max_tokens` 字段名
-  （`max_tokens` vs `max_completion_tokens`）、OpenRouter 的 `provider`；
-  `_apply_chat_reasoning` 针对 `zai`/`qwen`/`deepseek`/`openrouter`/`together`/
-  原生等**不同"思考格式"**写入不同的 reasoning 字段；最后带 `tools`。
-- **`_build_responses_payload`**：用 `instructions` 当 system，把消息转成
-  Responses 的 `input`（function_call / function_call_output），`store: false`
-  保持无状态（每轮重发整段 transcript），带 `reasoning.summary: auto` 让思考可见。
+不同厂商虽然"兼容" OpenAI 格式，但在推理字段名、`max_tokens` 字段名、thinking 格式、token 用量上报位置等细节上各不相同。这个文件通过 `compat` 配置参数来处理这些差异：
+
+- **`_build_chat_payload`**：组装请求体，按 `compat` 配置决定是否带 `stream_options.include_usage`、`store`、`max_tokens` 字段名（有的厂商用 `max_tokens`，有的用 `max_completion_tokens`）；`_apply_chat_reasoning` 针对 `zai`/`qwen`/`deepseek`/`openrouter`/`together`/原生等**不同"思考格式"**写入不同的 reasoning 字段；最后带 `tools`。
+- **`_build_responses_payload`**：用 `instructions` 当 system，把消息转成 Responses 的 `input`（function_call / function_call_output），`store: false` 保持无状态（每轮重发整段对话历史），带 `reasoning.summary: auto` 让思考过程对用户可见。
 - 大量辅助函数：`_message_to_openai`、`_tool_to_openai`、`_tool_call_to_openai`、
   `_messages_to_responses_input`、`_tool_to_responses`、`_normalize_responses_effort`、
   `_normalize_finish_reason`（把 Responses 状态映射成 chat 风格的
   `stop`/`length`/`tool_calls`）、`_parse_chunk_usage` / `_usage_from_responses_event`
   （把各家 usage 解析进 `Usage`，并遵守"None=未上报"约定，cost 一律留空）。
 
-> **为什么这样设计**：这个文件的复杂之处在于"一套代码适配很多 OpenAI 兼容后端"。其根源是
-> OpenAI 的 chat/completions 协议虽被各厂商"兼容"，但推理（reasoning）字段、`max_tokens`
-> 的字段名、thinking 格式、usage 上报位置在 Mistral/DeepSeek/Qwen/OpenRouter/Together 等
-> 实现间各不相同（见 OpenAI 官方 API 文档 https://platform.openai.com/docs）。统一信封
-> 只承载真正不变的 HTTP/重试/取消逻辑，而把所有"兼容差异"压进 `_apply_chat_reasoning` 等
-> `compat` 分支，使新增后端只改一处而非重写整条流。Rust `tau-rs` 的 `tau-ai/src/openai.rs`
-> 只覆盖了主路径，未做这么多的 `compat` 分支。
+> **为什么这样设计**：这个文件的复杂之处在于"一套代码适配很多 OpenAI 兼容后端"。其根源是 OpenAI 的 chat/completions 协议虽被各厂商"兼容"，但推理字段、`max_tokens` 的字段名、thinking 格式、token 用量上报位置在 Mistral/DeepSeek/Qwen/OpenRouter/Together 等实现间各不相同。统一信封（即 `_stream` 方法）只承载真正不变的 HTTP/重试/取消逻辑，而把所有"兼容差异"压进 `_apply_chat_reasoning` 等 `compat` 分支，使新增后端只改一处而非重写整条流。
 
 ---
 
 ## `tau_ai/anthropic.py` — Anthropic Messages API
 
+Anthropic（Claude 的开发商）有自己独特的 API 格式，与 OpenAI 差异较大：
+
 - **`ANTHROPIC_VERSION = "2023-06-01"`、`DEFAULT_MAX_TOKENS = 4096`**。
-- **`AnthropicProvider`**：结构与 OpenAI 系一致（`__init__`/`aclose`/
-  `stream_response`/`_get_client`/`_should_retry`），但**没有拆出共享 `_stream`**
-  ——它把流式外壳直接写进 `iterator()`。这套差异并非随意，而是 Anthropic Messages API
-  的硬性约束（见官方文档 https://docs.anthropic.com）：
+- **`AnthropicProvider`**：结构与 OpenAI 系一致（`__init__`/`aclose`/`stream_response`/`_get_client`/`_should_retry`），但**没有拆出共享 `_stream`**——它把流式外壳直接写进 `iterator()`。这套差异并非随意，而是 Anthropic Messages API 的硬性约束（见官方文档 https://docs.anthropic.com）：
   - 鉴权默认用 `x-api-key`（Anthropic 的专属请求头，而非 OpenAI 的 Bearer 体系），
     `bearer_auth=True` 时改用 `Authorization: Bearer`；`anthropic-version` 头是
     Anthropic API 强制要求的协议版本标识，必须随每个请求发送。
@@ -120,11 +104,9 @@ code_files:
 
 ## `tau_ai/google.py` — Google Generative AI
 
-- **`GoogleGenerativeAIProvider`**：URL 形如
-  `{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`。
-  这是 Gemini Generative Language API 的固有形态（见官方文档 https://ai.google.dev）：
-  API key 通过 query 参数 `key=` 而非 `Authorization` 头传递，且流式通过 `alt=sse`
-  触发。provider 严格按此约定拼接，不引入自定义鉴权头。
+Google 的 Gemini API 有完全不同于 OpenAI/Anthropic 的端点和请求格式：
+
+- **`GoogleGenerativeAIProvider`**：URL 形如 `{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`。这是 Gemini Generative Language API 的固有形态（见官方文档 https://ai.google.dev）：API key 通过 query 参数 `key=` 而非 `Authorization` 头传递，且流式通过 `alt=sse` 触发。provider 严格按此约定拼接，不引入自定义鉴权头。
 - **`_GoogleStreamParser`**：按 `candidates[0].content.parts` 解析；`text` 部分若
   `part.thought is True` 当作思考（`ProviderThinkingDeltaEvent`），否则正文；
   `functionCall` 部分直接构造 `ToolCall`（支持 `thoughtSignature`）。
@@ -141,11 +123,9 @@ code_files:
 
 ## `tau_ai/mistral.py` — Mistral Conversations
 
-- **`MistralConversationsProvider`**：拆出了自己的 `_stream(...)` 外壳（与 OpenAI
-  的类似），URL 为 `{base_url}/chat/completions`（自动补 `/v1`）。Mistral 的 Conversations
-  API 在兼容 OpenAI chat-completions 形态的基础上，额外支持 `content` 为列表的混合
-  text / thinking 分块（见官方文档 https://docs.mistral.ai），因此解析器需扩展
-  `_content_deltas` / `_thinking_deltas` 以兼容列表形式的 delta。
+Mistral 的 API 最接近 OpenAI 的 chat-completions 格式，但有自己的扩展：
+
+- **`MistralConversationsProvider`**：拆出了自己的 `_stream(...)` 外壳（与 OpenAI 的类似），URL 为 `{base_url}/chat/completions`（自动补 `/v1`）。Mistral 的 Conversations API 在兼容 OpenAI chat-completions 形态的基础上，额外支持 `content` 为列表的混合 text / thinking 分块（见官方文档 https://docs.mistral.ai），因此解析器需扩展 `_content_deltas` / `_thinking_deltas` 以兼容列表形式的 delta。
 - **`_MistralStreamParser`**：与 chat-completions 解析几乎一致；额外支持
   `content` 为 list（混合 text / `type: "thinking"` 块）的情况
   （`_content_deltas` / `_thinking_deltas`），以及 `tool_calls` 或 `toolCalls`
@@ -159,13 +139,10 @@ code_files:
 
 ## `tau_ai/openai_codex.py` — ChatGPT 订阅版 Codex
 
-- **`DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"`。
-- **`OpenAICodexCredentials`**（frozen dataclass）：`access_token` + `account_id`
-  —— Codex 不走普通 API key，而是 ChatGPT 订阅会话令牌。其根因是 Codex 后端
-  （`chatgpt.com/backend-api`）面向 ChatGPT 登录用户而非独立 API 使用者，鉴权
-  依赖浏览器/设备 OAuth 流程换发的会话令牌，故 `credential_resolver` 必填、且每次
-  请求都重新解析以处理令牌刷新；终端限流还需靠 `_is_terminal_rate_limit` 识别
-  "余额不足/额度耗尽"等不可重试文案（普通 HTTP 429 可重试，但计费耗尽不应无限重试）。
+OpenAI Codex 是面向 ChatGPT Plus/Pro 订阅用户的编码助手，它走的是 ChatGPT 的后端接口而非标准的 OpenAI API：
+
+- **`DEFAULT_OPENAI_CODEX_BASE_URL = "https://chatgpt.com/backend-api"`**。
+- **`OpenAICodexCredentials`**（frozen dataclass）：`access_token` + `account_id` —— Codex 不走普通 API key，而是 ChatGPT 订阅会话令牌。其根因是 Codex 后端面向 ChatGPT 登录用户而非独立 API 使用者，鉴权依赖浏览器/设备 OAuth 流程换发的会话令牌，故 `credential_resolver`（凭证解析器）必填、且每次请求都重新解析以处理令牌刷新；终端限流还需靠 `_is_terminal_rate_limit` 识别"余额不足/额度耗尽"等不可重试文案（普通 HTTP 429 可重试，但计费耗尽不应无限重试）。
 - **`OpenAICodexCredentialResolver`**：`Callable[[], Awaitable[OpenAICodexCredentials]]`。
 - **`OpenAICodexConfig`**（frozen dataclass）：`credential_resolver` 必填，
   另含 `base_url`（默认 `DEFAULT_OPENAI_CODEX_BASE_URL`）、`headers`、
@@ -193,33 +170,23 @@ code_files:
 
 ## `tau_ai/fake.py` — 确定性测试 provider
 
-- **`FakeProvider`**：构造时吃一组"脚本化事件流"`streams: Iterable[Iterable[ProviderEvent]]`。
-  每次 `stream_response` **消费下一条脚本流**（`self._streams.pop(0)`），原样
-  yield 出去；同时把入参 `(model, system, messages, tools)` 记进 `self.calls`
-  供测试断言。**无任何网络**。这是 agent-loop 测试的关键——让模型行为完全确定。
+用于单元测试的假 provider，不发起任何网络请求：
+
+- **`FakeProvider`**：构造时吃一组"脚本化事件流"。每次 `stream_response` **消费下一条脚本流**，原样 yield 出去；同时把入参 `(model, system, messages, tools)` 记进 `self.calls` 供测试断言。**无任何网络调用**。这是 agent-loop 测试的关键——让模型行为完全确定，测试可以可靠地验证 agent 的行为逻辑。
 
 ---
 
 ## 本部分小结
 
-六个 provider 殊途同归：无论后端是 OpenAI / Anthropic / Google / Mistral /
-Codex，还是测试用的 Fake，它们的 `stream_response` 都只产出那 7 种
-`ProviderEvent`。差异被彻底吸收在各文件的 parser 与 payload 构造里。这正是
-Part 1a 契约设计的价值：上层 `tau_agent` 永远不必关心"现在用的是哪家模型"。
-其设计动机是 Tau 的核心分离原则——**"Events are the contract"** 与
-**"Small layers beat magic"**：把 provider 间的全部差异封进薄薄的适配层，让 agent
-循环只依赖一份稳定、可枚举的事件词汇，从而新增或替换模型后端时无需触动上层逻辑。
-
-下一任务（Part 2a）进入 `tau_agent`，先看它定义的"数据模型"——这些
-`AgentMessage` / `ToolCall` / 事件类型正是 provider 的输入与输出所依赖的结构。
+六个 provider 殊途同归：无论后端是 OpenAI、Anthropic、Google、Mistral、Codex，还是测试用的 Fake，它们的 `stream_response` 都只产出那 7 种 `ProviderEvent`。差异被彻底吸收在各文件的 parser（解析器）与 payload（请求体）构造里。这正是契约设计的价值：上层 `tau_agent` 永远不必关心"现在用的是哪家模型"——它只依赖一份稳定、可枚举的事件词汇表，新增或替换模型后端时无需触动上层逻辑。
 
 ## 逐方法深度剖析（各 provider 实现）
 
-> 以下为各 provider 实现（含 openai_compatible 全 1044 行）的逐方法展开。
+> 以下是各 provider 实现的逐方法展开。如果你已经理解了上面的概述，可以跳过本节；如果你需要知道每个函数的具体实现细节，请继续阅读。
 
 ## 文件:openai_compatible.py
 
-该文件是覆盖绝大多数 OpenAI 兼容端点的“总适配器”。核心策略:通过 `stream_response` 在请求时按模型名路由到两种底层协议——标准 `/chat/completions` 或 `/v1/responses`——二者共用同一个 HTTP/重试/取消信封(由 `OpenAICompatibleProvider._stream` 实现),只是各自提供不同的 `_StreamParser` 解析器。其余 provider(anthropic/google/mistral/codex)都偏离了这一基类:它们没有这种端点路由,且各自有独立的请求体构造、工具 schema 格式和流式事件映射。
+该文件是覆盖绝大多数 OpenAI 兼容端点的"总适配器"。核心策略：通过 `stream_response` 在请求时按模型名路由到两种底层协议——标准 `/chat/completions` 或 `/v1/responses`——二者共用同一个 HTTP/重试/取消信封（由 `OpenAICompatibleProvider._stream` 实现），只是各自提供不同的 `_StreamParser` 解析器。其余 provider（anthropic/google/mistral/codex）都偏离了这一基类：它们没有这种端点路由，且各自有独立的请求体构造、工具 schema 格式和流式事件映射。
 
 模块级常量与函数:
 
@@ -660,7 +627,7 @@ Responses 输入格式:`UserMessage`→`{"role":"user","content":...}`;`Assistan
 
 ## 文件:anthropic.py
 
-Anthropic Messages API 适配器,完全偏离 openai_compatible 基类:使用 `anthropic-version` 头、`x-api-key`(或 bearer)鉴权、`/messages` 端点、Anthropic 自有消息格式与 SSE 事件类型(如 `message_start`/`content_block_*`/`message_delta`),thinking 用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort`。
+Anthropic Messages API 适配器，完全独立于 openai_compatible 基类：使用 `anthropic-version` 头、`x-api-key`（或 bearer）鉴权、`/messages` 端点、Anthropic 自有消息格式与 SSE 事件类型（如 `message_start`/`content_block_*`/`message_delta`），思考（thinking）用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort` 控制。
 
 ### AnthropicProvider
 
@@ -767,7 +734,7 @@ elif thinking_budget_tokens is not None:
 
 ## 文件:google.py
 
-Google Generative Language API 适配器,偏离基类最彻底:端点是 `{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`(API key 在 query),请求体用 `contents`/`systemInstruction`/`generationConfig`/`tools[].functionDeclarations`,thinking 由 `thinkingConfig`(`thinkingBudget`/`thinkingLevel`/`includeThoughts`)控制,SSE 对象不是 OpenAI 风格而是 `{candidates:[{content:{parts:[...]}}]}`,thinking 通过 `part.thought==True` 与 `part.thoughtSignature` 区分。
+Google Generative Language API 适配器，偏离基类最彻底：端点是 `{base_url}/models/{model}:streamGenerateContent?alt=sse&key={api_key}`（API key 在 query 参数中），请求体用 `contents`/`systemInstruction`/`generationConfig`/`tools[].functionDeclarations`，思考由 `thinkingConfig`（`thinkingBudget`/`thinkingLevel`/`includeThoughts`）控制，SSE 对象不是 OpenAI 风格而是 `{candidates:[{content:{parts:[...]}}]}`，思考内容通过 `part.thought==True` 标志与普通文本区分。
 
 ### GoogleGenerativeAIProvider
 
@@ -884,7 +851,7 @@ dict 返回,否则 `{}`。
 
 ## 文件:mistral.py
 
-Mistral Conversations 适配器,形态上最接近 openai_compatible 的 chat 分支,但端点 `/chat/completions`、用 `OpenAICompatibleConfig`、消息体用 `system` role 消息、thinking 字段为 `reasoning_effort: "high"` 或 `prompt_mode: "reasoning"`、`tools[].function` 带 `strict: False`。流式解析器 `_MistralStreamParser` 与 `_ChatStreamParser` 同构,但支持 content 为列表且 `type==thinking` 的 thinking 分块。
+Mistral Conversations 适配器，形态上最接近 openai_compatible 的 chat 分支，但端点 `/chat/completions`、用 `OpenAICompatibleConfig`、消息体用 `system` role 消息、thinking 字段为 `reasoning_effort: "high"` 或 `prompt_mode: "reasoning"`、`tools[].function` 带 `strict: False`。流式解析器 `_MistralStreamParser` 与 `_ChatStreamParser` 同构，但支持 content 为列表且 `type==thinking` 的 thinking 分块。
 
 ### MistralConversationsProvider
 
@@ -1013,7 +980,7 @@ if reasoning_effort is not None and reasoning_effort != "none":
 
 ## 文件:openai_codex.py
 
-OpenAI Codex 订阅版 Responses 适配器,完全自包含(不继承 openai_compatible 基类)。端点 `{base_url}/codex/responses`,鉴权为 `Authorization: Bearer {access_token}` + `chatgpt-account-id` + `originator` + `OpenAI-Beta: responses=experimental`,请求体走 Responses 风格但带 `text.verbosity`/`include`/`tool_choice`/`parallel_tool_calls`,工具 id 用 `call_id|item_id` 复合形式。SSE 解析在异步生成器 `_codex_provider_events` 内联完成(而非独立 parser 类)。`reasoning_effort`+`reasoning_summary` 控制思维,thinking 映射 `response.reasoning.*` 系列事件。
+OpenAI Codex 订阅版 Responses 适配器，完全自包含（不继承 openai_compatible 基类）。端点 `{base_url}/codex/responses`，鉴权为 `Authorization: Bearer {access_token}` + `chatgpt-account-id` + `originator` + `OpenAI-Beta: responses=experimental`，请求体走 Responses 风格但带 `text.verbosity`/`include`/`tool_choice`/`parallel_tool_calls`，工具 id 用 `call_id|item_id` 复合形式。SSE 解析在异步生成器 `_codex_provider_events` 内联完成（而非独立 parser 类）。`reasoning_effort`+`reasoning_summary` 控制思考过程，thinking 映射 `response.reasoning.*` 系列事件。
 
 ### 模块级常量/类型
 
@@ -1202,7 +1169,7 @@ body 小写后若含任一计费相关 marker(`gousagelimiterror`/`freeusagelimi
 
 ## 文件:fake.py
 
-确定性测试 provider,不发起任何网络请求,只回放预定义的事件流,用于 agent-loop 测试。
+确定性测试 provider，不发起任何网络请求，只回放预定义的事件流，用于 agent-loop 测试。
 
 ### FakeProvider
 
@@ -1228,13 +1195,19 @@ def stream_response(self, *, model, system, messages, tools, signal=None):
 
 这段代码说明了 FakeProvider 的确定性来源:它不碰网络,只是逐条回放预存事件流,并把入参记进 `self.calls` 供测试断言。
 
-### 对比小结(各 provider 在 payload / 工具 schema / thinking / 事件映射 上的异同)
+### 对比小结（各 provider 在请求体、工具 schema、思考格式、事件映射 上的异同）
 
-- 端点与鉴权:openai_compatible 子类通用 `/chat/completions` 或 `/v1/responses` + Bearer;anthropic 用 `/messages` + `x-api-key`/`anthropic-version`;google 用 `/models/{model}:streamGenerateContent?key=`(key 在 query);mistral 复用 `/chat/completions` + Bearer;codex 用 `{base_url}/codex/responses` + Bearer+`chatgpt-account-id`+`OpenAI-Beta`。
-- 工具 schema:`tools` 顶层键名各异——OpenAI 系用 `tools[].function.{name,parameters}`,Anthropic 用 `tools[].{name,input_schema}`,Google 用 `tools[].functionDeclarations[].{name,parameters}`(且清理 `additionalProperties`/`$schema`),Codex 同 OpenAI 但 `strict: None`,Mistral 同 OpenAI 但 `strict: False`。
-- thinking:OpenAI 系靠 `reasoning_effort`/`reasoning`(按 thinking_format 多变),Anthropic 用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort`,Google 用 `thinkingConfig`(`thinkingBudget`/`thinkingLevel`/`includeThoughts`),Mistral 用 `reasoning_effort:"high"` 或 `prompt_mode:"reasoning"`,Codex 用 `reasoning.effort`+`summary`。
-- 流式事件映射:所有 provider 都把原生块映射为统一的 `ProviderResponseStartEvent`/`ProviderTextDeltaEvent`/`ProviderThinkingDeltaEvent`/`ProviderToolCallEvent`/`ProviderResponseEndEvent`/`ProviderErrorEvent`/`provider_retry_event`。差异在原生事件名:OpenAI 系看 `choices[].delta`/Responses `response.*`;Anthropic 看 `content_block_*`/`message_delta`;Google 看 `candidates[].content.parts` 且以 `thought` 标志区分 thinking;Codex 内联处理 `response.*` 且 thinking 映射到 `reasoning.*` 系列。错误统一转 `ProviderErrorEvent`(HTTP 用 `provider_http_error_message`,流内错误用各自 `_*_error_message`)。
-- 偏离基类:除 mistral/openai_compatible 共享“chat-completions 同构信封”思路外,anthropic、google、codex 均自成一套流式解析(anthropic 在 `stream_response` 内联分支、google 用 `_GoogleStreamParser`、codex 用异步生成器 `_codex_provider_events`),且各自有独立的消息格式转换与 usage/retry 判定。openai_compatible 通过 `_use_responses_api` 参数化路由覆盖了绝大多数 OpenAI 兼容端点,mistral 与 codex 则是对该范式的变体(前者贴近 chat、后者贴近 responses 但带订阅凭证)。
+下面从四个维度对比各 provider 的实现差异：
+
+**端点与鉴权**：openai_compatible 子类通用 `/chat/completions` 或 `/v1/responses` + Bearer；anthropic 用 `/messages` + `x-api-key`/`anthropic-version`；google 用 `/models/{model}:streamGenerateContent?key=`（key 在 query 参数中）；mistral 复用 `/chat/completions` + Bearer；codex 用 `{base_url}/codex/responses` + Bearer+`chatgpt-account-id`+`OpenAI-Beta`。
+
+**工具 schema**：`tools` 顶层键名各异——OpenAI 系用 `tools[].function.{name,parameters}`，Anthropic 用 `tools[].{name,input_schema}`，Google 用 `tools[].functionDeclarations[].{name,parameters}`（且清理 `additionalProperties`/`$schema`），Codex 同 OpenAI 但 `strict: None`，Mistral 同 OpenAI 但 `strict: False`。
+
+**thinking（思考/推理）**：OpenAI 系靠 `reasoning_effort`/`reasoning`（按 thinking_format 多变），Anthropic 用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort`，Google 用 `thinkingConfig`（`thinkingBudget`/`thinkingLevel`/`includeThoughts`），Mistral 用 `reasoning_effort:"high"` 或 `prompt_mode:"reasoning"`，Codex 用 `reasoning.effort`+`summary`。
+
+**流式事件映射**：所有 provider 都把原生块映射为统一的 `ProviderResponseStartEvent`/`ProviderTextDeltaEvent`/`ProviderThinkingDeltaEvent`/`ProviderToolCallEvent`/`ProviderResponseEndEvent`/`ProviderErrorEvent`/`provider_retry_event`。差异在原生事件名：OpenAI 系看 `choices[].delta`/Responses `response.*`；Anthropic 看 `content_block_*`/`message_delta`；Google 看 `candidates[].content.parts` 且以 `thought` 标志区分 thinking；Codex 内联处理 `response.*` 且 thinking 映射到 `reasoning.*` 系列。错误统一转 `ProviderErrorEvent`（HTTP 用 `provider_http_error_message`，流内错误用各自 `_*_error_message`）。
+
+**偏离基类**：除 mistral/openai_compatible 共享"chat-completions 同构信封"思路外，anthropic、google、codex 均自成一套流式解析（anthropic 在 `stream_response` 内联分支、google 用 `_GoogleStreamParser`、codex 用异步生成器 `_codex_provider_events`），且各自有独立的消息格式转换与 usage/retry 判定。openai_compatible 通过 `_use_responses_api` 参数化路由覆盖了绝大多数 OpenAI 兼容端点，mistral 与 codex 则是对该范式的变体（前者贴近 chat、后者贴近 responses 但带订阅凭证）。
 
 ---
 

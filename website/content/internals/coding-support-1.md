@@ -10,6 +10,8 @@ code_files:
 
 ## `tau_coding/thinking.py` — thinking-mode primitives
 
+不同的 LLM 提供商对"让模型多思考一会儿"有不同的控制方式：OpenAI 叫它 `reasoning_effort`（推理强度），Anthropic 用 `thinking.budget_tokens`（思考预算 token 数）。为了让 UI 和会话层不必纠缠这些细节，Tau 把所有思考级别抽象为一组统一的词汇表，在底层按需翻译成各提供商的具体参数。
+
 一个轻量、零依赖的模块,它*集中管理*推理强度的词汇表,使每一层(catalog、session、TUI、providers)都对同一组级别达成一致,从而避免推理设置以字符串形式散落在代码各处。
 
 - **Type aliases:**
@@ -33,6 +35,8 @@ code_files:
 ---
 
 ## `tau_coding/catalog_loader.py` — provider catalog loading
+
+一个 coding agent 能用哪些 AI 模型、每个模型有什么能力（上下文窗口大小、是否支持推理模型、定价信息等），这些信息都集中记录在一个叫 **catalog**（目录）的配置文件里。Tau 的 catalog 分两层：一个是打包在安装包里的内置目录，另一个是用户在 `~/.tau/catalog.toml` 中自定义的覆盖目录。加载器把两者合并，产出经过严格校验的配置对象，供后续的 provider 初始化使用。
 
 加载 `tau_coding/data/catalog.toml`(内置)并叠加用户自己的
 `~/.tau/catalog.toml`,产出经校验、供 `provider_catalog.py` 使用的 `ProviderCatalogEntry` 对象。
@@ -62,6 +66,8 @@ code_files:
 
 ## `tau_coding/branch_summary.py` — abandoned-branch summaries
 
+Tau 的会话支持"分支"——就像 Git 分支一样，你可以从某个节点分叉出新路径继续探索，而之前的路径变成"被放弃的分支"。当用户切回之前的分支时，被放弃的那段对话不会直接丢弃，而是由模型浓缩成一段摘要，作为上下文注入回当前分支，让 agent 知道"你之前探索过什么"。
+
 当用户切换会话分支时,被放弃分支的对话可由模型浓缩成摘要,并作为上下文重新附加。本模块负责构建提示词并解析结果。
 
 - **常量 / 提示词:** `BRANCH_SUMMARY_SYSTEM_PROMPT`(严格要求"只总结、不要续写")、`BRANCH_SUMMARY_PREAMBLE`(附加到摘要前的"你此前探索了另一条分支"引导语)、`BRANCH_SUMMARY_PROMPT`(一个固定的 Markdown 模板,包含 Goal / Constraints / Progress / Key Decisions / Next Steps 等小节),以及 `MAX_SUMMARY_SOURCE_MESSAGE_CHARS = 4_000`、
@@ -86,6 +92,8 @@ code_files:
 ---
 
 ## `tau_coding/diagnostics.py` — structured failure logging
+
+当 agent 调用出错时，你可能想事后排查"到底发生了什么"，但又不能把 API 密钥或用户消息内容写进日志。Tau 的诊断模块专门解决这个矛盾：它以结构化的 JSONL 格式记录失败信息（哪个 provider、哪个模型、哪个阶段出错），但刻意排除一切敏感字段，只保留足够排查的非密钥上下文。
 
 当 agent 调用失败时,追加机器可读的 JSONL 诊断信息,以便支持 / 调试在不泄露密钥的情况下重建发生了什么。
 
@@ -809,7 +817,7 @@ def _branch_file_operations(messages: Sequence[AgentMessage]) -> tuple[list[str]
 
 ## 文件:diagnostics.py
 
-该模块提供结构化、机器可解析的失败诊断日志。每次 agent 调用分配一个 `run_id`,失败时把上下文( provider/model/cwd/session/run )、阶段(phase)、以及异常或错误事件以单行 JSON 追加到 `~/.tau/agent_calls.log`(JSONL),供后续排障。设计目标是"绝不泄露密钥",只记录非敏感字段。
+该模块提供结构化、机器可解析的失败诊断日志。每次 agent 调用分配一个 `run_id`,失败时把上下文( provider/model/cwd/session/run )、阶段(phase)、以及异常或错误事件以单行 JSON 追加到 `~/.tau/logs/agent-calls.jsonl`(JSONL),供后续排障。设计目标是"绝不泄露密钥",只记录非敏感字段。
 
 ### AgentCallDiagnosticContext
 
@@ -857,7 +865,7 @@ def from_paths(cls, paths: TauPaths | None = None) -> AgentCallDiagnosticLogger:
 
 **作用**:工厂方法,使用 Tau 默认路径布局创建 logger。
 
-**关键实现**:`return cls((paths or TauPaths()).agent_calls_log_path)`——取 `TauPaths` 的 `agent_calls_log_path`(即 `~/.tau/agent_calls.log`)作为落盘位置。
+**关键实现**:`return cls((paths or TauPaths()).agent_calls_log_path)`——取 `TauPaths` 的 `agent_calls_log_path`(即 `~/.tau/logs/agent-calls.jsonl`)作为落盘位置。
 
 #### log_exception
 

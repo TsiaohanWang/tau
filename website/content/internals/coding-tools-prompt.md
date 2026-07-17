@@ -12,22 +12,21 @@ code_files:
 
 ## `tau_coding/tools.py` — 内置 coding 工具（1057 行）
 
-把"读文件/写文件/改文件/跑命令"做成 `tau_agent` 的 `AgentTool`，并附带更丰富的
-`ToolDefinition`（含 prompt 元数据与 JSON Schema）。
+这一模块把"读文件/写文件/改文件/跑命令"这四个最基本的文件系统与 Shell 操作封装成 Agent 工具——让大语言模型（LLM）能够通过函数调用（function calling）来操作你的电脑。每个工具都以两层结构暴露：`ToolDefinition` 是带完整元数据的内部定义，`AgentTool` 是精简后给 agent 循环消费的接口。
 
 ### 常量与基础类型
 
 - `DEFAULT_MAX_OUTPUT_BYTES = 50*1024`、`DEFAULT_MAX_OUTPUT_LINES = 2000`、
   `SUPPORTED_IMAGE_MIME_TYPES = {image/jpeg,png,gif,webp}`、`UTF8_BOM`。
-- **`ToolInputError(ValueError)`**：参数非法时抛出（被 loop 隔离成 `ok=False` 结果）。
+  这些常量定义了工具输出的最大截断阈值——当模型读取或执行命令后返回的内容过长时，工具会按这些限制截断输出，防止把过多数据塞进上下文窗口（模型一次能处理的最大 token 数量）。
+- **`ToolInputError(ValueError)`**：当模型传入的参数不合法时抛出的统一异常，由 agent 循环捕获并转化为结构化的失败结果（`ok=False`），而不是让程序崩溃。
 - **`TruncationResult`**（frozen dataclass）：描述一次输出如何被截断——`content`、
   `truncated`、`truncated_by`（"lines"/"bytes"）、行/字节计数、`last_line_partial`、
   `first_line_exceeds_limit`、`max_lines`/`max_bytes`，带 `to_json()`。
 - **`ToolDefinition`**（frozen dataclass）：完整工具定义（name/description/
   prompt_snippet/prompt_guidelines/input_schema/executor）；`to_agent_tool()` 转成
   更精简的 `AgentTool`（保留 prompt 元数据供渲染用）。
-- `_file_locks: dict[Path, asyncio.Lock]`：进程内**每路径写/改锁**，防同一文件并发
-   修改交错。
+- `_file_locks: dict[Path, asyncio.Lock]`：进程内**每路径写/改锁**，防同一文件并发修改交错。这个锁确保同一个文件不会被两个并发的写操作同时修改，否则内容会交错混乱。
 
 ```python
 @dataclass(frozen=True, slots=True)
@@ -131,21 +130,20 @@ def _kill_process_tree(process):
 
 **为什么工具是"schema + async executor 返回结构化结果"**：Tau 官方原则 "Tools are
 ordinary typed functions" 要求工具不是隐式魔法,而是带明确输入契约的普通异步函数。每个
-`ToolDefinition` 都携带 JSON Schema(`input_schema`,供 provider 做参数校验与函数调用)与
-一个 `async executor`(签名 `(arguments, signal) -> AgentToolResult`),执行器返回的是
-**结构化** `AgentToolResult`(`ok`/`content`/`error`/`data`),而非裸字符串。这样做的收益:
-参数在进入执行器前即被 schema 约束;结果里的 `data`(截断元数据、diff、退出码等)可被前端
-渲染、被会话落盘、被 agent 循环判定成败,全程类型清晰、可测试。
+`ToolDefinition` 都携带 JSON Schema（一种标准化的参数描述格式，告诉模型每个参数叫什么、是什么类型），供 provider 做参数校验与函数调用，以及一个 async executor（签名 `(arguments, signal) -> AgentToolResult`），执行器返回的是**结构化** `AgentToolResult`（`ok`/`content`/`error`/`data`），而非裸字符串。这样做的收益:
+参数在进入执行器前即被 schema 约束;结果里的 `data`（截断元数据、diff、退出码等）可被前端渲染、被会话落盘、被 agent 循环判定成败,全程类型清晰、可测试。
 
 结构与落地也印证了 "The core stays portable":这套 read/write/edit/bash 是 `tau_coding`
 为 `tau_agent` 的可移植内核做的**唯一文件系统/Shell 落地**——`tau_agent` 本身完全不碰磁盘
-与进程,工具作为普通 typed function 从外部注入。
+与进程,工具作为普通 typed function 从外部注入。这意味着 `tau_agent` 可以在不同环境（本地、远程、测试）中复用，只要注入不同的工具实现即可。
 
 ---
 
 ## `tau_coding/system_prompt.py` — 组装 system prompt
 
-- **`ProjectContextFile`**（frozen dataclass）：`path` + `content`，项目指令文件。
+System prompt（系统提示词）是每次对话开始时发给模型的一段"身份说明书"，告诉模型它是谁、能做什么、该遵守什么规则。它就像给新员工的入职手册——在 agent 开始干活之前，先明确告诉它：你是编程助手，你有 read/write/edit/bash 这些工具，你应该怎么用它们。这个模块负责把工具清单、技能、项目上下文等信息拼装成一份完整的 system prompt。
+
+- **`ProjectContextFile`**（frozen dataclass）：`path` + `content`，项目指令文件（比如 `AGENTS.md`），用于把项目特定的编码规范注入 system prompt。
 - **`BuildSystemPromptOptions`**（frozen dataclass）：组装所需全部输入——`cwd`、
   `tools`、`skills`、`custom_prompt`、`append_system_prompt`、`context_files`、
   `current_date`、`extra_guidelines`（扩展贡献的指引）。
@@ -154,11 +152,11 @@ ordinary typed functions" 要求工具不是隐式魔法,而是带明确输入�
   + 可用工具清单 + 指南。两者都拼上：`append_section`、项目上下文（XML 包裹的
   `<project_context>`）、skills（`read` 工具存在时才加）、当前日期、CWD。
   - **为什么系统提示由确定性纯函数组装**：`build_system_prompt` 的输出只取决于
-    `BuildSystemPromptOptions` 的输入,无隐藏状态、无随机项,同样的工具/skills/上下文必得
-    同样的提示。这既服务 "Small layers beat magic"(提示的每一段都可追溯到某个显式输入,
-    而非藏在框架里的魔法),也让提示本身可 diff、可测试、可随 `/reload` 精确重建。工具清单
-    直接由注入的 `tools` 派生,skills 仅在 `read` 工具存在时才加——保证模型看到的能力清单
-    与实际可调用的工具严格一致,不会承诺一个不存在的工具。
+    `BuildSystemPromptOptions` 的输入，无隐藏状态、无随机项，同样的工具/skills/上下文必得
+    同样的提示。这既服务 "Small layers beat magic"（提示的每一段都可追溯到某个显式输入，
+    而非藏在框架里的魔法），也让提示本身可 diff、可测试、可随 `/reload` 精确重建。工具清单
+    直接由注入的 `tools` 派生，skills 仅在 `read` 工具存在时才加——保证模型看到的能力清单
+    与实际可调用的工具严格一致，不会承诺一个不存在的工具。这就像餐厅菜单上只列厨房能做的菜——不会让顾客点一道做不出来的菜。
 - **`format_available_tools`**：用 `prompt_snippet` 列工具。
 - **`collect_prompt_guidelines` / `format_guidelines`**：收集并去重指南——根据工具集
   智能补充（有 bash 但无探索工具 → "用 bash 做 ls/rg/find"；都有 → "优先用
@@ -216,6 +214,8 @@ def collect_prompt_guidelines(tools, extra_guidelines=()):
 
 ## `tau_coding/context.py` — 项目指令发现
 
+这个模块负责自动发现项目级别的指令文件（主要是 `AGENTS.md`）。想象你走进一个新项目，桌上放着一份"项目规范"——这个模块就是在系统启动时帮你找到这份规范，然后把它注入到 system prompt 中，让模型了解这个项目的编码风格和约定。
+
 - `PROJECT_MARKERS = (".git", "pyproject.toml", "uv.lock", "setup.py", "package.json")`。
 - **`discover_project_context` / `discover_project_context_with_diagnostics`**：找出要
   注入 system prompt 的项目指令文件（`AGENTS.md` 等），返回 `ProjectContextFile` 元组
@@ -229,6 +229,8 @@ def collect_prompt_guidelines(tools, extra_guidelines=()):
 ---
 
 ## `tau_coding/context_window.py` — 上下文用量估算与压缩
+
+**上下文窗口**（context window）是模型一次对话能处理的最大 token 数量，可以把它想象成模型的"短期记忆容量"。对话越长，消耗的 token 越多；一旦接近窗口上限，模型就会"忘掉"最早的消息。**自动压缩**（auto-compact）就是解决这个问题的机制——在 token 用量接近上限时，自动把早期对话总结成一段摘要，腾出空间继续工作。这个模块提供了 token 用量估算和压缩提示构造这两项能力。
 
 常量：`CHARS_PER_TOKEN=4`、`MESSAGE_OVERHEAD_TOKENS=4`、`TOOL_OVERHEAD_TOKENS=16`、
 `DEFAULT_CONTEXT_WINDOW_TOKENS=128_000`、`DEFAULT_COMPACTION_RESERVE_TOKENS=16_384`、
@@ -251,17 +253,17 @@ def collect_prompt_guidelines(tools, extra_guidelines=()):
 - **`serialize_messages_for_compaction`** / **`summarize_messages_for_compaction`**：把
   消息序列化成压缩器可读格式 / 生成一个确定性的极简摘要（无 LLM 时的兜底）。
 
-**为什么估算与压缩逻辑独立成层**：token 估算(`estimate_context_usage`)与压缩提示构造
-(`build_compaction_summary_prompt`)都是纯函数,不持有会话状态,也不直接调用模型。
-`CodingSession` 用这里估算的用量决定何时 `auto_compact`,并在上下文溢出时用
-`build_compaction_summary_prompt` 触发压缩(对应 Part 3b 的 `_try_auto_compact` /
-`_try_overflow_compact`)。把"多少 token""该压缩哪些消息"从"如何落盘压缩结果"中拆开,
-既呼应 "Small layers beat magic",也让阈值与保留策略(如 `DEFAULT_COMPACTION_KEEP_RECENT_TOKENS`)
-可单独测试与调参,而不必启动一次真实会话。
+**为什么估算与压缩逻辑独立成层**：token 估算（`estimate_context_usage`）与压缩提示构造（`build_compaction_summary_prompt`）都是纯函数，不持有会话状态，也不直接调用模型。`CodingSession` 用这里估算的用量决定何时 `auto_compact`，并在上下文溢出时用
+`build_compaction_summary_prompt` 触发压缩（对应 Part 3b 的 `_try_auto_compact` /
+`_try_overflow_compact`）。把"多少 token""该压缩哪些消息"从"如何落盘压缩结果"中拆开,
+既呼应 "Small layers beat magic"，也让阈值与保留策略（如 `DEFAULT_COMPACTION_KEEP_RECENT_TOKENS`，默认保留最近 20000 token 的对话不被压缩）
+可单独测试与调参，而不必启动一次真实会话。
 
 ---
 
 ## `tau_coding/skills.py` — Markdown 技能加载
+
+**技能**（skill）在这个上下文中是一种特殊的 Markdown 文件，它为模型提供"如何完成某类任务"的指导——比如"如何做代码审查"或"如何写测试"。每个技能是一个包含 `SKILL.md` 的目录，模型可以通过 `/skill:name` 斜杠命令在对话中调用它。这个模块负责发现、加载和展开这些技能文件。
 
 - **`Skill`**（frozen dataclass）：`name`/`path`/`content`/`description`。遵循 Agent
   Skills 规范：**技能是含 `SKILL.md` 的目录**（裸 `.md` 不再当技能，给出迁移诊断，
@@ -281,6 +283,8 @@ def collect_prompt_guidelines(tools, extra_guidelines=()):
 ---
 
 ## `tau_coding/resources.py` — 资源路径与 frontmatter
+
+这个模块提供了资源文件的路径发现和解析能力。Frontmatter 是 Markdown 文件顶部用 `key: value` 格式写的元数据块（用 `---` 包裹），类似于 YAML 语法。它让技能和模板文件可以声明自己的名称、描述等属性，而不影响正文内容。
 
 - **`ResourceError(ValueError)`**：资源无效/无法展开时抛出。
 - **`ResourceDiagnostic`**（frozen dataclass）：非致命发现诊断（kind/message/path/
@@ -305,12 +309,12 @@ def collect_prompt_guidelines(tools, extra_guidelines=()):
 
 ## 本部分小结
 
-Part 3a 让"抽象 agent"变成"会读文件、会跑命令的编程助手"：
+这五个模块共同构成了"从抽象 agent 到真正能干活的编程助手"的基础设施：
 
-- `tools.py` 提供 4 个落地工具（read/write/edit/bash），带截断、锁、进程树管理；
-- `system_prompt.py` 把工具/skills/上下文拼成模型看到的提示；
-- `context*.py` 负责发现项目指令与估算/压缩上下文；
-- `skills.py` / `resources.py` 负责加载 Markdown 技能与资源路径。
+- `tools.py` 提供 4 个落地工具（read/write/edit/bash），带截断、锁、进程树管理——这是模型与文件系统和 Shell 交互的唯一通道；
+- `system_prompt.py` 把工具/skills/上下文拼成模型看到的提示——让模型知道自己能做什么、该怎么做；
+- `context*.py` 负责发现项目指令与估算/压缩上下文——确保模型始终能看到最新的项目规范，且不会因为对话太长而"撑爆"短期记忆；
+- `skills.py` / `resources.py` 负责加载 Markdown 技能与资源路径——让模型可以调用预定义的任务指导。
 
 下一任务（Part 3b）看 `tau_coding/session.py` 的 `CodingSession`——它把这些工具、
 提示、资源组合起来，包住 `AgentHarness`，并负责持久化、命令、压缩、溢出恢复。
@@ -323,7 +327,7 @@ Part 3a 让"抽象 agent"变成"会读文件、会跑命令的编程助手"：
 
 ## 内置工具概览
 
-本模块 `tau_coding/tools.py` 为 Tau 的本地编码会话提供四个内置工具：`read`、`write`、`edit`、`bash`。工具以两层对象暴露：
+本模块 `tau_coding/tools.py` 为 Tau 的本地编码会话提供四个内置工具：`read`、`write`、`edit`、`bash`。这四个工具是模型与外部世界交互的全部通道——模型通过 `read` 看代码，通过 `edit` 做精确修改，通过 `write` 创建新文件，通过 `bash` 执行任意命令。工具以两层对象暴露：
 
 - **`ToolDefinition`**(模块内定义)：包含名称、描述、prompt 片段与准则、JSON 输入 schema、以及异步执行器 `executor`。这是"完整定义"，保留给需要 prompt 元数据与 schema 的调用方。
 - **`AgentTool`**(来自 `tau_agent.tools`)：由 `ToolDefinition.to_agent_tool()` 转换而来的精简对象，被 provider 中立的 agent 循环消费。

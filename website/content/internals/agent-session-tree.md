@@ -10,6 +10,14 @@ code_files:
   - tau_agent/session/memory.py
 ---
 
+这一章解释 Tau 如何把"运行中的对话"持久化到磁盘，以及如何从磁盘恢复出完整
+的会话状态。核心思想是把对话历史变成一棵**树（session tree）**——每次对话中的
+分支（比如模型走了两条不同的路线）都记录下来，随时可以回溯到任何一个历史节点。
+之所以用树而不是扁平列表，是因为 agent 可能在某一轮产生多个分支（比如用户中途
+切换了话题、或者模型试了一条路发现不对又退回重来），树结构天然支持这种"分叉与
+回溯"。每个节点叫 **leaf（叶节点）**，指向当前活跃分支的末端；从叶节点沿
+`parent_id` 往回走到根，就是一条完整的对话路径。
+
 ## `session/entries.py` — 会话树节点模型
 
 - **`new_entry_id()`**：用 `uuid4().hex` 生成唯一节点 id。
@@ -23,6 +31,8 @@ code_files:
     （`thinking_level: str | None`）。
   - **`CompactionEntry`**（`type="compaction"`）：一次上下文压缩——`summary` 文本 +
     `replaces_entry_ids`（被它替代的节点 id 列表）。重放时这些旧消息会被摘要替换。
+    **Compaction（压缩）**是控制上下文长度的手段：对话太长会超出模型的 token 上限，
+    于是把早期消息折叠成摘要，保留关键信息的同时缩减长度。
   - **`BranchSummaryEntry`**（`type="branch_summary"`）：分支点的摘要（`summary` +
     `branch_root_id`）。
   - **`LabelEntry`**（`type="label"`）：用户给会话打的标签（`label`）。
@@ -240,7 +250,7 @@ class CompactionEntry(BaseSessionEntry)
 - **类型判别**:`type: Literal["compaction"] = "compaction"`。
 - **字段**:
   - `summary: str`:对较早消息的压缩摘要文本。
-  - `replaces_entry_ids: list[str] = Field(default_factory=list)`:被本摘要所“替换/折叠”的那些消息条目 id 列表。
+  - `replaces_entry_ids: list[str] = Field(default_factory=list)`:被本摘要所"替换/折叠"的那些消息条目 id 列表。
 
 表示一次上下文压缩:在重放时(`memory.py` 的 `_apply_compaction`)会把 `replaces_entry_ids` 指向的消息从 `message_rows` 中剔除,并以一条合成 `UserMessage(摘要)` 替代,从而缩减上下文长度。
 
@@ -255,7 +265,7 @@ class BranchSummaryEntry(BaseSessionEntry)
   - `summary: str`:某个分支的摘要文本。
   - `branch_root_id: str | None = None`:该分支根节点 id(可选)。
 
-表示“从某分支返回”时留下的分支摘要;重放时会被格式化为一条 `UserMessage` 注入消息流(`_format_branch_summary`)。
+表示"从某分支返回"时留下的分支摘要;重放时会被格式化为一条 `UserMessage` 注入消息流(`_format_branch_summary`)。
 
 ### LabelEntry
 
@@ -279,7 +289,7 @@ class LeafEntry(BaseSessionEntry)
 - **字段**:
   - `entry_id: str | None = None`:当前活跃分支的叶子节点 id。
 
-表示“活跃分支叶子指针”:标记当前会话位于哪条分支末端。`active_leaf_id` 在重放时优先取该条目的值。
+表示"活跃分支叶子指针":标记当前会话位于哪条分支末端。`active_leaf_id` 在重放时优先取该条目的值。
 
 ### SessionInfoEntry
 
@@ -326,7 +336,7 @@ type SessionEntry = Annotated[
 
 ## 文件:session/tree.py
 
-本文件提供基于 `parent_id` 指针的会话树遍历助手。它本身不持有一个“树对象”,而是以“条目列表 + parent 指针”作为输入做纯函数式遍历,是 `memory.py` 从任意叶节点重放路径的底层工具。
+本文件提供基于 `parent_id` 指针的会话树遍历助手。它本身不持有一个"树对象",而是以"条目列表 + parent 指针"作为输入做纯函数式遍历,是 `memory.py` 从任意叶节点重放路径的底层工具。
 
 ### SessionTreeError
 
@@ -355,7 +365,7 @@ def entries_by_id(entries: list[SessionEntry]) -> dict[str, SessionEntry]
 def path_to_entry(entries: list[SessionEntry], leaf_id: str) -> list[SessionEntry]
 ```
 
-- **作用**:从 `leaf_id` 出发沿 `parent_id` 一路回溯到根,返回“根→叶”有序路径。这是分支重放的核心:给定任意分支末端的叶子,即可还原该分支的完整历史。
+- **作用**:从 `leaf_id` 出发沿 `parent_id` 一路回溯到根,返回"根→叶"有序路径。这是分支重放的核心:给定任意分支末端的叶子,即可还原该分支的完整历史。
 - **实现**:
   1. 用 `entries_by_id` 建立 id→entry 索引。
   2. 维护 `path` 列表与 `seen` 集合,从 `current_id = leaf_id` 开始循环:
@@ -364,9 +374,9 @@ def path_to_entry(entries: list[SessionEntry], leaf_id: str) -> list[SessionEntr
      - 从 `by_id` 取 `entry`;取不到则抛 `SessionTreeError(f"Missing session entry: {current_id}")`。
      - 把 `entry` 追加到 `path`,并把 `current_id` 指向 `entry.parent_id`。
   3. `current_id` 为 `None`(到达根)时退出循环。
-  4. `path.reverse()` 把“叶→根”翻转成“根→叶”后返回。
+  4. `path.reverse()` 把"叶→根"翻转成"根→叶"后返回。
 
-> 说明:任务描述中提到的 `SessionTree` 类及各实例方法(`add_child`/`get_node`/`walk`/`ancestors`/`children`/`find`)在本文件中**并不存在**。本文件实际提供的是两个模块级纯函数 `entries_by_id` 与 `path_to_entry`,二者即为该目录的“树遍历助手”实现,分支模型完全靠 `parent_id` 指针表达。
+> 说明:任务描述中提到的 `SessionTree` 类及各实例方法(`add_child`/`get_node`/`walk`/`ancestors`/`children`/`find`)在本文件中**并不存在**。本文件实际提供的是两个模块级纯函数 `entries_by_id` 与 `path_to_entry`,二者即为该目录的"树遍历助手"实现,分支模型完全靠 `parent_id` 指针表达。
 
 ---
 
@@ -429,7 +439,7 @@ def entries_from_json_lines(lines: list[str]) -> list[SessionEntry]
 class SessionStorage(Protocol)
 ```
 
-- **作用**:声明“追加式会话存储”的协议接口,任何实现只要提供 `append` 与 `read_all` 即满足。核心层不依赖具体文件系统。
+- **作用**:声明"追加式会话存储"的协议接口,任何实现只要提供 `append` 与 `read_all` 即满足。核心层不依赖具体文件系统。
 - **方法声明**:
   - `async def append(self, entry: SessionEntry) -> None`:追加一个条目(抽象,无实现)。
   - `async def read_all(self) -> list[SessionEntry]`:按存储顺序读回全部条目(抽象,无实现)。
@@ -462,7 +472,7 @@ async def append(self, entry: SessionEntry) -> None
   2. 以 `"a"`(追加)模式、`utf-8` 编码打开文件。
   3. `file.write(entry_to_json_line(entry))`:经 `jsonl.entry_to_json_line` 写出一行。
 
-> 说明:此处为普通追加写,并非“原子写/临时文件 rename”形式。实际原子性依赖追加模式本身(每行独立、追加不截断),而非先写临时文件再 rename。任务描述中“原子写”在本实现中体现为“以追加模式打开、不重写已有内容、按行独立写入”,并非 atomic rename 机制。
+> 说明:此处为普通追加写,并非"原子写/临时文件 rename"形式。实际原子性依赖追加模式本身(每行独立、追加不截断),而非先写临时文件再 rename。任务描述中"原子写"在本实现中体现为"以追加模式打开、不重写已有内容、按行独立写入",并非 atomic rename 机制。
 
 #### read_all
 
@@ -479,7 +489,7 @@ async def read_all(self) -> list[SessionEntry]
 
 ## 文件:session/memory.py
 
-本文件是把“追加式条目列表”重放(replay)为“当前内存会话状态”的核心。它支持三种重放模式:线性全量重放、从指定 `leaf_id` 沿树路径重放(分支切换)、以及显式 `None` 表示空路径。`SessionState` 是不可变( frozen + slots )快照。
+本文件是把"追加式条目列表"重放(replay)为"当前内存会话状态"的核心。它支持三种重放模式:线性全量重放、从指定 `leaf_id` 沿树路径重放(分支切换)、以及显式 `None` 表示空路径。`SessionState` 是不可变( frozen + slots )快照。
 
 ### SessionState
 
@@ -522,7 +532,7 @@ def from_entries(
   3. 计算 `replay_entries`:
      - 若 `replay_all`:用全量 `entries`(线性重放,保持存储顺序)。
      - 否则若 `resolved_leaf_id is not None`:调用 `path_to_entry(entries, resolved_leaf_id)` 得到该叶到根的路径(分支重放)。
-     - 否则(`leaf_id` 显式为 `None`):用空列表 `[]`(表示“第一个根条目之前”的空状态)。
+     - 否则(`leaf_id` 显式为 `None`):用空列表 `[]`(表示"第一个根条目之前"的空状态)。
 - **重放遍历**:初始化 `message_rows`(携带源 `entry_id` 的 `(id, AgentMessage)` 列表)、`model`、`thinking_level`、`label`、`active_leaf_id`(初值=`resolved_leaf_id`)、`session_info`、`custom_entries`、`compaction_entries`。对每个 `entry` 按 `entry.type` 用 `match` 分派:
   - `"message"`:`message_rows.append((entry.id, entry.message))`。
   - `"model_change"`:`model = entry.model`。
@@ -549,7 +559,7 @@ def _apply_compaction(
   1. `replaced_ids = set(entry.replaces_entry_ids)`,`inserted_summary = False`。
   2. 遍历 `message_rows`:
      - 若 `entry_id not in replaced_ids`:原样 `retained.append`。
-     - 若属于被替换集合:不保留原消息;且当尚未插入摘要时,插入 `(entry.id, UserMessage(_format_compaction_summary(entry.summary)))`,置 `inserted_summary = True`。这样摘要只在该分支首次遇到被替换消息时插入一次,保留“折叠点”语义。
+     - 若属于被替换集合:不保留原消息;且当尚未插入摘要时,插入 `(entry.id, UserMessage(_format_compaction_summary(entry.summary)))`,置 `inserted_summary = True`。这样摘要只在该分支首次遇到被替换消息时插入一次,保留"折叠点"语义。
   3. 若遍历完仍 `not inserted_summary`(即没有任何被替换消息存在于当前 rows,例如摘要出现在被替换消息之前或替换集合为空),则在末尾补插一条摘要消息。
   4. 返回新的 `retained` 列表。
 
@@ -597,9 +607,9 @@ __all__ = [ ... ]
 
 ## 串联:TUI 分支功能(`TreePickerScreen`)的底层机制
 
-1. **树结构**:每个 `SessionEntry` 通过 `parent_id` 指向父节点,组成一棵支持多分支的会话树(分支 = 同一父节点下出现多个子节点)。`tree.py` 的 `entries_by_id` + `path_to_entry` 提供“从任意叶子回溯根”的纯函数遍历,无需显式树对象。
+1. **树结构**:每个 `SessionEntry` 通过 `parent_id` 指向父节点,组成一棵支持多分支的会话树(分支 = 同一父节点下出现多个子节点)。`tree.py` 的 `entries_by_id` + `path_to_entry` 提供"从任意叶子回溯根"的纯函数遍历,无需显式树对象。
 
-2. **分支切换 / 任意节点重放**:`memory.py` 的 `SessionState.from_entries(entries, leaf_id=...)` 借 `path_to_entry` 取某分支根→叶路径,再按 `type` 分派重放出该分支对应的 `messages`/`model`/`thinking_level` 等。这就是 TUI 中 `TreePickerScreen` 选择某节点/分支后“跳到该历史点继续”的内存状态来源——选谁,就重放谁的路径。
+2. **分支切换 / 任意节点重放**:`memory.py` 的 `SessionState.from_entries(entries, leaf_id=...)` 借 `path_to_entry` 取某分支根→叶路径,再按 `type` 分派重放出该分支对应的 `messages`/`model`/`thinking_level` 等。这就是 TUI 中 `TreePickerScreen` 选择某节点/分支后"跳到该历史点继续"的内存状态来源——选谁,就重放谁的路径。
 
 3. **JSONL 持久化**:`storage.py` 的 `JsonlSessionStorage` 以追加模式把每条 `SessionEntry` 经 `jsonl.py` 写成一行带 `type` 判别字段的 JSONL;`read_all` 再用 `entries_from_json_lines` + 判别联合 `SessionEntry` 还原为强类型条目列表,为上面的重放提供输入。
 

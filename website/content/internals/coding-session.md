@@ -7,7 +7,9 @@ code_files:
 
 ## 公开数据类（`CodingSession` 之前的类型）
 
-- **`ModelChoice`**（frozen）：`provider_name` + `model`，一次可选的"provider/模型"组合。
+**CodingSession** 是整个 coding-agent 环境层的集成点，可以把它理解为"一个会话的总管家"。它把 agent 核心（AgentHarness，负责与模型对话的循环）包裹起来，在外围提供持久化、模型切换、上下文压缩、命令处理等能力。简单说：AgentHarness 是大脑，CodingSession 是整个工作环境。在了解 CodingSession 之前，先看看它依赖的几个基础数据类型：
+
+- **`ModelChoice`**（frozen）：`provider_name` + `model`，表示一个可选的"provider/模型"组合。Provider（提供商）是提供 LLM 服务的平台（如 OpenAI、Anthropic），每个 provider 下有多个可选模型。
 - **`TerminalCommandResult`**（frozen）：输入栏终端命令的结果（命令/输出/exit_code/ok/
   `added_to_context`）。
 - **`SessionTreeChoice`**（frozen）：树选择器里一个可分支的节点（`entry_id`/`label`/
@@ -34,7 +36,7 @@ code_files:
   1. 跑扩展 `input_hooks`（可被扩展拦截/改写/短路）；
   2. `expand_prompt_text`（展开 `/skill:` 与 prompt 模板）；
   3. 若 harness 正在运行：按 `streaming_behavior` 决定 `steer`/`follow_up` 或报错；
-  4. 可能 `_try_auto_compact`（prompt 前）；
+  4. 可能 `_try_auto_compact`（prompt 后）；
   5. 驱动 `harness.prompt(...)`，对每个 `MessageEndEvent` 调 `_persist_messages_since`
      落盘，对每个用户消息尝试自动命名；对 `ToolExecutionEndEvent` 失效上下文缓存；
   6. 遇到不可恢复**上下文溢出** `ErrorEvent` → `_try_overflow_compact` + `continue_()`
@@ -43,13 +45,12 @@ code_files:
 - **`continue_()`**：恢复后继续跑 harness，同样在每个 `MessageEndEvent` 落盘。
 
 **为什么 `prompt` / `continue_` 是这样的结构**：Tau 官方设计原则 "Sessions are durable
-and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt` 在每个 `MessageEndEvent`
+and inspectable"（会话持久且可检视）要求每一步交互都可落盘、可回放。因此 `prompt` 在每个 `MessageEndEvent`
 处即调 `_persist_messages_since` 落盘，而不是等整个回合结束——即使进程中途崩溃，已完成
-的消息也已写入 append-only JSONL。`is_running` 时拒绝新 prompt（要求显式 `steer`/
+的消息也已写入 append-only JSONL（一种只追加的 JSON 日志格式）。`is_running` 时拒绝新 prompt（要求显式 `steer`/
 `follow_up`）保证同一时刻只有一条活跃的 harness 驱动链，避免并发写树导致父指针错乱。
-溢出后 `_try_overflow_compact` + `continue_()` 自动重试一次,是把"上下文超限"从不可恢复
-错误降级为可自愈事件。此结构与 Rust `tau-rs` 的 `session.rs` 一一对应:`/new` 的 guard、
-每次消息后写 `LeafEntry`、溢出压缩后重试。
+溢出后 `_try_overflow_compact` + `continue_()` 自动重试一次，是把"上下文超限"从不可恢复
+错误降级为可自愈事件——就像程序遇到了内存不足，自动清理缓存后重试，而不是直接报错退出。
 
 ---
 
@@ -70,6 +71,8 @@ and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt`
 ---
 
 ## 模型 / 思考级别切换
+
+**思考预算**（thinking budget）是 Claude 系列模型特有的一种机制：它允许模型在回答之前先进行一段内部推理（类似人类的"想一想"），然后才输出最终答案。思考预算越高，模型花在推理上的 token 越多，回答质量通常越好，但成本也更高。Tau 通过 `ThinkingLevel`（如 off/minimal/low/medium/high/xhigh）来控制这个预算的大小。
 
 - **`set_model(model)`**：校验后改 `harness.config.model`，同步思考级别、刷新运行时
   provider、持久化默认选择、`touch_session`。
@@ -92,10 +95,10 @@ and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt`
   标签的 `SessionTreeChoice` 列表（标记 active / 是否 tool call）。
 - **`branch_to_entry(entry_id, *, summarize, custom_instructions, replace_instructions)`**：
   把活跃叶指针移到历史某个节点，**保留既有历史**（不删除）。
-  - **为什么分支只移动叶指针、不删除节点**：会话存储是 append-only JSONL,遵循 Tau 原则
-    "Sessions are durable and inspectable"。分支不是"回退删除",而是在树上追加一个新的
-    `LeafEntry` 把活跃 tip 指向历史节点;被放弃的分支仍完整保留在文件里,可再次导航或审查。
-    这使得任意一次分支都是可逆、可追溯的操作,而非破坏性编辑。
+  - **为什么分支只移动叶指针、不删除节点**：会话存储是 append-only JSONL，遵循 Tau 原则
+    "Sessions are durable and inspectable"。分支不是"回退删除"，而是在树上追加一个新的
+    `LeafEntry` 把活跃 tip 指向历史节点；被放弃的分支仍完整保留在文件里，可再次导航或审查。
+    这使得任意一次分支都是可逆、可追溯的操作，而非破坏性编辑——就像 Git 的分支一样，创建新分支不会删除旧的。
   - 若 `summarize` 且被放弃的消息非空 → 用 `_summarize_branch_messages` 生成
     `BranchSummaryEntry`（回溯分支摘要）作为新父节点；
   - 若该节点是 user `MessageEntry` → 把叶指到其父，并把原消息内容作为 `input_prefill`
@@ -106,6 +109,8 @@ and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt`
 ---
 
 ## 压缩（compaction）
+
+当对话进行到很长时，上下文窗口（context window）——也就是模型的短期记忆容量——会接近上限。**压缩**（compaction）就是把早期对话总结成一段精炼摘要，从而腾出空间继续工作。这就像你把一本厚厚的会议记录压缩成一页摘要：关键信息保留了，但占用的空间大大缩小。
 
 - **`compact(instructions)`**：手动压缩——`_manual_compaction_plan()`（压缩全部活跃
   上下文）→ `_generate_compaction_summary` → `_append_compaction`。
@@ -120,11 +125,11 @@ and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt`
   （`replaces_entry_ids` 记被替换节点）+ `LeafEntry`，刷新 `_state`，
   `harness.replace_messages`（重放后旧消息已被摘要替换——见 Part 2c 的
   `_apply_compaction`）。
-  - **为什么压缩追加 `CompactionEntry` 而不改写旧记录**：压缩若原地删改被摘要的消息,
-    历史就不再可回放,违反 "Sessions are durable and inspectable"。Tau 的做法是追加一个
-    `CompactionEntry`,用 `replaces_entry_ids` 声明"重放时这些节点由本摘要替代"。原始消息
-    仍留在 JSONL 中,压缩只影响重放视图(`harness.replace_messages` 看到的是摘要),而底层
-    记录完整无损——既节省了上下文窗口,又保留了完整审计与分支能力。
+  - **为什么压缩追加 `CompactionEntry` 而不改写旧记录**：压缩若原地删改被摘要的消息，
+    历史就不再可回放，违反 "Sessions are durable and inspectable"。Tau 的做法是追加一个
+    `CompactionEntry`，用 `replaces_entry_ids` 声明"重放时这些节点由本摘要替代"。原始消息
+    仍留在 JSONL 中，压缩只影响重放视图（`harness.replace_messages` 看到的是摘要），而底层
+    记录完整无损——既节省了上下文窗口，又保留了完整审计与分支能力。这就像图书馆的摘要卡片：原文还在书架上，但摘要让你不用翻完整本书就能快速了解内容。
 - **`_try_auto_compact(context, phase)`** / **`_maybe_auto_compact`**：当
   `context_token_estimate > auto_compact_token_threshold` 时自动触发
   `_recent_preserving_compaction_plan` 压缩（包了异常保护，压缩失败也不丢 turn）。
@@ -140,13 +145,13 @@ and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt`
 - **`new_session()`**：让 `session_manager.prepare_session` 准备一个新（未索引）会话，
   `load` 之，`_adopt_replacement(reason="new")`。`index_on_first_persist=True`。
 - **`_adopt_replacement(replacement, *, reason)`**：把外部持有的 `self` 的内部状态整体
-  替换为 `replacement` 的状态。**为什么 resume/new 用"替换 `self`"而非返回新对象**:调用方
-  （TUI、扩展）持有的是同一个 `CodingSession` 引用,且扩展运行时是长生命周期、跨会话切换
-  共享的;若返回新对象,所有外部引用都需重新接线。改为原地替换 `self` 的字段后重新
-  `bind(self)` 并 `attach_harness_listener(self._harness.subscribe)`,即可让既有引用继续
-  有效。先 `emit_session_shutdown` 再 `emit_session_start`、中间清掉扩展 UI 组件,保证扩展
-  生命周期事件成对触发。这也是 `/new` 拒绝在回合运行时调用的根源:被替换的正是 `self` 上
-  的 harness 实例,运行中替换会破坏正在进行的驱动链。
+  替换为 `replacement` 的状态。**为什么 resume/new 用"替换 `self`"而非返回新对象**：调用方
+  （TUI、扩展）持有的是同一个 `CodingSession` 引用，且扩展运行时是长生命周期、跨会话切换
+  共享的；若返回新对象，所有外部引用都需重新接线。改为原地替换 `self` 的字段后重新
+  `bind(self)` 并 `attach_harness_listener(self._harness.subscribe)`，即可让既有引用继续
+  有效。先 `emit_session_shutdown` 再 `emit_session_start`、中间清掉扩展 UI 组件，保证扩展
+  生命周期事件成对触发。这也是 `/new` 拒绝在回合运行时调用的根源：被替换的正是 `self` 上
+  的 harness 实例，运行中替换会破坏正在进行的驱动链。
 - **`aclose()`**：发 `session_shutdown`，关闭 `_owned_providers`。
 
 ---
@@ -181,14 +186,12 @@ and inspectable" 要求每一步交互都可落盘、可回放。因此 `prompt`
 
 ## 本部分小结
 
-`CodingSession` 是 coding-agent 环境层的集成点(对照 Tau README 的 `CodingSession =
-coding-agent environment`——它属于应用层,而非 `AgentHarness` 那个可移植内核)：
+CodingSession 是 coding-agent 环境层的集成点，对照 Tau README 的 `CodingSession = coding-agent environment`——它属于应用层，而非 `AgentHarness` 那个可移植内核：
 
-- 包住 `AgentHarness`，在每次 `MessageEndEvent` 把 transcript 落盘成"消息+叶指针"树；
-- 模型/思考级别/分支/压缩，都通过写对应 `SessionEntry` + `LeafEntry` 变成可持久化的
-  状态变更；
-- 自动/溢出压缩用 Part 3a 的估算与总结提示；
-- `resume`/`new_session` 通过"load + adopt"切换活跃状态，同时保全扩展运行时。
+- 包住 `AgentHarness`，在每次 `MessageEndEvent` 把 transcript 落盘成"消息+叶指针"树——确保每一步交互都可持久化、可回放；
+- 模型/思考级别/分支/压缩，都通过写对应 `SessionEntry` + `LeafEntry` 变成可持久化的状态变更——所有操作都是 append-only（只追加不删除），保证历史完整性；
+- 自动/溢出压缩用 Part 3a 的估算与总结提示——当上下文接近窗口上限时自动触发，避免对话"撑爆"模型的短期记忆；
+- `resume`/`new_session` 通过"load + adopt"切换活跃状态，同时保全扩展运行时——切换会话时不需要重建整个运行环境。
 
 下一任务（Part 3c）看支撑它的旁支：`commands.py`（命令注册表）、`session_manager.py`
 （多会话索引）、`provider_config.py`/`provider_runtime.py`/`provider_catalog.py`
@@ -202,7 +205,7 @@ coding-agent environment`——它属于应用层,而非 `AgentHarness` 那个�
 
 # session.py 逐方法剖析
 
-本文件是 Tau 持久化编码会话环境的核心封装,建立在 `AgentHarness`(可复用 agent 大脑)之上。按 Tau 的分层原则(对照 README `CodingSession = coding-agent environment`),可移植内核 `AgentHarness` 只负责与模型对话的循环,不感知磁盘、CLI 或资源路径;`CodingSession` 则拥有 harness 之外的全部"环境":持久化的会话条目、默认编码工具、命令接缝、扩展运行时,以及自动压缩、分支、命名、导出等围绕会话生命周期的逻辑。这一分工正是官方原则 "The core stays portable" 与 "Small layers beat magic" 的落地。
+本文件是 Tau 持久化编码会话环境的核心封装，建立在 `AgentHarness`（可复用 agent 大脑）之上。按 Tau 的分层原则（对照 README `CodingSession = coding-agent environment`），可移植内核 `AgentHarness` 只负责与模型对话的循环，不感知磁盘、CLI 或资源路径；`CodingSession` 则拥有 harness 之外的全部"环境"：持久化的会话条目、默认编码工具、命令接缝、扩展运行时，以及自动压缩、分支、命名、导出等围绕会话生命周期的逻辑。这种分工正是官方原则 "The core stays portable"（核心保持可移植）与 "Small layers beat magic"（小分层胜过魔法）的落地——可移植的部分保持纯净，环境特定的连线集中在一个命名清晰的边界中。
 
 ---
 
@@ -268,7 +271,12 @@ coding-agent environment`——它属于应用层,而非 `AgentHarness` 那个�
 
 ### CodingSessionConfig
 
-持久化编码会话的配置数据类,字段含义如下:
+CodingSessionConfig 是构造一个 CodingSession 所需的全部配置。它的字段很多，但核心可以归纳为几类：
+- **provider 相关**：`provider`/`model`/`provider_name`/`provider_settings`——决定用哪个 AI 服务、哪个模型；
+- **存储相关**：`storage`/`session_id`/`session_manager`——决定会话记录保存在哪里、如何索引；
+- **上下文相关**：`system`/`custom_system_prompt`/`append_system_prompt`/`context_files`——决定 system prompt 的内容；
+- **工具与资源**：`tools`/`resource_paths`/`skills_enabled`——决定模型能用哪些工具、加载哪些技能；
+- **行为控制**：`auto_compact_token_threshold`/`auto_compact_enabled`/`thinking_level`——决定何时自动压缩、使用什么思考预算。
 
 - `provider: ModelProvider` —— 当前模型 provider 实例。
 - `model: str` —— 当前模型名。
@@ -537,7 +545,7 @@ def context_files(self) -> tuple[ProjectContextFile, ...]
 def context_token_estimate(self) -> int
 ```
 
-返回 `self.context_usage.total_tokens`(活动 provider 上下文的粗略 token 估算)。
+当前上下文的粗略 token 估算值——也就是到目前为止，这次对话消耗了多少 token。这个值通过 `context_window.estimate_context_usage` 计算（带缓存，工具执行或消息事件后失效），用于判断是否需要触发自动压缩。当这个值超过 `auto_compact_token_threshold` 时，系统会自动压缩早期对话，腾出空间。
 
 ### `context_usage`
 
@@ -564,7 +572,7 @@ def system_prompt(self) -> str
 def auto_compact_token_threshold(self) -> int | None
 ```
 
-有效自动压缩阈值。禁用时返回 `None`;显式设置则用之;否则用 `auto_compaction_threshold_for_context_window(self.context_window_tokens)` 推导。
+自动压缩的触发阈值——当 `context_token_estimate` 超过这个值时，系统会自动压缩早期对话。禁用时返回 `None`；显式设置则用之；否则用 `auto_compaction_threshold_for_context_window(self.context_window_tokens)` 推导（默认为上下文窗口减去 16K 保留量）。这个阈值确保对话不会"撑爆"模型的短期记忆。
 
 ### `context_window_tokens`
 
@@ -573,7 +581,7 @@ def auto_compact_token_threshold(self) -> int | None
 def context_window_tokens(self) -> int
 ```
 
-当前模型的上下文窗口大小。无 provider 配置时取 `DEFAULT_CONTEXT_WINDOW_TOKENS`,否则 `provider.context_windows.get(self.model, 默认值)`。
+当前模型的上下文窗口大小——也就是模型一次对话能处理的最大 token 数量。不同模型的窗口大小差异很大（从几千到几十万 token 不等）。无 provider 配置时取 `DEFAULT_CONTEXT_WINDOW_TOKENS`（128K），否则 `provider.context_windows.get(self.model, 默认值)`。这个值用于计算自动压缩的触发阈值。
 
 ### `command_registry`
 

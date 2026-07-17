@@ -7,8 +7,7 @@ code_files:
 
 ## `tau_coding/session_manager.py` — the session index
 
-`CodingSession`（第 3b 部分）拥有*单个*对话文件。`SessionManager`（会话管理器）则
-拥有*所有会话的目录*，使 CLI 能够在多次运行之间列出、恢复与创建会话。
+`CodingSession`（第 3b 部分）拥有*单个*对话文件——记录一次完整对话的所有消息。`SessionManager`（会话管理器）则拥有*所有会话的目录*，使 CLI 能够在多次运行之间列出、恢复与创建会话。可以把它类比为一个笔记本的"索引页"：每个 CodingSession 是一个笔记本，SessionManager 则记录了"有哪些笔记本、每个讲什么、上次翻到哪一页"。
 
 ### `SessionRecordModel`（Pydantic）
 
@@ -107,10 +106,11 @@ def touch_session(self, session_id: str, *, model=None, provider_name=None, titl
 > **为什么有两个索引位置，以及为什么读取时合并它们。** 全局的
 > `index.jsonl` 是遗留布局；新会话则写入每项目索引。与其急切地迁移旧文件，
 > 管理器选择把两者都读入，再由 `_deduplicate_records` 消解任何重叠，这样已有的
-> 安装无需任何迁移步骤就能继续解析它的旧会话。这正体现了 Tau 的 “Sessions are
-> durable and inspectable”（会话可持久且可检视）原则：会话索引是朴素、面向追加的
+> 安装无需任何迁移步骤就能继续解析它的旧会话。这正体现了 Tau 的 "Sessions are
+> durable and inspectable"（会话持久且可检视）原则：会话索引是朴素、面向追加的
 > JSONL，跨版本都保持可读，而前向兼容性由 `ConfigDict(extra="ignore")` 丢弃未知
-> 字段来保障，而非重写文件。
+> 字段来保障，而非重写文件。这种设计的好处是：升级 Tau 版本时，你之前的会话记录
+> 不会丢失或损坏——新字段会被忽略，旧字段照常解析。
 
 ---
 

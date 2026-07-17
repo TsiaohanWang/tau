@@ -5,22 +5,21 @@ code_files:
   - tau_ai/provider.py
   - tau_ai/events.py
   - tau_ai/retry.py
+  - tau_ai/http.py
+  - tau_ai/http_errors.py
 ---
+
+本页介绍 `tau_ai` 层最底层的四个模块：它们定义了"provider（模型服务商，如 OpenAI、Anthropic）应该长什么样"、"流式响应（streaming，即边生成边返回而非等全部完成再返回）长什么样"、"遇到临时故障怎么重试"、以及"HTTP 请求怎么做"。这些是所有 provider 实现共享的基础设施。
 
 ## `tau_ai/provider.py` — 全栈依赖的两个 Protocol
 
-这是整个代码库最关键的一层契约。两个 `typing.Protocol` 类定义了下游所有代码
-使用的接口。它**从 `tau_agent` 反向 import** 了消息与工具类型——这是栈中
-唯一一处"下层 import 上层"的地方。其必要性的在于：provider 必须把"消息"和"工具"当作
-纯数据来接收，而这两类数据的权威定义在 `tau_agent` 中；让 `provider.py` 依赖
-agent 层的类型（而非自行定义私有格式），可保证转换只发生在 provider 内部，
-避免栈内出现两套并行的消息/工具表示。
+这个文件定义了整个代码库最关键的一层契约：两个 `typing.Protocol` 类。Protocol（协议）是 Python 用"结构化子类型"来定义接口的方式——任何拥有对应方法的对象都自动满足协议，不需要显式继承。用 Protocol 而不是 ABC（抽象基类），好处是调用方可以传入任何"长得像"的对象，灵活性更高。
 
-- **`CancellationToken`**（Protocol）：最小取消句柄，只有一个方法
-  `is_cancelled() -> bool`。provider 与 agent loop 会轮询它（或基于它构造更
-  强的信号）来在中途中止流。之所以用 Protocol 而非具体类，是为了让调用方可以
-  传入任何实现了该方法的对象（agent 层会把它包成更丰富的信号）。
-- **`ModelProvider`**（Protocol）：provider 的统一接口，唯一方法是
+这两个 Protocol 定义了下游所有代码使用的接口。它**从 `tau_agent` 反向 import** 了消息与工具类型——这是栈中唯一一处"下层 import 上层"的地方。这种设计看起来"反常"，但原因在于：provider 必须把"消息"和"工具"当作纯数据来接收，而这两类数据的权威定义在 `tau_agent` 中；让 `provider.py` 依赖 agent 层的类型（而非自行定义私有格式），可保证转换只发生在 provider 内部，避免栈内出现两套并行的消息/工具表示。
+
+- **`CancellationToken`**（Protocol）：一个最小化的取消句柄，只有一个方法
+  `is_cancelled() -> bool`。当用户按下 Ctrl-C 或会话超时时，上层会通过这个对象通知 provider 停止生成。之所以用 Protocol 而非具体类，是为了让调用方可以传入任何实现了该方法的对象（agent 层会把它包成更丰富的信号），而 provider 不需要关心信号的来源。
+- **`ModelProvider`**（Protocol）：provider（模型服务商）的统一接口，唯一方法是
 
   ```python
   def stream_response(
@@ -35,89 +34,64 @@ agent 层的类型（而非自行定义私有格式），可保证转换只发�
       ...
   ```
 
-  给定模型名、系统提示、消息列表、工具清单、取消令牌，产出 `ProviderEvent`
-  流。`signal` 默认为 `None`（向后兼容），让调用方可选地注入取消能力。
+  给定模型名、系统提示、消息列表（对话历史）、工具清单（模型可以调用的外部函数）、取消令牌，以异步迭代器的形式产出 `ProviderEvent` 流。`signal` 默认为 `None`，让调用方可选地注入取消能力。所有具体 provider（OpenAI、Anthropic、Google 等）都只需实现这一个方法；上层 agent 循环只依赖这个接口，完全不感知背后用的是哪家模型。
 
 ---
 
 ## `tau_ai/events.py` — provider 无关的"事件词汇表"
 
-来自任何 provider 的每一个流式 token、工具调用、错误，都会被归一化成下列
-`pydantic.BaseModel` 子类之一。每个子类都用 `Literal[...]` 固定了 `type` 字段，
-并设置 `model_config = ConfigDict(extra="forbid")`（严格禁止多余字段，保证线上
-格式稳定）。
+这个文件定义了一套统一的"事件类型"，是 `ModelProvider.stream_response` 的产出格式。在 LLM 应用中，用户和模型之间的每一次问答来回叫做一个 **turn（轮次）**，而模型每次回应产生的文本、思考过程、工具调用请求等，都会被拆成一个个小的"事件"。使用事件（而非直接返回一整个字符串）的原因是：LLM 的输出是逐步生成的，事件机制让上层可以在文本刚产生时就实时渲染给用户，而不必等全部完成；同时，事件还能携带错误、重试进度等元信息。
 
-- **`ProviderResponseStartEvent`**（`type="response_start"`）：一次响应开始，
-  带 `model`。
-- **`ProviderRetryEvent`**（`type="retry"`）：一次瞬态错误后准备重试，带
-  `attempt`、`max_attempts`、`delay_seconds`、`message`、`data`。
-- **`ProviderTextDeltaEvent`**（`type="text_delta"`）：一小段助手文本
-  （`delta`，是增量，不是整段回复）。
-- **`ProviderThinkingDeltaEvent`**（`type="thinking_delta"`）：一小段推理/
-  思考内容，单独成类，方便 UI 选择显示或隐藏。
-- **`ProviderToolCallEvent`**（`type="tool_call"`）：一个**完整**的工具调用，
-  携带 `tool_call: ToolCall`（已解析的 `tau_agent.tools.ToolCall`）。
-- **`ProviderResponseEndEvent`**（`type="response_end"`）：响应结束，携带
-  完整的 `message: AssistantMessage` 与可选 `finish_reason`。注意这里把整段
-  助手消息打包传出，与过程中的 delta 互补。
-- **`ProviderErrorEvent`**（`type="error"`）：终态错误，带 `message` 与 `data`。
-- **`ProviderEvent`**（类型别名）：上述 7 个类的联合类型，是
-  `stream_response` 的产出元素类型。
+来自任何 provider 的每一个流式 token（LLM 处理文本的最小单位，大约 3/4 个英文单词或 1-2 个汉字）、工具调用、错误，都会被归一化成下列 `pydantic.BaseModel` 子类之一。每个子类都用 `Literal[...]` 固定了 `type` 字段，并设置 `model_config = ConfigDict(extra="forbid")`（严格禁止多余字段，保证线上格式稳定，版本升级时不会因多出字段而静默忽略）。
 
-> **为什么这样设计**：消费者（agent loop）永远只看到这 7 种事件类型。provider 之间的
-> 差异（chat/completions vs `/v1/responses`、SSE 形态、工具调用编码方式）全部被吸收
-> 在这一层之下。这正是 Tau 的设计原则之一——**"Events are the contract"**：agent 循环
-> 只与事件流签订契约，而不与任何具体模型 SDK 耦合；新增 provider 时只需在其内部把原生
-> 响应归一化为这 7 种事件，上层逻辑无需改动。事件词汇表因此成为栈中最稳定的边界，
-> 也是 Pi 架构中 "AgentHarness 独立于 provider" 的具体落点。
+- **`ProviderResponseStartEvent`**（`type="response_start"`）：一次响应开始，带模型名。
+- **`ProviderRetryEvent`**（`type="retry"`）：遇到临时性故障（如网络抖动、速率限制）后准备重试，带当前尝试次数、最大次数、等待秒数等信息，方便 UI 显示"正在重试…"。
+- **`ProviderTextDeltaEvent`**（`type="text_delta"`）：一小段助手文本（`delta` 是增量，不是整段回复）。
+- **`ProviderThinkingDeltaEvent`**（`type="thinking_delta"`）：一小段推理/思考内容（thinking，即模型在回答前的内部推理过程，部分模型如 o1、Claude 支持输出思考过程）。单独成类，方便 UI 选择显示或隐藏思考内容。
+- **`ProviderToolCallEvent`**（`type="tool_call"`）：一个**完整**的工具调用（模型要求执行某个外部函数，如查询数据库、执行代码等），携带已解析的 `ToolCall` 对象。
+- **`ProviderResponseEndEvent`**（`type="response_end"`）：响应结束，携带完整的助手消息和结束原因（如 `"stop"` 正常结束、`"tool_calls"` 需要执行工具、`"length"` 达到长度限制）。这里把整段助手消息打包传出，与过程中的增量事件互补。
+- **`ProviderErrorEvent`**（`type="error"`）：终态错误，无法重试，带错误描述与结构化数据。
+- **`ProviderEvent`**（类型别名）：上述 7 个类的联合类型，是 `stream_response` 的产出元素类型。
+
+> **为什么这样设计**：消费者（agent loop，即 agent 的主循环）永远只看到这 7 种事件类型。不同 provider 之间的差异（OpenAI 的 `/chat/completions` vs `/v1/responses` 端点、SSE 格式、工具调用编码方式等）全部被吸收在这一层之下。这正是 Tau 的设计原则之一——**"Events are the contract"（事件即契约）**：agent 循环只与事件流签订契约，而不与任何具体模型 SDK 耦合；新增 provider 时只需在其内部把原生响应归一化为这 7 种事件，上层逻辑无需改动。事件词汇表因此成为栈中最稳定的边界。
 
 ---
 
 ## `tau_ai/retry.py` — 瞬态失败的重试策略
 
-定义重试循环的通用规则，被每个 provider 复用，保证退避行为一致。
+LLM 服务偶尔会过载或遇到速率限制（rate limit），直接报错对用户来说体验太差。这个文件定义了重试的通用规则：遇到临时性错误（如 HTTP 429/5xx）时，自动等待一段时间再重新发送请求。等待时间采用**指数退避**（exponential backoff）策略——每次重试的等待时间翻倍（0.25s → 0.5s → 1s…），避免频繁重试给已经过载的服务造成更大压力。所有 provider 复用这套逻辑，保证全栈的重试行为一致。
 
-- 常量：`RETRY_POLL_SECONDS = 0.05`（取消轮询粒度）、
+- 常量：`RETRY_POLL_SECONDS = 0.05`（取消检查粒度）、
   `RETRY_BASE_DELAY_SECONDS = 0.25`（指数退避基数）。
-- **`retry_delay_seconds(attempt, *, max_delay_seconds)`**：指数退避并封顶，
-  返回第 `attempt` 次之后的等待秒数。实际算法是先把基数封顶到 `max_delay`——
-  `base_delay = min(RETRY_BASE_DELAY_SECONDS, max_delay_seconds)`，再返回
-  `min(max_delay_seconds, base_delay * 2**attempt)`。因此当 `max_delay_seconds >= 0.25`
-  时等价于 `min(max_delay, 0.25 * 2**attempt)`；当 `max_delay_seconds < 0.25` 时基数
-  被压到 `max_delay` 本身，第一次退避即封顶。若 `max_delay <= 0` 直接返回 `0.0`。
-- **`provider_retry_event(*, attempt, max_retries, delay_seconds, reason, data)`**：
-  构造一个 `ProviderRetryEvent`，把"第几次/共几次"换算成人类可读文案
-  （注意 `next_attempt = attempt + 2`，`max_attempts = max_retries + 1`）。
-- **`wait_for_retry(delay_seconds, *, signal)`**：退避睡眠，但用轮询方式分段
-   睡眠，**允许在退避中途被 `signal.is_cancelled()` 打断**并返回 `False`（表示
-   被取消）。这是取消能力真正生效的地方——不是一次性 `sleep`，而是可被轮询中止，
-   因此用户在退避等待期间按下 Ctrl-C 能立即获得响应，而非卡在最长延迟上。
+- **`retry_delay_seconds(attempt, *, max_delay_seconds)`**：根据第几次尝试计算等待时间，用 `max_delay_seconds` 封顶。实际算法是先取 `base_delay = min(0.25, max_delay)`，再返回 `min(max_delay, base_delay * 2**attempt)`。例如第 2 次重试（attempt=1）等待 0.5s，第 3 次（attempt=2）等待 1s，但不超过上限。
+- **`provider_retry_event(*, attempt, max_retries, delay_seconds, reason, data)`**：构造一个 `ProviderRetryEvent`，把重试进度转换成人类可读文案（如 "Retrying provider request 2/4 after rate limit in 0.5s."）。
+- **`wait_for_retry(delay_seconds, *, signal)`**：退避等待，但不是一次性 `sleep`，而是分成每 0.05 秒一小步的轮询。**这使得退避中途可以被 `signal.is_cancelled()` 打断**——用户在等待期间按下 Ctrl-C 能立即响应，而非卡在最长延迟上。这是取消能力真正生效的地方。
 
 ---
 
 ## `tau_ai/http.py` — 共享的 HTTP 客户端助手
 
-把所有网络基建集中到一处，让每个 provider 文件保持短小。
+把所有网络基建集中到一处，让每个 provider 文件保持短小。这个模块处理了一个实际问题：很多网络环境通过代理（proxy）访问外网，而代理 URL 中的 `socks://` 格式 httpx 不认识，需要统一转换成 `socks5://`。
 
 - `_PROXY_ENV_VARS`：列出 6 个代理相关环境变量（大小写各一）。
 - **`normalize_proxy_url(proxy_url)`**：把 httpx 不认的通用 `socks://` 规范成
   `socks5://`，其余原样返回。
 - **`normalized_proxy_environment()`**：上下文管理器，临时把 6 个代理环境变量
-  规范化为 httpx 可识别的形式，退出时还原（仅当确有改动才还原）。
+  规范化为 httpx 可识别的形式，退出时还原（仅当确有改动才还原），保证对进程环境无副作用。
 - **`create_async_client(**kwargs)`**：在代理规范化环境下创建
-  `httpx.AsyncClient`。
+  `httpx.AsyncClient`，供各 provider 发起异步流式 HTTP 请求。
 - **`get_json(url, *, timeout, follow_redirects)`**：同步 `httpx.get` 取 JSON
-  对象，要求返回是 `dict`，否则抛 `ValueError`。
+  对象，要求返回是 `dict`，否则抛 `ValueError`。常用于拉取模型清单等轻量元数据。
 
 ---
 
 ## 逐方法深度剖析（provider / events / retry / http）
 
-> 以下为 `tau_ai` 协议层与共享助手各定义的逐方法展开。
+> 以下是 `tau_ai` 协议层与共享助手各定义的逐方法展开。如果你已经理解了上面的概述，可以跳过本节；如果你需要知道每个函数的具体实现细节，请继续阅读。
 
 ## 文件:provider.py
 
-本文件定义了 Tau 模型适配层（`tau_ai`）与上层 `tau_agent` 之间的**依赖边界协议（Protocol）**。它不实现任何具体逻辑，而是用 `typing.Protocol` 描述“一个模型 provider 应当长什么样”，让 `tau_agent` 可以完全不感知具体的 OpenAI / Anthropic / 本地模型实现，只依赖这个抽象接口。
+本文件定义了 Tau 模型适配层（`tau_ai`）与上层 `tau_agent` 之间的**依赖边界协议（Protocol）**。它不实现任何具体逻辑，而是用 `typing.Protocol` 描述“一个模型 provider（模型服务商）应当长什么样”，让 `tau_agent` 可以完全不感知具体的 OpenAI / Anthropic / 本地模型实现，只依赖这个抽象接口。
 
 ### CancellationToken
 
@@ -177,7 +151,7 @@ agent 层的类型（而非自行定义私有格式），可保证转换只发�
 
 ## 文件:events.py
 
-本文件定义了**provider 无关的流式事件词汇**——即 `provider.py` 中 `ModelProvider.stream_response` 产出的 `ProviderEvent` 联合类型所包含的全部具体事件。所有事件都是 `pydantic.BaseModel` 子类，统一用 `ConfigDict(extra="forbid")` 禁止多余字段，并用 `Literal` 类型的 `type` 字段做判别标签（discriminated union 风格），便于 `tau_agent` 做 `event.type` 的窄化分派与 JSON 序列化。
+本文件定义了 **provider 无关的流式事件词汇**——即 `provider.py` 中 `ModelProvider.stream_response` 产出的 `ProviderEvent` 联合类型所包含的全部具体事件。所有事件都是 `pydantic.BaseModel` 子类（Pydantic 是 Python 中常用于数据校验和序列化的库），统一用 `ConfigDict(extra="forbid")` 禁止多余字段，并用 `Literal` 类型的 `type` 字段做判别标签（discriminated union，即每个事件都有一个固定值的 `type` 字段，方便 `tau_agent` 用 `match event.type:` 精准分派到对应处理逻辑）。
 
 注意：本文件中事件均为 **Pydantic 模型**，而非普通 dataclass；`RetryEvent.data` 在任务描述中记为 `RetryData` dataclass，但**真实源码中并不存在 `RetryData` 类型**——`ProviderRetryEvent.data` 的实际类型是 `dict[str, JSONValue] | None`（见下）。本文严格按源码描述。
 
@@ -295,7 +269,7 @@ agent 层的类型（而非自行定义私有格式），可保证转换只发�
   ```
 
 - 作用：把上述 7 个具体事件联合成一个判别联合类型（PEP 604 语法）。它是 `provider.py` 中 `ModelProvider.stream_response` 的产出元素类型，也是 `tau_agent` 消费事件流时的统一类型。
-- 关键实现/数据流：因为每一个具体事件都有 `type: Literal[...]` 字段，`tau_agent` 可以用 `match event.type:` 做精准的分派（response_start → 初始化 UI；text_delta / thinking_delta → 增量渲染；tool_call → 执行工具；response_end → 收尾；retry → 展示重试；error → 处理错误）。这整套“provider 无关事件词汇”正是 `tau_agent` 与具体模型解耦的关键——它只认 `ProviderEvent`，永不直接解析 OpenAI / Anthropic 私有的响应结构。其设计动机是 Tau 的 **“Small layers beat magic”** 原则：以一组显式、可枚举的事件作为唯一契约，比把各 SDK 的响应对象层层封装更易于推理、测试与替换。
+- 关键实现/数据流：因为每一个具体事件都有 `type: Literal[...]` 字段，`tau_agent` 可以用 `match event.type:` 做精准的分派（response_start 初始化 UI；text_delta / thinking_delta 增量渲染；tool_call 执行工具；response_end 收尾；retry 展示重试进度；error 处理错误）。这整套事件词汇正是 `tau_agent` 与具体模型解耦的关键——它只认 `ProviderEvent`，永不直接解析 OpenAI / Anthropic 私有的响应结构。这种设计的好处是：新增或替换模型后端时，只需在其内部把原生响应转换为这 7 种事件，上层逻辑完全无需改动。
 
 ---
 
@@ -458,11 +432,13 @@ agent 层的类型（而非自行定义私有格式），可保证转换只发�
 
 ## 串联总览：四文件如何共同支撑 `tau_ai` 全栈
 
-1. **`ModelProvider`（provider.py）作为依赖边界**：它是 `tau_agent` 与具体模型实现之间唯一的耦合点。Agent 循环只持有 `ModelProvider` 协议对象，调用 `stream_response(...)` 拿到 `AsyncIterator[ProviderEvent]`，从而彻底不感知 OpenAI / Anthropic / 本地模型等差异。模块内 `CancellationToken` 协议则把“可取消”抽象成最小接口，向下贯穿到 `retry.py` 的退避等待。
+把这四个文件放在一起看，它们构成了一条清晰的分工链：
 
-2. **`events.py` 的 provider 无关事件词汇被 `tau_agent` 消费**：`stream_response` 产出的每一个元素都是 `ProviderEvent` 联合类型之一（7 种 Pydantic 事件，均以 `type: Literal[...]` 做判别标签）。`tau_agent` 用 `match event.type:` 做分派——`response_start` 初始化、`text_delta`/`thinking_delta` 增量渲染、`tool_call` 执行工具、`response_end` 收尾并取 `AssistantMessage`、`retry` 展示重试进度、`error` 处理错误。因为所有字段都是 agent 层类型（`AgentMessage`/`ToolCall`/`AssistantMessage`）或基本类型，`tau_agent` 永不接触 provider 私有响应结构，这正是 Pi 架构中“AgentHarness 独立于 provider”原则的体现。
+1. **`ModelProvider`（provider.py）作为依赖边界**：它是 agent 循环与具体模型实现之间唯一的耦合点。Agent 循环只持有 `ModelProvider` 协议对象，调用 `stream_response(...)` 拿到 `AsyncIterator[ProviderEvent]`，从而完全不用关心背后是 OpenAI、Anthropic 还是本地模型。`CancellationToken` 协议把"可取消"抽象成最小接口，向下贯穿到 `retry.py` 的退避等待。
 
-3. **`retry.py` 与 `http.py` 支撑所有 provider 实现**：任何具体 provider 在 `stream_response` 内部都遵循同一套路——用 `http.py` 的 `create_async_client` 建连（自动规范 `socks://` 等代理环境）发起请求；捕获到瞬时失败（如 429 / 5xx / 连接重置）后，用 `retry.py.retry_delay_seconds` 算指数退避、用 `provider_retry_event` 发出 `ProviderRetryEvent` 让上层可见、用 `wait_for_retry` 做可取消的退避等待，再借 `CancellationToken` 判断是否中断。如此，`retry`/`http` 把“网络请求 + 退避重试 + 取消”的横向关注点从各 provider 抽离，保证全栈行为一致，并使 `ModelProvider` 协议得以被稳定、可观测、可取消地实现。
+2. **`events.py` 的事件词汇被 `tau_agent` 消费**：`stream_response` 产出的每一个元素都是 `ProviderEvent` 联合类型之一（7 种 Pydantic 事件，均以 `type: Literal[...]` 做判别标签）。`tau_agent` 用 `match event.type:` 做分派——`response_start` 初始化 UI、`text_delta`/`thinking_delta` 增量渲染、`tool_call` 执行工具、`response_end` 收尾、`retry` 展示重试进度、`error` 处理错误。因为所有字段都是 agent 层类型（`AgentMessage`/`ToolCall`/`AssistantMessage`）或基本类型，`tau_agent` 永不接触 provider 私有响应结构。
+
+3. **`retry.py` 与 `http.py` 支撑所有 provider 实现**：任何具体 provider 在 `stream_response` 内部都遵循同一套路——用 `http.py` 的 `create_async_client` 建连、发起请求；捕获到瞬时失败（如 429 / 5xx / 连接重置）后，用 `retry.py` 的函数算退避时间、发出重试事件、做可取消的等待，再决定是否继续重试。横向关注点从各 provider 中抽离，保证全栈行为一致。
 
 ---
 

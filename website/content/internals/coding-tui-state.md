@@ -6,11 +6,15 @@ code_files:
   - tau_coding/tui/adapter.py
 ---
 
-## `tui/state.py` — transcript（转录/对话流）模型
+## `tui/state.py` — 对话流的数据模型
+
+TUI（Text User Interface，文本用户界面）是运行在终端里的交互式程序——不需要浏览器，也不需要图形窗口。Tau 的 TUI 让你在终端中与 AI agent 对话，就像用一个增强版的命令行聊天工具。
+
+这个文件定义了 TUI 展示区（transcript，即对话流）的数据模型。它**不依赖任何 UI 框架**，只负责描述"当前要显示什么"。为什么要这样设计？因为 Tau 的架构要求核心模块保持可移植——同一个数据模型可以被 Textual 界面、打印模式、甚至未来的其他前端复用，而不需要修改任何逻辑。
 
 ### `ChatItemRole`
 
-一个 `Literal`（字面量类型别名），枚举转录区（transcript）能展示的各类块：`user`、`assistant`、`tool`、`error`、`status`、`thinking`、`skill`、`branch_summary`、`compaction_summary`、`custom`。每种角色都以专属的边框颜色渲染（颜色见 `config.py` 中的主题定义）。
+一个 `Literal`（字面量类型别名，即一组固定的字符串值），枚举对话流能展示的各类内容块：`user`、`assistant`、`tool`、`error`、`status`、`thinking`、`skill`、`branch_summary`、`compaction_summary`、`custom`。每种角色都以专属的边框颜色渲染（颜色见 `config.py` 中的主题定义）。
 
 ### 常量（Constants）
 
@@ -18,7 +22,7 @@ code_files:
 
 ### `ChatItem`（dataclass 数据类，`slots=True`）
 
-一条可渲染的转录行。关键字段如下：
+一条可渲染的对话行——可以是用户消息、AI 回复、工具调用结果等等。关键字段如下：
 
 - `role`、`text` — 块类型与主要文本。
 - `tool_call_id` — 把一次工具调用与其结果/更新关联起来。
@@ -29,6 +33,8 @@ code_files:
 - `always_show_tool_result`、`custom_type`、`details`。
 
 ### `TuiState`（dataclass 数据类，`slots=True`）
+
+TUI 的"状态管理"中心——这是**分离关注点**原则的体现：把"显示什么数据"和"怎么渲染成界面"拆开。`TuiState` 只管数据，视图层（widgets）只读取数据来渲染。这样每次事件到来时，状态更新一次，视图就能重新投影，不需要在渲染逻辑里混杂业务判断。
 
 单个 TUI 会话的可变展示状态：
 
@@ -63,7 +69,7 @@ code_files:
 
 ## `tui/adapter.py` — 事件 → 状态
 
-`TuiEventAdapter` 是把 `AgentEvent` 映射到 `TuiState` 的唯一边界。它的 `apply(event)` 是对事件继承体系的一次 `isinstance` 分发：
+`TuiEventAdapter` 是把 `AgentEvent` 映射到 `TuiState` 的唯一边界——这就是经典的**适配器模式**（Adapter Pattern）。为什么需要适配器？因为 agent 核心发出的是通用事件流（"用户说了一句话"、"工具开始执行了"），而 TUI 需要的是结构化的展示数据（"对话列表里多了一条消息"、"工具状态变成了运行中"）。适配器做的就是这个翻译工作，而且只做这一件事。它的 `apply(event)` 是对事件继承体系的一次 `isinstance` 分发：
 
 - `AgentStartEvent` → `running = True`，清空错误。
 - `AgentEndEvent` → 刷新 assistant 缓冲区，`running = False`。
@@ -84,6 +90,8 @@ code_files:
 
 ## `tui/config.py` — 持久化的 TUI 设置
 
+这个文件管理 TUI 的外观和行为配置——键位绑定、主题、侧栏位置等等。它不依赖 Textual，只产出纯数据结构，这意味着配置可以被单元测试验证，也可以在未来被其他前端复用。
+
 ### `TuiKeybindings`（frozen 冻结）
 
 TUI 使用的每一个按键及其默认值：`cancel=escape`、`command_palette=ctrl+k`、`session_picker=ctrl+r`、`queue_follow_up=alt+enter`、`accept_completion=tab`、`thinking_cycle=shift+tab`、`model_cycle=ctrl+p`、`toggle_thinking=ctrl+t`、`toggle_tool_results=ctrl+o`、`copy_message=ctrl+c`、`quit=ctrl+d`，外加 `completion_next/previous`（上/下）。`to_json` 将其序列化。
@@ -103,6 +111,8 @@ TUI 使用的每一个按键及其默认值：`cancel=escape`、`command_palette
 ---
 
 ## `tui/autocomplete.py` — 提示符自动补全
+
+在输入框中输入 `/` 时弹出的命令建议列表、输入 `@` 时的文件路径补全——这些都由这个模块计算。它是纯函数式的，没有状态，也没有任何 UI 框架依赖。
 
 ### 数据类型
 
@@ -130,7 +140,7 @@ TUI 使用的每一个按键及其默认值：`cancel=escape`、`command_palette
 
 ## 文件:state.py
 
-本文件定义 Tau 文本 TUI 的**展示状态模型**——即 `TranscriptView` 等 widget 只读投影所依赖的数据源。它不含任何 Textual 依赖，只描述"当前要显示什么"。
+本文件定义 Tau 文本 TUI 的**展示状态模型**——即 `TranscriptView` 等 widget 只读投影所依赖的数据源。它不含任何 Textual 依赖，只描述"当前要显示什么"。Textual 是一个 Python TUI 框架，提供了类似 Web 开发的 widget 体系来构建终端界面，但它只在渲染层出现，不会渗透到这里。
 
 ### ChatItemRole
 
@@ -599,7 +609,7 @@ def _preview_text(text: str, *, max_lines: int) -> str
 
 ## 文件:adapter.py
 
-本文件是 **agent 事件 → TuiState 投影**的适配器边界:它把 `tau_agent` 发出的可移植事件流增量地翻译成 `TuiState.items` 的增删改,使下游 widget 能纯投影渲染(呼应"state 拥有模型、render 只读")。
+本文件是 **agent 事件 → TuiState 投影**的适配器边界——它把 `tau_agent` 发出的可移植事件流增量地翻译成 `TuiState.items` 的增删改，使下游 widget 能纯投影渲染。**适配器模式**（Adapter Pattern）是一种设计模式，它把一种数据格式（这里是事件流）转换为另一种（这里是状态模型），转换逻辑集中在一个地方，方便测试和维护。
 
 ### class: TuiEventAdapter
 

@@ -11,7 +11,9 @@ code_files:
 
 ## `tau_coding/rendering/base.py` — 共享的渲染原语
 
-每个非交互式输出渲染器所共享的契约。它刻意保持微小：print 模式、JSON 模式和 transcript 模式都实现相同的两个方法。
+渲染层是 Tau 把 agent 内部事件转化为终端输出的桥梁。每种输出格式——无论是人类可读的终端文字、机器可解析的 JSON、还是用于归档的结构化记录——都遵循同一套接口约定，这让 agent 核心循环完全不必关心"当前输出给谁看"。
+
+Agent 运行过程中会产生大量事件（用户输入、模型回复、工具调用进度、错误信息等）。这些事件最终需要以某种形式呈现给用户或下游程序。**Event renderer**（事件渲染器）就是做这件事的组件：它接收事件，决定如何输出。把"渲染"从 agent 循环中独立出来，好处在于可以随时切换输出格式，而不用改动 agent 的任何逻辑——就像换一个显示器不影响电脑的运行一样。
 
 - **`PrintOutputMode(StrEnum)`** — 非交互式 print 模式的输出模式：
   - `text = "text"` — 流式、人类可读的助手文本 + 工具活动。
@@ -27,7 +29,7 @@ code_files:
 
 ## `tau_coding/rendering/transcript.py` — 流式转录渲染器
 
-`TranscriptRenderer` 是 `PrintOutputMode.text` 的具体 `EventRenderer`。它把助手文本流式写入 **stdout**，把工具/状态活动写入 **stderr**，从而让模型的原始输出与 Tau 自身的杂项输出干净地分离（你可以把 stdout 管道到文件，同时在 stderr 上仍能观察进度）。
+`TranscriptRenderer` 是 `PrintOutputMode.transcript` 的具体 `EventRenderer`。它把助手文本流式写入 **stdout**，把工具/状态活动写入 **stderr**，从而让模型的原始输出与 Tau 自身的杂项输出干净地分离（你可以把 stdout 管道到文件，同时在 stderr 上仍能观察进度）。
 
 - **构造函数：** `custom_message_renderer: CustomMessageMarkup | None` — 一个可选钩子（来自 `extensions/api.py`），让扩展渲染它们自己的自定义消息；`Console(stderr=True, highlight=False)` 用于状态行；标志位 `_assistant_started` / `_assistant_ended` / `_failed` 追踪流状态。
 - **`render(event)`** — 对 `AgentEvent` 继承体系的 `isinstance` 分发：

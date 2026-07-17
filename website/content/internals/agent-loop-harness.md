@@ -6,12 +6,17 @@ code_files:
   - tau_agent/harness.py
 ---
 
+这一章是整个 Tau 最核心的部分：`loop.py` 实现了"请求模型 → 翻译事件 → 执行工具 → 回灌结果 → 继续"的 **agent loop（代理循环）**——一种让模型反复与环境交互直到任务完成的机制；`harness.py`（**harness，意思是"操纵装置"**）则在纯循环之上叠加了状态管理，让循环能够跨多轮保持对话历史、处理取消和排队消息。把"无状态的算法"和"有状态的大脑"拆开，是为了让循环本身可以脱离任何 UI 或文件系统独立复用——无论是 print 模式、Rich 渲染还是 Textual TUI，都只是套在循环外面的不同"壳"。
+
 ## `tau_agent/loop.py` — 纯 agent 循环
 
 **`run_agent_loop(*, provider, model, system, messages, tools, max_turns, signal, get_steering_messages, get_follow_up_messages, get_queue_update) -> AsyncIterator[AgentEvent]`**
 
-这是整座塔的算法核心。它是一个**异步生成器**：调用方边迭代边拿到 `AgentEvent`，
-并且可以在运行途中通过三个回调注入消息，而**不必打断流**。
+这是整座塔的算法核心。它是一个**异步生成器**（async generator）——你可以把它
+想象成一个"会逐步吐出结果的函数"：每产生一个事件就 yield 出来，调用方边迭代
+边拿到 `AgentEvent`，并且可以在运行途中通过三个回调注入消息，而**不必打断流**。
+这种设计之所以重要，是因为 LLM 的流式输出可能持续数秒甚至数分钟，你需要在输出
+过程中实时显示进度、执行工具，而不是干等着全部完成。
 
 ### 主循环逻辑
 
@@ -19,7 +24,9 @@ code_files:
    时直接报错收尾（`max_turns is None` 表示不限制轮数，不会走此分支）。
 2. 把 `tools` 编成 `tool_by_name` 字典；`turn` 从 1 开始。
 3. `while max_turns is None or turn <= max_turns`：
-   - 每轮开头检查 `signal.is_cancelled()`，已取消则发可恢复 `ErrorEvent` 并 `break`。
+   - 每轮开头检查 `signal.is_cancelled()`（`signal` 是一个 **cancellation token**，
+     即取消令牌——外部通过它通知循环"该停了"，循环每次轮询来决定是否退出），已取消则发可恢复
+     `ErrorEvent` 并 `break`。
    - `yield TurnStartEvent(turn=turn)`。
    - **`async for provider_event in provider.stream_response(...)`**：逐条消费
      Part 1a 的 `ProviderEvent`，**翻译**成 agent 事件：
@@ -181,8 +188,10 @@ yield task.result()                    # 必以恰好一个 AgentToolResult 收�
 
 ## `tau_agent/harness.py` — 有状态 agent 大脑
 
-`AgentHarness` 在纯循环之上叠加：**拥有 transcript、管理运行态、支持消息排队、
-对外广播事件、可被取消**。
+如果说 `loop.py` 是一台没有记忆的机器——每次运行都从外部输入全部状态，运行完就
+把结果交给外部；那么 `AgentHarness` 就是在这台机器之上叠加了**记忆**（transcript
+对话记录）、**安全开关**（取消令牌）和**消息队列**（steering/follow-up）的完整大脑。
+它拥有 transcript、管理运行态、支持消息排队、对外广播事件、可被取消。
 
 ### 辅助类型
 
@@ -220,7 +229,7 @@ yield task.result()                    # 必以恰好一个 AgentToolResult 收�
 
 ```python
 # harness.py:184 — 入口：防重入 → 修中断 → 追加用户消息 → 跑循环
-def prompt(self, content, *, custom_type=None, details=None):
+def prompt(self, content, *, custom_type=None, details=None) -> AsyncIterator[AgentEvent]:
     self._ensure_not_running()
     self._append_interrupted_tool_results()
     self._running = True
@@ -439,7 +448,9 @@ async def _execute_tool_calls(tool_calls, tool_by_name, messages, signal):
                     yield item
                 else:
                     produced = item
-            result = produced or _cancelled_tool_result(tool_call)
+            if produced is None:
+                produced = _cancelled_tool_result(tool_call)
+            result = produced
         messages.append(_tool_result_message(result))
         yield ToolExecutionEndEvent(result=result)
 ```
@@ -704,7 +715,7 @@ def steer_message(self, message):
 
 ```python
 # harness.py:184 — prompt 入口：防重入 + 修中断 + 追加用户消息
-def prompt(self, content, *, custom_type=None, details=None):
+def prompt(self, content, *, custom_type=None, details=None) -> AsyncIterator[AgentEvent]:
     self._ensure_not_running()
     self._append_interrupted_tool_results()
     self._running = True
@@ -841,4 +852,3 @@ def _append_interrupted_tool_results(self):
 <!-- NAV -->
 [← tau_agent · 数据模型]({{< relref "./agent-models.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_agent · 会话持久化树]({{< relref "./agent-session-tree.md" >}})

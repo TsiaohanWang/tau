@@ -8,6 +8,10 @@ code_files:
   - tau_agent/tools.py
 ---
 
+这一章把 agent 世界的基本"名词"定义清楚——消息长什么样、工具怎么描述、事件
+怎么分类。这些数据类型是后续循环（loop）、持久化（session）和 UI 层共同使用的
+公共词汇表。
+
 ## `tau_agent/types.py` — JSON 值类型别名
 
 只有 8 行，但整个 agent 包各处都用得到：
@@ -23,13 +27,24 @@ code_files:
 
 ## `tau_agent/messages.py` — 对话 transcript 的消息模型
 
-一组 pydantic `BaseModel`（`extra="forbid"`），描述在模型、工具、持久化之间
+**Message（消息）**是 agent 系统中最基本的数据单元——用户说的话、模型的回复、
+工具的执行结果，在系统内部都以"消息"的形式流动。而 **transcript（对话记录）**
+就是这些消息按时间顺序排列的列表，模型每次回复前都会看到整个 transcript，才能
+"记住"之前发生了什么。
+
+这里定义了一组 pydantic `BaseModel`（`extra="forbid"`），描述在模型、工具、持久化之间
 流动的"消息"。所有消息都带 `role` 字面量判别字段，以保证反序列化时能路由到正确的具体类型。
 
-- **`UsageCost`**（frozen 语义的数据类）：单次响应的 USD 费用拆分
+> **为什么用 Pydantic 而不是 dataclass？** 消息需要从 JSON 序列化/反序列化——
+> 比如从磁盘恢复会话、发给模型 API 时组装请求。Pydantic 提供自动校验、序列化器
+> 和类型判别，而普通 dataclass 不具备这些能力。所以凡是需要与 JSON 打交道的模型
+> 都用 Pydantic，而纯内存的数据结构（后面会看到的 `AgentTool`）则用更轻量的 dataclass。
+
+- **`UsageCost`**（pydantic `BaseModel`，`extra="forbid"`）：单次响应的 USD 费用拆分
   `input`/`output`/`cache_read`/`cache_write`/`total`。Tau 目前**没有按模型定价
   表**，所以实际都是 `0.0`——只为前向兼容保留结构（对应 Pi 的 `Usage.cost`）。
-- **`Usage`**：一次助手响应真实计费的 token 用量。字段
+- **`Usage`**：一次助手响应真实计费的 token 用量（**token** 是模型处理文本的最小单位，
+  一个中文字大约 1-2 个 token）。字段
   `input`/`output`/`cache_read`/`cache_write`/`cache_write_1h`（仅 Anthropic 报）
   /`reasoning`（是 `output` 子集）/ `total_tokens` / `cost: UsageCost | None`。
   约定：**`None` 表示"provider 未上报"**，绝不用 `0` 冒充（provider 解析代码严格
@@ -48,18 +63,32 @@ code_files:
 - **`ToolResultMessage`**（`role="tool"`）：某次工具调用的结果。`tool_call_id`、
   `name`、`content`、`ok: bool = True`，外加可选 `data`/`details`/`error`。
 - **`AgentMessage`**：三者联合类型 = `UserMessage | AssistantMessage |
-  ToolResultMessage`。这是 transcript 的基本单元，也是 provider 收发的消息列表
+  `ToolResultMessage`。这是 transcript 的基本单元，也是 provider 收发的消息列表
   元素类型。
 
 ---
 
 ## `tau_agent/tools.py` — 工具契约
 
-定义"工具是什么、工具怎么执行、结果长什么样"，以及一组 Protocol。
+**Tool（工具）**是 agent 能力的延伸——模型本身只能生成文字，但通过工具它可以
+读文件、写文件、执行命令。**Tool call（工具调用）**是模型在回复中发出的"请求"，
+意思是"请帮我执行这个操作"。工具执行后返回的结果会被回灌到 transcript 中，
+模型就能看到操作的结果，再决定下一步怎么做。
+
+这个文件定义"工具是什么、工具怎么执行、结果长什么样"，以及一组 Protocol。
+
+> **什么是 Protocol？** `typing.Protocol` 是 Python 的结构化子类型（structural
+> subtyping）机制：只要一个类实现了 Protocol 声明的方法，就自动满足这个接口——
+> 不需要显式继承。类似于 Go 语言的"接口隐式实现"。用 Protocol 而不是抽象基类
+> 的好处是：工具的执行器（executor）可以是任何 async 函数，只要签名匹配就行，
+> 不需要继承某个基类。
 
 ### 取消 / 进度 / 渲染 Protocol
 
 - **`ToolCancellationToken`**（Protocol）：工具的取消句柄，`is_cancelled()`。
+  **Cancellation token（取消令牌）**是一种让外部代码"请求中止"的机制——当用户
+  取消操作时，harness 会把令牌标记为已取消，循环和工具在每次执行前检查它，
+  一旦发现取消就立即停止，避免浪费资源。
 - **`ToolUpdateCallback`**（Protocol）：`(message: str, data: dict[str, JSONValue] | None = None) -> None`，工具在执行
   中上报进度的 fire-and-forget 回调（`data` 是有结构的可选字典，不是任意值）。loop 把它桥接成
   `ToolExecutionUpdateEvent`。必须在事件循环线程调用（桥接用 `asyncio.Queue`，非线程安全）；worker 线程里的
@@ -106,14 +135,20 @@ code_files:
 
 ## `tau_agent/events.py` — agent 层事件词汇
 
-agent loop 对外 emit 的"高层事件"（区别于 `tau_ai` 的 `ProviderEvent`——provider
+**Streaming（流式处理）**是 LLM 应用的关键模式：模型生成回复时不是等全部生成完
+再一次性返回，而是逐 token 流式输出——每生成一小段文字就立即推送出来。agent loop
+把这些底层的流式片段"翻译"成上层的 `AgentEvent`，前端就能实时显示进度。
+
+这里定义的事件是 agent loop 对外 emit 的"高层事件"（区别于 `tau_ai` 的 `ProviderEvent`——provider
 事件在更底层，agent 把它**包装/翻译**成这里的事件）。全部 pydantic +
 `extra="forbid"`，用 `type: Literal[...]` 判别：
 
 - **`AgentStartEvent`**（`agent_start`）/ **`AgentEndEvent`**（`agent_end`）：
   一次完整 agent run 的起止括号。
 - **`TurnStartEvent`**（`turn_start`）/ **`TurnEndEvent`**（`turn_end`）：单个
-  turn（一次模型往返）的起止，带 `turn: int`。
+  **turn**（一次模型往返——从把消息发给模型，到拿到完整回复）的起止，带 `turn: int`。
+  之所以要记录 turn 编号，是因为 agent 循环可能运行很多轮（模型调用工具、拿到结果、
+  再调模型……），turn 编号让你知道当前是第几轮交互。
 - **`RetryEvent`**（`retry`）：agent loop 在可恢复错误后重试，带
   `attempt`/`max_attempts`/`delay_seconds`/`message`，外加可选 `data`
   （`dict[str, JSONValue] | None`，由 provider 的 `ProviderRetryEvent.data` 原样转发；
@@ -177,7 +212,7 @@ type JSONValue = JSONPrimitive | list[JSONValue] | dict[str, JSONValue]
 ```
 
 - **作用**:定义一个任意嵌套的 JSON 值的类型别名。
-- **关键字段/实现**:递归定义 —— 它可以是标量(`JSONPrimitive`)、`JSONValue` 列表,或键为 `str`、值为 `JSONValue` 的字典。这条递归别名是 Tau 中所有“结构化但 provider 中立”的 JSON 字段(如工具参数、自定义 metadata)的真实类型约束。
+- **关键字段/实现**:递归定义 —— 它可以是标量(`JSONPrimitive`)、`JSONValue` 列表,或键为 `str`、值为 `JSONValue` 的字典。这条递归别名是 Tau 中所有"结构化但 provider 中立"的 JSON 字段(如工具参数、自定义 metadata)的真实类型约束。
 
 ### JSONObject
 
@@ -192,7 +227,7 @@ type JSONObject = dict[str, JSONValue]
 
 ## 文件:messages.py
 
-本文件定义了 provider 中立的 transcript(对话记录)消息模型,全部基于 Pydantic `BaseModel`,并通过 `model_config = ConfigDict(extra="forbid")` 禁止未知字段,以保证会话文件在各版本的二进制间可前向兼容地解析。这些消息是 agent loop 在每一轮中累积、持久化、并序列化给 provider 的“转写本”。
+本文件定义了 provider 中立的 transcript(对话记录)消息模型,全部基于 Pydantic `BaseModel`,并通过 `model_config = ConfigDict(extra="forbid")` 禁止未知字段,以保证会话文件在各版本的二进制间可前向兼容地解析。这些消息是 agent loop 在每一轮中累积、持久化、并序列化给 provider 的"转写本"。
 
 ### UsageCost
 
@@ -301,7 +336,7 @@ type AgentMessage = UserMessage | AssistantMessage | ToolResultMessage
 
 ## 文件:tools.py
 
-本文件定义 provider 中立的工具契约与工具执行结果,核心是 `AgentTool` 这个冻结 dataclass(工具的可调用单元),以及描述“调用请求”和“执行结果”的两个 Pydantic 模型,外加若干用于取消、进度、渲染和执行的 Protocol。
+本文件定义 provider 中立的工具契约与工具执行结果,核心是 `AgentTool` 这个冻结 dataclass(工具的可调用单元),以及描述"调用请求"和"执行结果"的两个 Pydantic 模型,外加若干用于取消、进度、渲染和执行的 Protocol。
 
 ### ToolCancellationToken
 
@@ -399,7 +434,7 @@ class AgentToolResult(BaseModel)
 class AgentTool
 ```
 
-- **作用**:暴露给 agent loop 的一个完整工具单元(冻结、slot 化的 dataclass),聚合名称、描述、参数 schema、执行器与可选的展示钩子。它是“工具契约”的核心载体。
+- **作用**:暴露给 agent loop 的一个完整工具单元(冻结、slot 化的 dataclass),聚合名称、描述、参数 schema、执行器与可选的展示钩子。它是"工具契约"的核心载体。
 - **关键字段/实现**:
   - `name: str`:工具名(模型在 `tool_calls` 中按此名匹配)。
   - `description: str`:工具说明,作为系统提示/工具描述的一部分提供给模型。
@@ -523,7 +558,7 @@ class ThinkingDeltaEvent(BaseModel)
 ```
 
 - **作用**:流式增量:模型推理/思考过程新增的一段文本。
-- **关键字段/实现**:`type: Literal["thinking_delta"] = "thinking_delta"`;`delta: str` 增量思考文本。与 `MessageDeltaEvent` 分离,便于前端把“思考”与“正式回复”区分呈现。
+- **关键字段/实现**:`type: Literal["thinking_delta"] = "thinking_delta"`;`delta: str` 增量思考文本。与 `MessageDeltaEvent` 分离,便于前端把"思考"与"正式回复"区分呈现。
 
 ### MessageEndEvent
 
@@ -600,16 +635,16 @@ type AgentEvent = AgentStartEvent | AgentEndEvent | TurnStartEvent | TurnEndEven
 ### messages.py 的 transcript 模型如何被 loop/harness 使用
 - `loop.py` 维护一份 `list[AgentMessage]` 作为 transcript。每轮开始时把历史(`UserMessage`/`AssistantMessage`/`ToolResultMessage`)连同系统提示一起序列化传给 provider;
 - 模型流式返回时,loop 发出 `MessageStartEvent`→若干 `MessageDeltaEvent`/`ThinkingDeltaEvent`→`MessageEndEvent`,并在 `MessageEndEvent.message` 中把累积出的 `AssistantMessage`(含 `tool_calls` 与 `usage`)追加进 transcript;
-- 若 assistant 发起工具调用,loop 依次发射 `ToolExecutionStartEvent`、`ToolExecutionUpdateEvent`(若有)、`ToolExecutionEndEvent`,并把 `AgentToolResult` 转成 `ToolResultMessage`(`role="tool"`,带 `tool_call_id`)追加回 transcript,形成下一轮的输入。这样 transcript 是与具体 provider 无关的“真相来源”,可持久化、可重放。
+- 若 assistant 发起工具调用,loop 依次发射 `ToolExecutionStartEvent`、`ToolExecutionUpdateEvent`(若有)、`ToolExecutionEndEvent`,并把 `AgentToolResult` 转成 `ToolResultMessage`(`role="tool"`,带 `tool_call_id`)追加回 transcript,形成下一轮的输入。这样 transcript 是与具体 provider 无关的"真相来源",可持久化、可重放。
 
 ### events.py 的 agent 事件词汇如何被 loop/harness 使用
 - loop 在每个阶段产出对应的 `AgentEvent`:运行级(`AgentStartEvent`/`AgentEndEvent`)、轮次级(`TurnStartEvent`/`TurnEndEvent`/`RetryEvent`)、消息级(`MessageStartEvent`/`MessageDeltaEvent`/`ThinkingDeltaEvent`/`MessageEndEvent`)、工具级(`ToolExecutionStartEvent`/`ToolExecutionUpdateEvent`/`ToolExecutionEndEvent`)、以及 `QueueUpdateEvent`、`ErrorEvent`。
-- 这些事件是“agent 层词汇”,UI(Textual/Rich/print)只订阅事件流来渲染,绝不反向耦合到 loop 内部,符合 AGENTS.md 强调的“harness 发射事件、UI 消费事件”的 adapter 边界。事件流的稳定性正是 README “Events make agents teachable” 原则在代码中的体现。
+- 这些事件是"agent 层词汇",UI(Textual/Rich/print)只订阅事件流来渲染,绝不反向耦合到 loop 内部,符合 AGENTS.md 强调的"harness 发射事件、UI 消费事件"的 adapter 边界。事件流的稳定性正是 README "Events make agents teachable" 原则在代码中的体现。
 
 ### agent 事件与 provider 事件的层次差异
 - **provider 事件**(位于 `tau_ai`,不属于本包)是底层、provider 特定的流式原语(如 token 块、tool_call delta、usage 块),与某个具体模型/SDK 的流式格式绑定。
-- **agent 事件**(本 `events.py`)是 provider 中立、语义更高层的抽象:loop 把多个 provider 事件“翻译/归并”成稳定的 agent 事件。例如 provider 的一段 content delta 被归并为 `MessageDeltaEvent`,provider 的 tool_call 片段被聚合成一次 `ToolExecutionStartEvent`+`ToolExecutionEndEvent`,provider 的 reasoning delta 被归并为 `ThinkingDeltaEvent`。
-- 因此层次是:`tau_ai` 的 provider 事件(具体、细粒度、易变) → `tau_agent` 的 loop(归并/适配) → `AgentEvent`(抽象、稳定、可持久化/可渲染)。`messages.py` 的 transcript 模型则是这一归并过程的“状态沉淀”,`MessageEndEvent.message` 即每轮归并后的产物。
+- **agent 事件**(本 `events.py`)是 provider 中立、语义更高层的抽象:loop 把多个 provider 事件"翻译/归并"成稳定的 agent 事件。例如 provider 的一段 content delta 被归并为 `MessageDeltaEvent`,provider 的 tool_call 片段被聚合成一次 `ToolExecutionStartEvent`+`ToolExecutionEndEvent`,provider 的 reasoning delta 被归并为 `ThinkingDeltaEvent`。
+- 因此层次是:`tau_ai` 的 provider 事件(具体、细粒度、易变) → `tau_agent` 的 loop(归并/适配) → `AgentEvent`(抽象、稳定、可持久化/可渲染)。`messages.py` 的 transcript 模型则是这一归并过程的"状态沉淀",`MessageEndEvent.message` 即每轮归并后的产物。
 
 ---
 

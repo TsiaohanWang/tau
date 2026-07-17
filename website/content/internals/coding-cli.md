@@ -7,9 +7,7 @@ code_files:
 
 ## 4. `cli.py` — the Typer entry point
 
-这是面向用户的二进制(`tau`)。它基于 **Typer** 构建并编排整个技术栈。导入时它甚至会调用
-`_force_utf8_streams()` 将 stdout/stderr 重新配置为 UTF-8,以免在某些平台(Windows)上,控制台代码页
-在遇到非 ASCII 模型输出时抛出错误。
+这是 Tau 的命令行入口——用户在终端输入 `tau` 时实际运行的程序。它基于 **Typer**（一个基于 Click 的 Python CLI 框架）构建，负责解析命令行参数、加载配置、组装各个模块，然后启动交互式界面或非交互式运行。"组合根"（Composition Root）是这个文件的核心设计模式：它了解所有其他部分，但不包含任何业务逻辑——所有决策都委派给专门的模块。导入时它甚至会调用 `_force_utf8_streams()` 将 stdout/stderr 重新配置为 UTF-8，以免在某些平台（Windows）上，控制台代码页在遇到非 ASCII 模型输出时抛出错误。
 
 ```python
 app = typer.Typer(name="tau", add_completion=False,
@@ -73,10 +71,10 @@ def main(ctx, prompt_args, prompt_option, provider, model, setup_*,
 
 `main` 作为 Typer 回调首先处理 `--version` 与子命令互斥校验,未给 `--prompt` 时以 `anyio.run(run_openai_tui, ...)` 启动交互前端,否则启动 `run_openai_print_mode` 并以返回值决定退出码。
 
-> **为何采用无逻辑的组合根?** Pi 的架构保持核心 agent 工具可移植:它绝不能依赖 CLI、TUI 或任何特定
-> provider。`cli.py` 是将那些可移植部分 *组装* 成可运行程序的唯一场所 —— 解析 argv、选择前端(TUI 还是
-> 打印模式)、并透传扩展标志。将所有决策(模型选择、会话创建、prompt 流式处理)放在 `run_openai_print_mode` /
-> `run_print_mode` 中而非 `main` 里,意味着工具保持可测试与可复用:README 中"核心保持可移植"的保证得以成立,
+> **为何采用无逻辑的组合根？** Pi 的架构保持核心 agent 工具可移植：它绝不能依赖 CLI、TUI 或任何特定
+> provider。`cli.py` 是将那些可移植部分 *组装* 成可运行程序的唯一场所 —— 解析 argv、选择前端（TUI 还是
+> 打印模式）、并透传扩展标志。将所有决策（模型选择、会话创建、prompt 流式处理）放在 `run_openai_print_mode` /
+> `run_print_mode` 中而非 `main` 里，意味着工具保持可测试与可复用：README 中"核心保持可移植"的保证得以成立，
 > 因为唯一不可移植的接线就位于入口点之后的此处。
 
 ---
@@ -87,7 +85,7 @@ def main(ctx, prompt_args, prompt_option, provider, model, setup_*,
 
 # `tau_coding/cli.py` 源码剖析
 
-本文件是 Tau coding-agent 的命令行入口,基于 `typer`(构建于 `click`/`argparse` 体系之上)实现。它负责:解析命令行参数、加载 provider 配置与凭证、构造 `CodingSession`、并选择 TUI(交互式)或 print(非交互式)前端启动。下面按源码中出现的顺序,对每个顶层函数、类逐一定义展开。
+本文件是 Tau coding-agent 的命令行入口，基于 `typer`（构建于 `click`/`argparse` 体系之上）实现。它负责：解析命令行参数、加载 provider 配置与凭证、构造 `CodingSession`、并选择 TUI（交互式界面）或 print（非交互式，直接输出文本）前端启动。下面按源码中出现的顺序，对每个顶层函数、类逐一定义展开。
 
 ---
 
@@ -473,7 +471,7 @@ async def run_print_mode(*, prompt, model, cwd, provider, output=PrintOutputMode
 
 ## 组合根与前端选择小结
 
-`main()` 作为整个 CLI 的**组合根**,其决策流可概括为:
+`main()` 作为整个 CLI 的**组合根**（Composition Root）——这是软件设计中的一个概念，指"所有依赖都在这里组装"的地方。它的决策流可概括为：
 
 1. **解析参数**:用 typer 声明式地接收位置参数(初始 prompt / 内联子命令)与各类选项(provider、model、setup 系列、cwd、output、resume、extension 开关等)。
 2. **分派子命令**:`sessions`/`export`/`providers`/`setup` 作为内联分支优先处理并退出;`--version` 最早返回。

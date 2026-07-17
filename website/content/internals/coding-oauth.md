@@ -12,6 +12,8 @@ code_files:
 
 ## 2. OAuth: the types and the registry
 
+Tau 需要通过 OAuth（Open Authorization，一种行业标准授权协议）来安全地访问 AI 模型的 API。OAuth 允许用户在浏览器中完成登录，然后 Tau 获得一个访问令牌来调用 API——整个过程用户不需要把密码交给 Tau。本节介绍 OAuth 的类型定义和 provider 注册表。
+
 ### 2.1 `oauth_types.py` — the protocol surface
 
 本模块定义了 OAuth provider 的 *形态* 以及通过登录回调传递的数据。它与具体 provider 无关。
@@ -87,6 +89,8 @@ def reset_oauth_providers(providers=_BUILTIN_PROVIDERS) -> None: ...
 
 ### 2.3 `oauth_device.py` — the generic device-code poller
 
+**设备码流**（Device Code Flow，RFC 8628）是 OAuth 2.0 的一种扩展，专为无法直接打开浏览器的设备设计。Tau 的 CLI 工具没有图形界面，所以它用设备码流让用户在另一台设备（比如手机）上完成授权。
+
 ```python
 DevicePollStatus = Literal["complete", "pending", "slow_down", "failed"]
 
@@ -109,15 +113,15 @@ async def poll_oauth_device_code[T](
 ) -> T: ...
 ```
 
-- 这是一个 **通用的 RFC 8628 轮询循环**,并非 GitHub 专属。调用方提供一个返回
-  `DevicePollResult[T]` 的 `poll` 协程;该辅助函数负责驱动时序:在 `interval` 之后开始(或当
-  `wait_before_first_poll` 时先等待),循环直至 `complete`/`failed`/超时,处理 `slow_down`
-  (将间隔增加 5 秒或调整为服务器建议值),并响应 `cancel_event`(抛出 `OAuthError("Login cancelled")`)。
-  > **为何采用 RFC 8628(OAuth 2.0 设备授权授予)?** 当 agent 宿主没有可用的浏览器或输入界面时
-  > —— 这正是无头 CLI 的典型情形 —— 设备码流让用户在 *第二台* 设备(例如手机上的浏览器)上完成认证。
-  > 该规范强制规定 `authorization_pending`(继续轮询)、`slow_down`(退避并增大间隔)、
-  > `expires_in`(硬性超时)的语义,而 `poll_oauth_device_code` 对其逐字编码,因此该循环对任何
-  > 合规的授权服务器都具备互操作性(参见 <https://datatracker.ietf.org/doc/html/rfc8628>)。
+- 这是一个 **通用的 RFC 8628 轮询循环**，并非 GitHub 专属。调用方提供一个返回
+  `DevicePollResult[T]` 的 `poll` 协程；该辅助函数负责驱动时序：在 `interval` 之后开始（或当
+  `wait_before_first_poll` 时先等待），循环直至 `complete`/`failed`/超时，处理 `slow_down`
+  （将间隔增加 5 秒或调整为服务器建议值），并响应 `cancel_event`（抛出 `OAuthError("Login cancelled")`）。
+  > **为何采用 RFC 8628（OAuth 2.0 设备授权授予）？** 当 agent 宿主没有可用的浏览器或输入界面时
+  > —— 这正是无头 CLI 的典型情形 —— 设备码流让用户在 *第二台* 设备（例如手机上的浏览器）上完成认证。
+  > 该规范强制规定 `authorization_pending`（继续轮询）、`slow_down`（退避并增大间隔）、
+  > `expires_in`（硬性超时）的语义，而 `poll_oauth_device_code` 对其逐字编码，因此该循环对任何
+  > 合规的授权服务器都具备互操作性（参见 <https://datatracker.ietf.org/doc/html/rfc8628>）。
 - 可注入的 `sleep`/`monotonic` 使其无需真实时间即可进行单元测试。
 - `GitHubCopilotOAuthProvider` 是现阶段唯一使用它的内置 provider;它传入一个向 GitHub 令牌端点
   POST 并把响应映射为 `DevicePollResult` 的 `poll` 闭包。
@@ -126,8 +130,7 @@ async def poll_oauth_device_code[T](
 
 ## 3. The three concrete OAuth flows
 
-三者都实现了 `OAuthProvider`,并在导入时注册。每个 `login` 接收 `OAuthLoginCallbacks` 包;
-每个 `runtime_auth` 产出一个 `OAuthRuntimeAuth`。
+Tau 内置了三个 provider 的 OAuth 实现，它们都遵循统一的 `OAuthProvider` 接口。每个 `login` 接收 `OAuthLoginCallbacks` 包（一组回调函数，让登录流程能在不同 UI 环境中运行）；每个 `runtime_auth` 产出一个 `OAuthRuntimeAuth`（将存储的凭证转换为 API 请求所需的鉴权信息）。
 
 ### 3.1 `oauth.py` — OpenAI Codex (browser + PKCE)
 
@@ -152,12 +155,12 @@ TOKEN_REFRESH_SKEW_MS = 60_000
   `code=...` 查询或原始码)。随后它用码换令牌,并从 access JWT 的
   `https://api.openai.com/auth` → `chatgpt_account_id` 声明中提取 `account_id`
   (`account_id_from_access_token`)。
-  > **为何采用授权码 + PKCE(RFC 6749)?** OAuth 2.0 授权框架(RFC 6749,
-  > <https://datatracker.ietf.org/doc/html/rfc6749>)将授权码授予定义为面向机密与公开客户端的
-  > 基于重定向的流。CLI 是一个 *公开* 客户端,没有安全存放客户端密钥之处,因此 Tau 使用 PKCE
-  > (S256 的 `code_challenge`/`code_verifier` 对)将令牌交换绑定到发起同一请求的客户端,从而
-  > 挫败授权码拦截攻击。随机的 `state` 参数是该框架要求的 CSRF 对抗措施。二者结合,使得基于浏览器的
-  > 登录能在 `localhost` 重定向处终止,而无需任何内嵌密钥。
+  > **为何采用授权码 + PKCE（RFC 6749）？** OAuth 2.0 授权框架（RFC 6749，
+  > <https://datatracker.ietf.org/doc/html/rfc6749>）将授权码授予定义为面向机密与公开客户端的
+  > 基于重定向的流。CLI 是一个 *公开* 客户端，没有安全存放客户端密钥之处，因此 Tau 使用 PKCE
+  > （S256 的 `code_challenge`/`code_verifier` 对）将令牌交换绑定到发起同一请求的客户端，从而
+  > 挫败授权码拦截攻击。随机的 `state` 参数是该框架要求的 CSRF 对抗措施。二者结合，使得基于浏览器的
+  > 登录能在 `localhost` 重定向处终止，而无需任何内嵌密钥。
 - `refresh` 在 `oauth_credential_is_expired` 为假(提前量 60 秒)时是空操作;否则
   `refresh_openai_codex_token` POST `grant_type=refresh_token` 并重新提取 `account_id`。
 - `runtime_auth` 返回 `OAuthRuntimeAuth(api_key=credential.access)` —— Codex 仅将 access 令牌

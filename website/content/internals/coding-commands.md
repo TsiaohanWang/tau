@@ -7,8 +7,7 @@ code_files:
 
 ## `tau_coding/commands.py` — slash commands
 
-本文件注册用户在提示符处可输入、以替代普通消息的斜杠命令（`/help`、`/login`、
-`/model`、`/new`、`/clear`、`/compact` 等）。
+**斜杠命令**（slash command）是用户在提示符处输入以 `/` 开头的快捷指令（如 `/help`、`/model`、`/new`），用来执行常见的会话操作而不必每次都让模型"理解意图再行动"。这个模块定义了所有内置命令的注册表和分发逻辑——当用户输入 `/model gpt-4o` 时，系统如何把它解析成"切换模型"这个动作。
 
 ### `LOGIN_PROVIDER_ALIASES`
 
@@ -48,7 +47,7 @@ def _login_command(context: CommandContext) -> CommandResult:
 
 ### `CommandRegistry`
 
-持有可用命令的核心对象。
+CommandRegistry（命令注册表）是所有斜杠命令的"索引簿"——它把命令名映射到对应的处理函数，但自己不执行任何业务逻辑。这遵循 Tau 的分层规则：注册表只负责"知道有哪些命令"，而"执行命令改变状态"是 CodingSession 的职责。这样不同的前端（命令行、GUI）都能复用完全相同的 CodingSession，而不会继承任何命令解析假设。
 
 - **构造函数** — 构建命令名 → `SlashCommand` 的映射。一个 `SlashCommand` 封装了
   名称、描述、用法、处理函数（`(CommandContext) -> CommandResult`）、别名与搜索关键字。
@@ -567,7 +566,7 @@ def _model_command(context: CommandContext) -> CommandResult:
 
 ## 文件:session_manager.py
 
-`session_manager.py` 负责在用户主目录(经 `TauPaths`)层面管理 coding 会话的元数据索引:创建、列举、恢复、重命名。采用 JSONL 索引文件,按项目 cwd 分目录,并兼容一个 legacy 全局 `index.jsonl`。
+`session_manager.py` 负责在用户主目录（经 `TauPaths`）层面管理 coding 会话的元数据索引：创建、列举、恢复、重命名。它使用 JSONL 索引文件（每行一个 JSON 对象，便于追加和流式读取），按项目 cwd（当前工作目录）分目录，并兼容一个 legacy 全局 `index.jsonl`。`SessionManager`（会话管理器）拥有"所有会话的目录"，使 CLI 能够在多次运行之间列出、恢复与创建会话。
 
 ### SessionRecordModel (Pydantic BaseModel)
 
@@ -705,11 +704,11 @@ class SessionManager:
 
 ## 串联要点
 
-1. **`CommandRegistry` 如何解析并分派用户输入的 `/xxx`**:TUI 在 `_submit_prompt` 中先把用户输入交给 `SessionManager`/`CodingSession.handle_command`(或等价入口),最终落到 `CommandRegistry.execute(session, text)`。`execute` 先做 `strip` 与 `/` 前缀判断(非 `/` 或 `/skill:` 内联语法则 `handled=False`,退回普通 prompt);接着 `_parse_command` 拆出 `(name, args)` 并 `_normalize_name`;再经 `get()` 处理别名(含 `/scoped models` 兼容映射);命中则构造 `CommandContext` 调用对应 `handler`,返回 `CommandResult`。
+1. **`CommandRegistry` 如何解析并分派用户输入的 `/xxx`**：TUI 在 `_submit_prompt` 中先把用户输入交给 `SessionManager`/`CodingSession.handle_command`（或等价入口），最终落到 `CommandRegistry.execute(session, text)`。`execute` 先做 `strip` 与 `/` 前缀判断（非 `/` 或 `/skill:` 内联法则 `handled=False`，退回普通 prompt）；接着 `_parse_command` 拆出 `(name, args)` 并 `_normalize_name`；再经 `get()` 处理别名（含 `/scoped models` 兼容映射）；命中则构造 `CommandContext` 调用对应 `handler`，返回 `CommandResult`。
 
-2. **`CodingSession` 暴露的能力如何被命令调用**:handler 大多只产出 `CommandResult` 上的 `*_requested` 标志(如 `model_picker_requested`、`resume_session_id`、`theme`、`thinking_level`),由前端(TUI)据此驱动 `CodingSession` 的真实业务:`set_model`、`reload_provider_settings`、`ensure_session_indexed`、压缩、导出、恢复等。少数 handler(如 `_name_command`)会直接通过 `context.session.session_manager`(一个 `SessionManager`)调用 `touch_session` 完成重命名并写索引。
+2. **`CodingSession` 暴露的能力如何被命令调用**：handler 大多只产出 `CommandResult` 上的 `*_requested` 标志（如 `model_picker_requested`、`resume_session_id`、`theme`、`thinking_level`），由前端（TUI）据此驱动 `CodingSession` 的真实业务：`set_model`、`reload_provider_settings`、`ensure_session_indexed`、压缩、导出、恢复等。少数 handler（如 `_name_command`）会直接通过 `context.session.session_manager`（一个 SessionManager）调用 `touch_session` 完成重命名并写索引。这种"handler 只产出意图标志，前端负责执行"的模式，让命令解析层与会话业务层保持松耦合。
 
-3. **TUI 的 `_submit_prompt` 先走 `session.handle_command`**:呼应 app.py 的概览——用户输入先被当作潜在命令解析;命令系统返回 `handled=True` 时,TUI 根据 `CommandResult` 中的各类请求(退出/新会话/选择器/模型/主题/思考级别/恢复/导出/压缩/重命名等)执行对应 UI 动作或调用 `CodingSession` 方法;返回 `handled=False` 时则作为普通对话 prompt 提交给 agent 循环。这样命令层与对话层在统一入口解耦。
+3. **TUI 的 `_submit_prompt` 先走 `session.handle_command`**：用户输入先被当作潜在命令解析；命令系统返回 `handled=True` 时，TUI 根据 `CommandResult` 中的各类请求（退出/新会话/选择器/模型/主题/思考级别/恢复/导出/压缩/重命名等）执行对应 UI 动作或调用 `CodingSession` 方法；返回 `handled=False` 时则作为普通对话 prompt 提交给 agent 循环。这样命令层与对话层在统一入口解耦——用户输入要么是命令，要么是对话，不会混淆。
 
 ---
 

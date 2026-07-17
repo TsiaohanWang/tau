@@ -7,7 +7,7 @@ code_files:
 
 ## 1. `credentials.py` — 凭证存储
 
-本模块是关于 *Tau 如何持久化认证资料* 的唯一事实来源。它定义了两个冻结的凭证 dataclass 以及一个基于 JSON 的小型存储。密钥存放在 `<Tau home>/credentials.json` 中,绝不放在 `providers.json`。
+凭证（credentials）就是 API 密钥、访问令牌这些"能证明你是谁"的敏感信息。Tau 需要存储它们，这样用户就不必每次启动都重新登录。本模块是关于 *Tau 如何持久化认证资料* 的唯一事实来源。它定义了两个冻结的凭证 dataclass 以及一个基于 JSON 的小型存储。密钥存放在 `<Tau home>/credentials.json` 中，绝不放在 `providers.json`。
 
 > **为何要将 `credentials.json` 与 `providers.json` 分离?** `providers.json`
 > 保存的是静态 *配置*(base URL、模型列表、client id、超时时间),这些可以安全地提交、
@@ -87,7 +87,7 @@ class FileCredentialStore:
 
 ## 文件:credentials.py
 
-本文件实现 Tau 在本地家目录下基于 JSON 文件的凭证存储。它定义了两类凭证的 dataclass(`OAuthCredential`、`ApiKeyCredential`)、一个可注入的存储抽象(`CredentialStore` 的对应实现 `FileCredentialStore`)、内存型实现,以及一批模块级序列化/校验辅助函数。凭证统一持久化到 `credentials.json`(由 `credentials_path()` 决定),而不是 provider 配置所用的 `providers.json`。(`providers.json` 仅含可共享、可版本化的静态配置,如 base URL、模型列表、client id;`credentials.json` 含访问/刷新令牌与 API key 这类机密,按 `0o600` 权限落盘且不随配置同步——这是"配置"与"密钥"两个安全边界的拆分,合并为单一文件会把每次编辑配置都变成一次密钥处理操作,扩大泄漏面。)
+本文件实现 Tau 在本地家目录下基于 JSON 文件的凭证存储。它定义了两类凭证的 dataclass（`OAuthCredential`、`ApiKeyCredential`）、一个可注入的存储抽象（`CredentialStore` 的对应实现 `FileCredentialStore`）、内存型实现，以及一批模块级序列化/校验辅助函数。凭证统一持久化到 `credentials.json`（由 `credentials_path()` 决定），而不是 provider 配置所用的 `providers.json`。为什么要把这两者分开？`providers.json` 存放的是可共享的静态配置（如 base URL、模型列表），可以放心提交到版本控制；而 `credentials.json` 存放的是密钥，一旦泄漏就是安全事件。分离让配置可以安全同步，而密钥保持私有。
 
 ### CredentialStoreError
 
@@ -202,7 +202,7 @@ class FileCredentialStore:
 
 ## 文件:oauth_types.py
 
-本文件定义 provider 无关的 OAuth 契约:若干传递数据的 dataclass、回调类型别名、`OAuthLoginCallbacks` 聚合、描述 provider 行为的 `OAuthProvider` Protocol,以及一个 metadata 取值辅助函数。它是 `oauth_registry` 与具体 flow 类之间的公共接口层。
+本文件定义 provider 无关的 OAuth 契约——OAuth（Open Authorization）是一种行业标准的授权协议，允许第三方应用在不暴露用户密码的情况下访问用户资源。Tau 需要 OAuth 是因为 AI 模型的 API 通常需要认证，而 OAuth 提供了一种安全的方式让用户授权 Tau 代表自己调用这些 API。本文件包含若干传递数据的 dataclass、回调类型别名、`OAuthLoginCallbacks` 聚合、描述 provider 行为的 `OAuthProvider` Protocol，以及一个 metadata 取值辅助函数。它是 `oauth_registry` 与具体 flow 类之间的公共接口层。
 
 ### OAuthFlowKind
 
@@ -331,7 +331,7 @@ provider 请求用户做选择的输入。
 
 ## 文件:oauth_device.py
 
-本文件实现 RFC 8628 风格的设备授权轮询助手。核心是一个泛型轮询函数 `poll_oauth_device_code`,配合超时、退避(`slow_down`)、取消事件等机制。GitHub Copilot 的 `_poll_github_access_token` 通过构造 `poll` 闭包使用它。
+本文件实现 RFC 8628 风格的设备授权轮询助手——**设备码流**（Device Code Flow）是 OAuth 的一种变体，专门用于没有浏览器或输入界面的场景（比如无头服务器上的 CLI 工具）。流程是这样的：CLI 向授权服务器请求一个"设备码"，服务器返回一个短码和验证 URL；用户在自己的手机或电脑上打开这个 URL 并输入短码完成授权；CLI 则在后台轮询服务器，等待用户完成操作。核心是一个泛型轮询函数 `poll_oauth_device_code`，配合超时、退避（`slow_down`）、取消事件等机制。GitHub Copilot 的 `_poll_github_access_token` 通过构造 `poll` 闭包使用它。
 
 ### DevicePollStatus
 
@@ -393,7 +393,7 @@ async def poll_oauth_device_code[T](
 
 ## 文件:oauth.py
 
-本文件实现 OpenAI Codex 的授权码 + PKCE 浏览器登录流,并提供被其他 provider(Anthropic、GitHub Copilot)复用的通用工具:PKCE 生成、本地回调服务器、授权码解析、token 交换/刷新、JWT 解析、过期判断等。注意其中包含 `CodexOAuthProvider` 实际类名为 `OpenAICodexOAuthProvider`。
+本文件实现 OpenAI Codex 的授权码 + PKCE 浏览器登录流，并提供被其他 provider（Anthropic、GitHub Copilot）复用的通用工具：PKCE 生成、本地回调服务器、授权码解析、token 交换/刷新、JWT 解析、过期判断等。PKCE（Proof Key for Code Exchange）是一种安全增强机制，防止授权码在传输过程中被拦截——CLI 作为"公开客户端"无法安全存储密钥，PKCE 通过一次性密钥验证确保"交换 token 的人就是发起授权的人"。注意其中包含 `CodexOAuthProvider` 实际类名为 `OpenAICodexOAuthProvider`。
 
 ### 模块常量
 
@@ -582,7 +582,7 @@ URL 安全的 base64 编码并去掉填充(`=`)。
 
 ## 文件:oauth_anthropic.py
 
-本文件实现 Anthropic Claude Pro/Max 的授权码 + PKCE 浏览器登录流,复用 `oauth.py` 的 `create_pkce_pair`、`_start_local_oauth_server`、`parse_authorization_input`、过期判断等。其 `runtime_auth` 会注入 `anthropic-beta` 等专属头。
+本文件实现 Anthropic Claude Pro/Max 的授权码 + PKCE 浏览器登录流，复用 `oauth.py` 的 `create_pkce_pair`、`_start_local_oauth_server`、`parse_authorization_input`、过期判断等。其 `runtime_auth` 会注入 `anthropic-beta` 等专属头——这些是 Anthropic API 要求的特殊请求头，用于启用 Claude Code 的 OAuth 功能。
 
 ### 模块常量
 
@@ -651,7 +651,7 @@ URL 安全的 base64 编码并去掉填充(`=`)。
 
 ## 文件:oauth_github_copilot.py
 
-本文件实现 GitHub Copilot 的 **设备码流**(RFC 8628)+ 用长寿命 GitHub token 换取短寿命 Copilot token 的刷新机制。它复用 `oauth_device.py` 的 `poll_oauth_device_code` 与 `oauth.py` 的过期判断。其 `runtime_auth` 会从 Copilot token 解析出代理 base_url。
+本文件实现 GitHub Copilot 的**设备码流**（RFC 8628）——如前所述，设备码流让用户在另一台设备（比如手机）上完成授权，CLI 在后台等待结果。加上用长寿命 GitHub token 换取短寿命 Copilot token 的刷新机制。它复用 `oauth_device.py` 的 `poll_oauth_device_code` 与 `oauth.py` 的过期判断。其 `runtime_auth` 会从 Copilot token 解析出代理 base_url。
 
 ### 模块常量
 
@@ -738,9 +738,9 @@ URL 安全的 base64 编码并去掉填充(`=`)。
 
 ---
 
-## 串联:凭证持久化、OAuth 无缝续期、registry 与 provider_runtime 的衔接
+## 串联：凭证持久化、OAuth 无缝续期、registry 与 provider_runtime 的衔接
 
-1. **持久化到 `credentials.json` 而非 `providers.json`**:所有具体 flow(`AnthropicOAuthProvider`/`GitHubCopilotOAuthProvider`/`OpenAICodexOAuthProvider`)登录成功后返回 `OAuthCredential`,调用方(CLI/TUI)通过 `FileCredentialStore.set_oauth(provider.id, credential)` 写入。默认路径由 `credentials_path()` 决定为 `TauPaths().home / "credentials.json"`,与 provider 静态配置 `providers.json` 完全隔离。**为何如此**:`providers.json` 是"配置"——base URL、模型列表、client id 等可共享、可版本化、可手编的值;而令牌与 API key 是"密钥",泄漏即等于账户失陷。把两者拆成独立文件,使得配置可自由提交/同步、被多人引用,而密钥文件保持 `0o600` 私有、可 git-ignore、不会随配置扩散。`_save` 用临时文件 + 原子 `replace` + `chmod 0o600` 保证落盘安全,但内容为明文(仅依赖文件权限)。
+1. **持久化到 `credentials.json` 而非 `providers.json`**：所有具体 flow（`AnthropicOAuthProvider`/`GitHubCopilotOAuthProvider`/`OpenAICodexOAuthProvider`）登录成功后返回 `OAuthCredential`，调用方（CLI/TUI）通过 `FileCredentialStore.set_oauth(provider.id, credential)` 写入。默认路径由 `credentials_path()` 决定为 `TauPaths().home / "credentials.json"`，与 provider 静态配置 `providers.json` 完全隔离。为什么这样做？因为 `providers.json` 是"配置"——base URL、模型列表、client id 等可共享、可版本化、可手编的值；而令牌与 API key 是"密钥"，泄漏即等于账户失陷。把两者拆成独立文件，使得配置可以自由提交/同步、被多人引用，而密钥文件保持 `0o600` 私有、可 git-ignore、不会随配置扩散。`_save` 用临时文件 + 原子 `replace` + `chmod 0o600` 保证落盘安全，但内容为明文（仅依赖文件权限）。
 
 2. **OAuth 无缝续期**:每个 provider 的 `refresh(credential)` 都先看 `oauth_credential_is_expired`(带 `TOKEN_REFRESH_SKEW_MS`/`ANTHROPIC_TOKEN_SKEW_MS`/`GITHUB_COPILOT_TOKEN_SKEW_MS` 提前量),未过期直接返回原凭证(零开销);过期时:
    - Codex/Anthropic 用 refresh token 调令牌端点换新 access 且通常在响应中更新 refresh token;

@@ -9,8 +9,7 @@ code_files:
 
 ## `tau_coding/provider_catalog.py` — 内建 provider 目录
 
-本文件定义了 Tau 开箱即知（out of the box）的 provider 的*静态*描述（名称、base URL、
-鉴权环境变量、模型、思考级别、成本档位）。它是数据，而非行为。
+**Provider 目录**（provider catalog）是 Tau 出厂时内置的一份"支持列表"，记录了 Tau 开箱即知（out of the box）的所有 provider 的静态信息——名称、API 地址、认证方式、可用模型、思考级别支持等。它就像一本产品手册，只描述"有哪些产品可用"，不涉及"用户选了哪个"。这个模块定义的是数据，而非行为。
 
 ### 类型别名
 
@@ -64,14 +63,13 @@ Tau 在登录/设置时可呈现的一个内建 provider：
 
 按 provider 名称做线性查找，返回一个目录条目。
 
-> **为什么目录和配置是两个独立文件且只有单向依赖。** *目录*(本文件)是静态参考数据——Tau 自带的 provider 列表。*配置*(下一个文件)是用户持久化的、可能经过自定义的副本。配置模块导入目录;目录绝不导入配置。这条单向边是有意为之:参考数据不能依赖用户状态,这样新增一个内置 provider 只需加入目录,所有已安装的 Tau 都能自动获取,无须触碰任何人的 `providers.json`。将二者分开正是"小层胜于魔法"原则在配置领域的体现——出厂默认值与用户覆盖永远不会纠缠在一起。
+> **为什么目录和配置是两个独立文件且只有单向依赖。** *目录*（本文件）是静态参考数据——Tau 自带的 provider 列表。*配置*（下一个文件）是用户持久化的、可能经过自定义的副本。配置模块导入目录；目录绝不导入配置。这条单向边是有意为之：参考数据不能依赖用户状态，这样新增一个内置 provider 只需加入目录，所有已安装的 Tau 都能自动获取，无须触碰任何人的 `providers.json`。将二者分开正是"小层胜于魔法"原则在配置领域的体现——出厂默认值与用户覆盖永远不会纠缠在一起。这就像操作系统的内置驱动列表（catalog）和用户的自定义配置文件（config）：更新系统不会覆盖你的配置，你的配置也不会影响系统默认列表。
 
 ---
 
 ## `tau_coding/provider_config.py` — 持久化的 provider 配置
 
-这是本教程中最大的文件。它把目录数据 + 用户偏好 + 环境，转化为持久的 `ProviderConfig`
-对象，随后由 `provider_runtime.py` 将其转换为真正可用的 `tau_ai` provider。
+这是本教程中最大的文件。它把目录数据 + 用户偏好 + 环境变量，转化为持久的 `ProviderConfig` 对象。可以把它理解为一个"翻译层"：一边是出厂默认值和用户的自定义设置，另一边是 `tau_ai` 模块能直接使用的类型化配置。**模型选择**（model selection）的过程就在这里发生——系统根据用户的偏好、可用凭据和 provider 配置，决定使用哪个 provider 的哪个模型。
 
 ### 常量与错误类型
 
@@ -106,33 +104,31 @@ Tau 在登录/设置时可呈现的一个内建 provider：
 
 ### `ScopedModelConfig` (frozen)
 
-A `provider`+`model` pair you can pin for quick model-cycling during a session.
-Stored in `ProviderSettings.scoped_models`.
+一个可固定的 `provider`+`model` 对，用于在会话中快速切换模型。
+存储在 `ProviderSettings.scoped_models` 中。
 
 ### `ProviderSettings` (frozen)
 
-The top-level durable provider preferences loaded from Tau home:
+从 Tau home 加载的顶层持久化 provider 偏好：
 
-- `default_provider: str` (defaults `"openai"`).
-- `providers: tuple[ProviderConfig, ...]` (defaults to all built-in configs).
-- `scoped_models: tuple[ScopedModelConfig, ...]`.
+- `default_provider: str`（默认 `"openai"`）。
+- `providers: tuple[ProviderConfig, ...]`（默认为所有内建配置）。
+- `scoped_models: tuple[ScopedModelConfig, ...]`。
 
-- `get_provider(name=None)` — looks up by name or default; raises
-  `ProviderConfigError` on unknown.
-- `to_json()` — serializes preferences (default provider, per-provider
-  preference overrides, scoped models).
+- `get_provider(name=None)` —— 按名称或默认值查找；未知名称抛
+  `ProviderConfigError`。
+- `to_json()` —— 序列化偏好（默认 provider、各 provider 的偏好覆盖、scoped models）。
 
 ### `ProviderSelection` (frozen)
 
-A resolved `provider` + `model` pair for one run.
+一次运行解析出的 `provider` + `model` 对。
 
 ### 从目录构建配置
 
-- `builtin_provider_configs()` — one `ProviderConfig` per built-in catalog entry.
+- `builtin_provider_configs()` —— 为每个内建 catalog entry 构造一个 `ProviderConfig`。
 - `provider_config_from_catalog_entry(name)` / `provider_config_from_entry(entry)`
-  — translate a `ProviderCatalogEntry` into the correct `ProviderConfig`
-  subclass based on `entry.kind`. `_default_api_for_kind` maps a kind to its
-  default wire API.
+  —— 根据 `entry.kind` 把 `ProviderCatalogEntry` 翻译为对应的
+  `ProviderConfig` 子类。`_default_api_for_kind` 把 kind 映射到其默认线协议。
 
 ```python
 def provider_config_from_entry(entry: ProviderCatalogEntry) -> ProviderConfig:
@@ -167,6 +163,8 @@ def _default_api_for_kind(kind: str) -> ProviderApi:
 > 上面的代码展示了 catalog → config 的单向翻译：依据 `entry.kind` 分派到对应 frozen 子类，`thinking_defaults` 始终初始化为空（用户偏好是后来叠加的）。
 
 ### 加载与保存 `providers.json`
+
+这个模块管理用户偏好文件 `providers.json` 的读写。它支持两种磁盘格式（新旧兼容），并确保加载时自动合并最新的 catalog 数据——这样 Tau 更新后新增的 provider 会自动出现在用户的配置中，无需手动编辑文件。
 
 - `provider_settings_path(paths)` — `paths.home / "providers.json"`.
 - `load_provider_settings(paths)` — if the file is absent, fall back to
@@ -203,7 +201,7 @@ def save_provider_settings(settings: ProviderSettings, paths=None) -> Path:
     _atomic_write_text(path, dumps(settings.to_json(), indent=2, sort_keys=True) + "\n")
     return path
 ```
-> `load` 在文件缺失时只回退到 effective catalog 配置；存在则解析后把最新 catalog 合并进来。`save` 先落盘自定义 provider 定义，再经临时文件原子替换，写前备份 `.bak`。
+> `load` 在文件缺失时只回退到 effective catalog 配置；存在则解析后把最新 catalog 合并进来。`save` 先落盘自定义 provider 定义，再经临时文件原子替换，写前备份 `.bak`。这种"先备份再原子替换"的策略确保即使写入过程中断电或崩溃，也不会损坏配置文件。
 
 ### 合并与偏好应用
 
@@ -254,7 +252,7 @@ def _append_catalog_providers(providers, catalog_configs, *, paths):
             appended.append(provider)
     return tuple(appended)
 ```
-> 合并语义是"本地优先"：本地配置的值（头、compat、超时、thinking_defaults）覆盖 catalog 的 incoming 值，避免 catalog 刷新抹掉用户自定义。
+> 合并语义是"本地优先"：本地配置的值（头、compat、超时、thinking_defaults）覆盖 catalog 的 incoming 值，避免 catalog 刷新抹掉用户自定义。这就像 `.gitignore` 文件：系统有默认规则，但你添加的自定义规则始终生效。
 
 ### 解析 JSON（`provider_settings_from_json` 及相关函数）
 
@@ -274,17 +272,12 @@ a malformed `providers.json` fails loudly with a clear `ProviderConfigError`.
 
 ### Thinking 级别解析
 
-A cluster of helpers decides what thinking modes a provider/model pair
-supports and how a `ThinkingLevel` maps to a wire value:
+一组辅助函数决定某个 provider/model 对支持哪些思考模式，以及 `ThinkingLevel` 如何映射到线协议值：
 
-- `provider_thinking_levels(provider, model=None)` — the available levels,
-  honoring `reasoning`, `thinking_levels`, `thinking_models`, and the model's
-  `thinking_level_map`.
-- `provider_thinking_unavailable_reason(...)` — human-readable reason when no
-  thinking modes exist (e.g. "not a reasoning model").
-- `provider_default_thinking_level(...)` — the preferred default level.
-- `_levels_from_thinking_map`, `_metadata_supports_thinking_level`,
-  `_thinking_level_map_supports` — map/level math.
+- `provider_thinking_levels(provider, model=None)` —— 返回可用的思考级别，综合考虑 `reasoning`（模型是否为推理型模型）、`thinking_levels`（provider 声明的可用级别列表）、`thinking_models`（支持思考的模型白名单）以及模型的 `thinking_level_map`（每个级别映射到 provider 特定的 wire 值）。
+- `provider_thinking_unavailable_reason(...)` —— 当无思考模式可用时返回人类可读的原因（如"不是推理模型"）。
+- `provider_default_thinking_level(...)` —— 首选的默认级别。
+- `_levels_from_thinking_map`、`_metadata_supports_thinking_level`、`_thinking_level_map_supports` —— 级别映射与计算。
 
 ```python
 def provider_thinking_levels(provider, *, model=None) -> tuple[ThinkingLevel, ...]:
@@ -308,29 +301,26 @@ def _thinking_level_map_supports(thinking_level_map, level) -> bool:
         return thinking_level_map[level] is not None   # 显式 None 表示禁用
     return level != "xhigh"                             # 默认除 xhigh 外都支持
 ```
-> 思考级别的可用性由两层决定：provider 是否声明了 `thinking_levels`，以及 per-model 的 `thinking_level_map` 是否把该级别映射到非空 wire 值。
+> 思考级别的可用性由两层决定：provider 是否声明了 `thinking_levels`，以及 per-model 的 `thinking_level_map` 是否把该级别映射到非空 wire 值。这就像手机套餐的"可用功能列表"：运营商（provider）提供一组功能，但具体到你的手机型号（model），某些功能可能不支持（映射为 None）。
 
 ### 构建运行时配置（`tau_ai` 胶水层）
 
 以下是 `provider_runtime.py` 所调用的函数：
 
 - `openai_compatible_config_from_provider(provider, *, credential_reader,
-  model, thinking_level) -> OpenAICompatibleConfig` — assembles the live
-  `tau_ai.OpenAICompatibleConfig`: resolves the API key, picks the model's base
-  URL (honoring `OPENAI_BASE_URL` for the default provider), computes
-  `reasoning_effort` from the thinking level, derives `compat` (including
-  provider-specific quirks via `_detected_compat`), and sets
-  `thinking_format` / `include_reasoning_effort_none`.
-- `anthropic_config_from_provider(...)` — same idea for Anthropic, computing a
-  thinking budget and effort.
-- `_detected_compat(provider, model)` — encodes per-vendor quirks (Together,
-  Z.ai, Moonshot, Grok, DeepSeek, Cerebras, OpenRouter) as `compat` flags:
-  `supportsStore`, `supportsReasoningEffort`, `maxTokensField`,
-  `thinkingFormat`, `supportsStrictMode`, etc.
-- `provider_kind`, `provider_has_usable_credentials`, `_api_key_from_provider`,
-  `_provider_api`, `_model_base_url`, `_model_headers`, `_model_compat`,
-  `_model_max_tokens` — small accessors that consult both provider-level and
-  model-level metadata, with sensible fallbacks.
+  model, thinking_level) -> OpenAICompatibleConfig` —— 组装活的
+  `tau_ai.OpenAICompatibleConfig`：解析 API key，选取模型的 base
+  URL（默认 provider 支持 `OPENAI_BASE_URL` 覆盖），根据思考级别计算
+  `reasoning_effort`，派生 `compat`（包括通过 `_detected_compat` 检测的
+  provider 特有行为），并设置 `thinking_format` / `include_reasoning_effort_none`。
+- `anthropic_config_from_provider(...)` —— 同理用于 Anthropic，计算思考预算和力度。
+- `_detected_compat(provider, model)` —— 把各厂商特有的行为（Together、
+  Z.ai、Moonshot、Grok、DeepSeek、Cerebras、OpenRouter）编码为 `compat` 标志：
+  `supportsStore`、`supportsReasoningEffort`、`maxTokensField`、
+  `thinkingFormat`、`supportsStrictMode` 等。
+- `provider_kind`、`provider_has_usable_credentials`、`_api_key_from_provider`、
+  `_provider_api`、`_model_base_url`、`_model_headers`、`_model_compat`、
+  `_model_max_tokens` —— 小型访问器，同时查阅 provider 级和模型级元数据，并提供合理的回退值。
 
 ```python
 def openai_compatible_config_from_provider(provider, *, credential_reader=None,
@@ -370,21 +360,20 @@ def _detected_compat(provider, model) -> dict[str, Any]:
         # ...supportsStrictMode / supportsLongCacheRetention 等亦按厂商翻转
     }
 ```
-> `openai_compatible_config_from_provider` 是"纯翻译"的收口：把持久化设置 + 环境（`OPENAI_BASE_URL`、凭据、thinking 映射）拼成 `tau_ai.OpenAICompatibleConfig`，全程不触网。
+> `openai_compatible_config_from_provider` 是"纯翻译"的收口：把持久化设置 + 环境（`OPENAI_BASE_URL`、凭据、thinking 映射）拼成 `tau_ai.OpenAICompatibleConfig`，全程不触网。这就是翻译层的价值：所有复杂性在"离线"时就处理完了，真正发请求时只需要一个干净的配置对象。
 
 > **为什么本模块从不触碰模型。** `provider_config.py` 是一个纯粹的翻译层:
-> 目录数据 + 用户偏好 + 环境进去,类型化的 `tau_ai` 配置对象出来。它从不打开连接或
-> 流式传输响应;那是 `provider_runtime.py` 的职责。将翻译与 I/O 隔离意味着整个配置
-> 表面——合并、偏好应用、thinking 级别解析——都可以用纯值和无网络的方式测试,
-> 格式错误的 `providers.json` 会在解析时就大声报错(明确的 `ProviderConfigError`),
-> 而不是在请求中途失败。这就是"小层胜于魔法":每层只做一件事,把类型化的值交给下一层。
+> 目录数据 + 用户偏好 + 环境进去，类型化的 `tau_ai` 配置对象出来。它从不打开连接或
+> 流式传输响应；那是 `provider_runtime.py` 的职责。将翻译与 I/O 隔离意味着整个配置
+> 表面——合并、偏好应用、thinking 级别解析——都可以用纯值和无网络的方式测试，
+> 格式错误的 `providers.json` 会在解析时就大声报错（明确的 `ProviderConfigError`），
+> 而不是在请求中途失败。这就是"小层胜于魔法"：每层只做一件事，把类型化的值交给下一层。这就像工厂的质检站：原料进来时就检测合格与否，不合格的当场退回，而不是等到组装线上才发现问题。
 
 ---
 
 ## `tau_coding/provider_runtime.py` — 实时 provider 构造
 
-本文件把一个持久的 `ProviderConfig` 转换为一个真正的 `tau_ai`
-`ModelProvider` 实例，并接好凭据与 OAuth 刷新。
+本文件把一个持久的 `ProviderConfig` 转换为一个真正的 `tau_ai` `ModelProvider` 实例，并接好凭据与 OAuth 刷新。这是 Tau 真正"触网"的边界——前面所有的层都是数据翻译，而这里产出的是 agent 循环真正流式消费的活的 `ModelProvider`。把它想象成"把配置文件变成一个能打电话的客户端"。
 
 ### `ClosableModelProvider`（Protocol）
 
@@ -443,7 +432,7 @@ def create_model_provider(provider, *, credential_store=None,
         return OpenAICompatibleProvider(compatible_config)
     raise ProviderConfigError(f"Unsupported provider config: {provider.name}")
 ```
-> `create_model_provider` 是真正"触网边界"：它把 `provider_config` 翻译出的 `tau_ai` config 包进 `ModelProvider`，并按 `api` 身份分派到专用 provider；OAuth 凭据通过 `OAuthRuntimeCredentialResolver` 在每次请求前刷新。
+> `create_model_provider` 是真正"触网边界"：它把 `provider_config` 翻译出的 `tau_ai` config 包进 `ModelProvider`，并按 `api` 身份分派到专用 provider；OAuth 凭据通过 `OAuthRuntimeCredentialResolver` 在每次请求前刷新。这个设计确保了凭据管理的集中化——所有密钥处理逻辑都在这一个地方，便于审计和维护。
 
 ### `OpenAICodexCredentialResolver`
 
@@ -477,7 +466,7 @@ class OAuthRuntimeCredentialResolver:
         auth = oauth_provider.runtime_auth(refreshed)
         return RuntimeProviderAuth(api_key=auth.api_key, base_url=auth.base_url, headers=auth.headers)
 ```
-> 该中立解析器与具体 provider 解耦：只负责"取 OAuth 凭据 → 刷新 → 向 OAuth provider 请求运行时鉴权"，返回的 `RuntimeProviderAuth` 注入到 `tau_ai` 的 provider config 中。
+> 该中立解析器与具体 provider 解耦：只负责"取 OAuth 凭据 → 刷新 → 向 OAuth provider 请求运行时鉴权"，返回的 `RuntimeProviderAuth` 注入到 `tau_ai` 的 provider config 中。这种设计让你可以为不同的 provider 实现不同的 OAuth 流程，而不需要修改调用方的代码——这正是"依赖倒置"原则的体现。
 
 ### 辅助函数
 
@@ -486,12 +475,12 @@ class OAuthRuntimeCredentialResolver:
 - `_oauth_credential(provider, store)` — 若 provider 注册了 OAuth 凭据则取之。
 - `_required_oauth_provider(name)` — 返回已注册的 `OAuthProvider`，没有则抛错。
 
-> **为什么运行时构造是独立的一层。** 本文件是 Tau 最终调用 `tau_ai` 的地方:
-> 它上面的所有层都是数据翻译,而本文件产出的是 agent loop 真正流式消费的活的
+> **为什么运行时构造是独立的一层。** 本文件是 Tau 最终调用 `tau_ai` 的地方：
+> 它上面的所有层都是数据翻译，而本文件产出的是 agent loop 真正流式消费的活的
 > `ModelProvider`。把凭据解析和 OAuth 刷新集中在这里——包裹在 `ClosableModelProvider`
 > 中以便 Tau 在运行结束时 `aclose()` 释放资源——使持久化配置层完全不包含密钥和
-> 网络状态。这是"核心保持可移植"原则在边界处的体现:可移植的部分(目录、配置、
-> agent harness)保持纯净,所有环境特定的连线都集中在一个命名清晰的边界中。
+> 网络状态。这是"核心保持可移植"原则在边界处的体现：可移植的部分（目录、配置、
+> agent harness）保持纯净，所有环境特定的连线都集中在一个命名清晰的边界中。这就像一个电器的电源适配器：内部电路（可移植部分）不需要知道你用的是哪国电压，适配器（运行时层）负责把本地电压转成电器需要的格式。
 
 ---
 
@@ -691,7 +680,7 @@ def upsert_provider(settings, provider, *, set_default=False) -> ProviderSetting
 把 catalog 中缺失的 provider 追加到已有列表。规则:用户 catalog 来源的 provider 总是追加;内建 provider 仅当 `provider_has_usable_credentials(provider, credential_reader=credential_store)` 为真才追加(凭据可用才显示)。用 `FileCredentialStore(credentials_path(paths))` 作凭据读取器;已存在名跳过;返回追加后的 tuple。
 
 ### _merge_provider_config(existing, incoming) -> ProviderConfig
-合并替换配置而不丢失本地自定义。若 `type(existing) is not type(incoming)` 直接返回 incoming(类型不同不合并)。按类型分派:`OpenAICodexProviderConfig` 用内联 `replace` 合并;`OpenAICompatibleProviderConfig` 调 `_merge_openai_compatible_provider`;`AnthropicProviderConfig` 调 `_merge_anthropic_provider`;都不匹配返回 incoming。注意语义:**incoming 为"新/catalog 侧",existing 为"本地/旧侧",本地优先**。
+合并替换配置而不丢失本地自定义。这个机制确保当你更新 Tau（拿到新的 catalog 数据）时，你之前自定义过的 headers、超时设置、thinking 偏好等不会被覆盖——新数据只补充你没有自定义过的部分。若 `type(existing) is not type(incoming)` 直接返回 incoming（类型不同不合并）。按类型分派：`OpenAICodexProviderConfig` 用内联 `replace` 合并；`OpenAICompatibleProviderConfig` 调 `_merge_openai_compatible_provider`；`AnthropicProviderConfig` 调 `_merge_anthropic_provider`；都不匹配返回 incoming。注意语义：**incoming 为"新/catalog 侧"，existing 为"本地/旧侧"，本地优先**。
 
 ### _merge_openai_compatible_provider(existing, incoming) -> OpenAICompatibleProviderConfig
 具体合并 OpenAI 兼容 provider。模型列表 `models = _unique_strings((*incoming.models, *existing.models))`(incoming 在前,保序去重)。用 `replace(incoming, ...)`:`models` 如上;`default_model` 取 `existing.default_model`(若在 models 内)否则 incoming 的;`headers={**incoming.headers, **existing.headers}`(本地覆盖);`compat` 本地覆盖;`model_metadata` 用 `_merge_provider_model_metadata(incoming, existing)`;超时/重试/最大延迟**全部取 existing 的本地值**;`context_windows` 本地覆盖;`thinking_levels/models/default/parameter` 仅在 `existing.thinking_levels is not None`(即本地显式配置过)时取 existing,否则用 incoming;`thinking_defaults` 取 existing 本地。
@@ -748,7 +737,7 @@ def upsert_provider(settings, provider, *, set_default=False) -> ProviderSetting
 校验 model 是否由 provider 声明。若 `model in provider.models` 直接返回;否则抛 `ProviderConfigError`,列出 `", ".join(sorted(provider.models))`(空则 "none")。
 
 ### provider_thinking_levels(provider, *, model=None) -> tuple[ThinkingLevel, ...]
-返回某 provider/model 支持的 thinking 级别。先 `selected_model = model or provider.default_model`、`metadata = _metadata_for_model(...)`。若 metadata 且 `metadata.reasoning is False` → 返回 `()`(明确非推理模型)。若 `provider.thinking_levels is None`:仅当 metadata 且 `reasoning is True` 时返回 `_levels_from_thinking_map(metadata.thinking_level_map)`,否则 `()`。若 provider 声明了 `thinking_models` 且 selected_model 不在其中 → `()`。否则返回 `provider.thinking_levels` 中"metadata 为 None 或 `_metadata_supports_thinking_level` 为真"的级别过滤结果。
+返回某 provider/model 支持的 thinking 级别。这是**思考预算**（thinking budget）配置的核心函数——它决定了用户可以在哪些"思考深度"之间切换。先 `selected_model = model or provider.default_model`、`metadata = _metadata_for_model(...)`。若 metadata 且 `metadata.reasoning is False` → 返回 `()`（明确非推理模型）。若 `provider.thinking_levels is None`：仅当 metadata 且 `reasoning is True` 时返回 `_levels_from_thinking_map(metadata.thinking_level_map)`，否则 `()`。若 provider 声明了 `thinking_models` 且 selected_model 不在其中 → `()`。否则返回 `provider.thinking_levels` 中"metadata 为 None 或 `_metadata_supports_thinking_level` 为真"的级别过滤结果。
 
 ### provider_thinking_unavailable_reason(provider, *, model=None) -> str | None
 解释某 provider/model 为何没有可配置 thinking 模式(无原因返回 None)。流程:`selected_model` 与 metadata 同前;若 metadata.reasoning is False → 返回 "is not a reasoning model"。若 `provider.thinking_levels is None`:metadata.reasoning 为 True 则返回 None;若是 `OpenAICodexProviderConfig` → 返回 Codex 订阅暂未实现 effort 映射的说明;否则返回 "does not declare thinking_levels"。若 `provider.thinking_models` 存在且 selected_model 不在其中 → 返回 "is not declared in thinking_models"。否则返回 None(可用)。
@@ -861,7 +850,7 @@ def openai_compatible_config_from_provider(provider, *, credential_reader=None,
 校验三个数值字段。`timeout_seconds`:bool 或 `<=0` 抛错;`max_retries`:非 int 或 bool 或 `<0` 抛错;`max_retry_delay_seconds`:非 int/float 或 bool 或 `<0` 抛错。
 
 ### _validate_context_windows(context_windows: dict[str, int]) -> None
-校验 context window 字典。每个 key 必须非空字符串;value 必须为正 int(排除 bool),否则抛 `ProviderConfigError`。
+校验 context window 字典——这个字典记录了每个模型的上下文窗口大小（即模型一次能处理的最大 token 数）。每个 key 必须非空字符串;value 必须为正 int（排除 bool），否则抛 `ProviderConfigError`。上下文窗口越大，模型能"记住"的对话历史就越长，但成本也越高。
 
 ### _validate_model_metadata(models, model_metadata) -> None
 校验 model_metadata 与 models 一致且合法。每个 metadata key 必须在 `models` 中(否则抛错);`context_window`/`max_tokens` 非 None 时必须为正;`input` 每项须为 `"text"`/`"image"`;`cost` 值非负;`cost_tiers` 经 `_validate_runtime_cost_tiers`;compat 经 `_validate_json_object`;headers 经 `_validate_string_dict`;thinking_level_map 每个 level 经 `normalize_thinking_level`,value 为 None 或非空字符串。

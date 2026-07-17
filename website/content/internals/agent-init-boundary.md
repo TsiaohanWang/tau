@@ -5,6 +5,11 @@ code_files:
   - tau_agent/__init__.py
 ---
 
+`tau_agent/__init__.py` 是整个 `tau_agent` 包的"门面"——外部代码（尤其是
+`tau_coding`）只通过 `from tau_agent import ...` 使用它，不需要知道内部由哪些子模块
+组成。本章还会解释 `tau_agent` 与 `tau_ai` 之间的依赖边界：谁依赖谁、为什么这样
+设计、以及这种设计如何让单元测试能用 fake 实现替代真实网络。
+
 ## `tau_agent/__init__.py` — 公共导出面
 
 这个文件把 `tau_agent` 所有公开符号集中 re-export，并写进 `__all__`。分组看：
@@ -51,6 +56,12 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
    `tau_ai.events` 的 `ProviderEvent` 子类；`tau_agent/harness.py` 同样只 import
    `tau_ai.provider.ModelProvider`。它**从不** import 任何具体 provider 类
    （`OpenAICompatibleProvider` 等），也从不碰 HTTP。
+
+   > **什么是 Protocol？** 这里指的是 `typing.Protocol`——一种 Python 的结构化子类型
+   > 机制：只要一个类实现了 Protocol 声明的方法签名，就自动满足这个接口，不需要显式
+   > 继承。`ModelProvider` 是 `tau_ai` 定义的一个 Protocol，声明了 `stream_response`
+   > 方法的签名。`tau_agent` 只认这个"形状"，不关心具体是哪家模型提供商的实现——
+   > 这样在测试时可以用 `FakeProvider` 完全替代真实网络请求。
 
 3. **所以真正的单向数据流是**：
    - `tau_ai` 提供"把模型响应变成 `ProviderEvent` 流"的能力（依赖 `tau_agent` 的数据类型）；
@@ -164,7 +175,7 @@ from tau_agent.harness import (
 - **如何构成公共面**:它是把 `tau_ai` 的 `ModelProvider` 与 agent 的 `tools`/系统提示/轮次上限绑定在一起的"接线配置",是构造 `AgentHarness` 的唯一入口参数。
 
 ```python
-# __init__.py:36 — AgentHarnessConfig 的接线配置（来自 harness.py）
+# harness.py:36 — AgentHarnessConfig 的接线配置
 @dataclass(slots=True)
 class AgentHarnessConfig:
     provider: ModelProvider
@@ -184,7 +195,7 @@ class AgentHarnessConfig:
 - **如何构成公共面**:它定义了 agent 向外广播事件时,订阅者必须实现的"函数形状",是事件驱动集成的契约类型。
 
 ```python
-# __init__.py:19 — EventListener 是模块级类型别名
+# harness.py:19 — EventListener 是模块级类型别名
 EventListener = Callable[[AgentEvent], Awaitable[None] | None]
 ```
 
@@ -196,7 +207,7 @@ EventListener = Callable[[AgentEvent], Awaitable[None] | None]
 - **如何构成公共面**:`harness.queued_messages` 返回它,让 UI 读取当前排队状态以展示待发消息,而无需碰 harness 内部 deque。
 
 ```python
-# __init__.py:23 — QueuedMessages 是 frozen 快照（来自 harness.py）
+# harness.py:23 — QueuedMessages 是 frozen 快照
 @dataclass(frozen=True, slots=True)
 class QueuedMessages:
     steering: tuple[AgentMessage, ...] = ()
@@ -215,7 +226,7 @@ class QueuedMessages:
 - **如何构成公共面**:agent 循环与 harness 用它向 provider/工具传递"是否该停"的信号。注意它是 `tau_agent` 自己的实现;而 `run_agent_loop` 接受的是 `tau_ai.provider.CancellationToken`(协议),二者通过 `is_cancelled()` 形状兼容。
 
 ```python
-# __init__.py:48 — SimpleCancellationToken 的轻量实现
+# harness.py:48 — SimpleCancellationToken 的轻量实现
 class SimpleCancellationToken:
     def __init__(self):
         self._cancelled = False
@@ -241,6 +252,12 @@ class SimpleCancellationToken:
   - 有 tool call 时:调 `_execute_tool_calls` 逐个执行(未知工具名 → `_unknown_tool_result`;取消 → `_cancelled_tool_result`),每个结果追加为 `ToolResultMessage`,并 `yield ToolExecutionStart/Update/EndEvent`。
   - `max_turns` 耗尽时 `yield ErrorEvent(recoverable=True)`;最后 `yield AgentEndEvent()`。
 - **如何构成公共面**:它是 harness 之下的"引擎",把 provider 流与工具执行编排成统一的 `AgentEvent` 流。需要无状态/嵌入式使用的调用方可以直接用它本身,而不经过 `AgentHarness`。
+
+> **什么是 AsyncIterator？** `AsyncIterator[AgentEvent]` 意味着这个函数返回的不是一个
+> 值，而是一个可以被 `async for` 循环逐个消费的事件序列。每次迭代都会 yield 出
+> 一个 `AgentEvent`，消费者可以边接收事件边做处理（比如实时打印、发送到前端），
+> 而不是等函数全部执行完才拿到结果。这在 LLM 流式场景中至关重要——模型可能需要
+> 数秒才回复完毕，但每个 token 生成时就应该立即展示给用户。
 
 ```python
 # __init__.py:29 — run_agent_loop 从 loop 子模块 re-export
@@ -436,7 +453,7 @@ async def run_agent_loop(*, provider, model, system, messages, tools,
 ### 导出项:`JsonlSessionStorage`
 
 - **来源**:`tau_agent.session.storage`(经 `session/__init__.py`)。
-- **契约**:`storage.py:24` 的本地追加式 JSONL 存储实现。构造接收 `path: str | Path`。`async def append(entry)` 在父目录不存在时自动创建,并以追加模式写一行(末尾带 `\n`);`async def read_all()` 文件不存在则返回 `[]`,否则按行反序列化为 `SessionEntry` 列表。
+- **契约**:`storage.py:24` 的本地追加式 JSONL 存储实现。构造接收 `path: str | Path`。`async def append(entry)` 在父目录不存在时自动创建,并以追加模式写一行(末尾带 `\n`);`async read_all()` 文件不存在则返回 `[]`,否则按行反序列化为 `SessionEntry` 列表。
 - **如何构成公共面**:`SessionStorage` 协议的默认本地实现,把上面那些 entry 落到磁盘(注意:agent 包只定义"如何序列化/存",**不知道文件该放在哪个目录**——路径由调用方传入;CLI 层才决定 session 文件位置)。
 
 ### 导出项(相关但未在 `tau_agent` 顶层再导出,列出以明确边界):`SessionStorage`

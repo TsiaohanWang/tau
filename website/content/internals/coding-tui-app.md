@@ -10,6 +10,8 @@ code_files:
 
 这是 `tau_coding` 中最大的文件（5741 行）。它包含 `TauTuiApp` 类，以及一大堆用于各种选择器和对话框的 `ModalScreen`（模态屏幕）子类。它还导入并编排两个较大的兄弟模块（分别在下面的 `tui/widgets.py` 与 `tui/terminal_title.py` 中单独讲解）。`app.py` 按层次讲解。
 
+**Textual** 是一个 Python TUI（终端用户界面）框架，让你可以在终端中构建类似 Web 应用的界面——有布局、样式、事件处理，但全部运行在文字终端里。**模态屏幕**（Modal Screen）就是"弹窗"——它会覆盖在主界面之上，用户必须先处理它（比如从列表中选择、输入文本、点击确认）才能回到主界面。这是 Textual 的 `Screen` 组件实现的。
+
 ### 模块常量与小类
 
 - `LoginRequiredProvider` — 一个桩（stub）`ModelProvider`，用于在*任何凭据都不存在之前*就能打开 TUI；它的 `stream_response` 会立即产出一条 `ProviderErrorEvent` 以提示登录。
@@ -217,7 +219,7 @@ async for event in self.session.prompt(text, source=..., custom_type=..., detail
 
 > 本文件是 Tau 编码会话的交互式 Textual 前端。它把 `CodingSession` 的 agent 事件流渲染到图形界面,并提供命令、登录、会话选择、补全、扩展 UI 桥等全套交互。下文按"类 → 方法"逐条展开,严格基于源码行为。
 
-> 设计要点:`TauTuiApp` 不持有任何 agent 决策逻辑,所有分支/模型选择/压缩等动作都委派给 `CodingSession`;本文件只负责把 `AgentEvent` 投影到 widget,以及把 widget 交互回传为命令(`TUI = one possible frontend`,与 README "The core stays portable… Frontends consume events" 一致)。
+> **设计要点：**`TauTuiApp` 不持有任何 agent 决策逻辑，所有分支/模型选择/压缩等动作都委派给 `CodingSession`；本文件只负责把 `AgentEvent` 投影到 widget，以及把 widget 交互回传为命令——这体现了"**TUI = one possible frontend**"的架构原则：核心 agent 逻辑可以被任何前端（CLI、TUI、Web）复用，UI 只是一个"消费者"。
 
 ---
 
@@ -933,7 +935,7 @@ provider 订阅 OAuth 登录流程。
 
 ## TauTuiApp(App[None])
 
-`CodingSession` 的交互式 Textual 前端,是整个文件的核心。
+`CodingSession` 的交互式 Textual 前端，是整个文件的核心。"交互式"意味着用户可以在终端中输入命令、查看 agent 响应、使用快捷键切换会话等——所有操作都在终端内完成，无需离开命令行。
 
 ### 类级 `TITLE = "Tau"` 与 `CSS`
 
