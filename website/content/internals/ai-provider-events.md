@@ -334,6 +334,5 @@ from tau_ai.provider import CancellationToken, ModelProvider
 ---
 
 <!-- NAV -->
-[← 源码剖析总览]({{< relref "./source-walkthrough.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
 [→ tau_ai · 环境配置]({{< relref "./ai-env-config.md" >}})

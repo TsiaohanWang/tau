@@ -18,7 +18,7 @@ description: A bottom-up, file-by-file dissection of the Tau source — derived 
 
  > **与本站其他文档的关系。** 上方的 `Architecture overview` / `Design principles` /
  > `Build your own frontend` / `The agent loop` 等是官方视角的**概念性**介绍;
- > 本页及其下链接的 24 个剖析页则是**逐文件、逐方法**的源码级拆解(衍生解读)。
+ > 本页及其下链接的 28 个剖析页则是**逐文件、逐方法**的源码级拆解(衍生解读)。
  > 概念页讲"为什么这样设计",剖析页讲"代码里具体怎么实现",二者互补、不重复。
 
 ### `tau_ai` — 与模型对话
@@ -73,7 +73,7 @@ description: A bottom-up, file-by-file dissection of the Tau source — derived 
 
  ## 一致性校对记录
 
-本剖析已对全部 27 个 `internals/` 页面完成一次一致性 / 交叉引用校对：
+本剖析已对全部 28 个 `internals/` 页面完成一次一致性 / 交叉引用校对：
 
 - **链接完整性**：所有 `relref` 内部链接目标均存在，无悬空引用（含 `../guides/*` 与 `../reference/*`）。
 - **符号准确性**：抽样核验的关键符号与源码一致，包括 `CodingSession.prompt` / `handle_command` / `set_model` / `emit_pending_session_start` / `set_thinking_level`、`ExtensionAPI.register_tool` / `register_command` / `send_user_message`、`TuiEventAdapter.apply`、`CommandRegistry.get`(→`SlashCommand | None`) / `list_commands`、`OAuthProvider.runtime_auth`、`LOGIN_PROVIDER_ALIASES`（`dict[str, tuple[str, str]]`，`anthropic-api`→`("anthropic","api-key")`、`anthropic-subscription`→`("anthropic","subscription")`）、`provider_runtime.create_model_provider`。

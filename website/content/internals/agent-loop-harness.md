@@ -858,3 +858,4 @@ def _append_interrupted_tool_results(self):
 <!-- NAV -->
 [← tau_agent · 数据模型]({{< relref "./agent-models.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
+[→ tau_agent · 会话持久化树]({{< relref "./agent-session-tree.md" >}})
