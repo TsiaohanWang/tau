@@ -728,7 +728,7 @@ section{ padding:88px 0; }
 .code-panel-tabs{
   display:flex; gap:0;
   border-bottom:1px solid var(--grid-strong);
-  overflow-x:auto; flex-shrink:0;
+  overflow-x:auto; flex-shrink:0; min-width:0;
   scrollbar-width:none; background:var(--ground);
 }
 .code-panel-tabs::-webkit-scrollbar{ display:none; }
