@@ -102,22 +102,53 @@ Tau 源码大量使用 Python 类型注解。以下是你会在教程中反复�
 
 ## Pydantic 速查
 
-Tau 的消息、事件、条目等数据结构全部基于 [Pydantic](https://docs.pydantic.dev/) 构建。Pydantic 是一个 Python 数据验证库——你声明字段的类型，它在创建实例时自动校验、序列化为 JSON 时自动转换。
+Tau 的消息、事件、条目等数据结构全部基于 [Pydantic](https://docs.pydantic.dev/) 构建。简单来说，Pydantic 就是"带自动校验的 dataclass"——你声明字段类型，它帮你检查输入是否合法、自动在 Python 对象和 JSON 之间转换。
 
-| 概念 | 示例 | 含义 |
+### 一个具体例子
+
+Tau 的 `UserMessage` 长这样（`messages.py:92`）：
+
+```python
+class UserMessage(WireModel):
+    role: Literal["user"] = "user"     # 只能是 "user" 这个字符串
+    content: UserContent                # 文本或图片列表
+    timestamp: int = Field(default_factory=current_timestamp_ms)
+```
+
+它继承了 `WireModel`，而 `WireModel` 是这样定义的（`messages.py:23`）：
+
+```python
+class WireModel(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",           # 不允许多余字段（拼错字段名会报错）
+        populate_by_name=True,    # 构造时可以用 Python 字段名
+        validate_by_name=True,    # 或者用 JSON 别名
+        serialize_by_alias=True,  # 序列化时输出 camelCase 别名
+        alias_generator=_to_camel,  # snake_case → camelCase 自动转换
+    )
+```
+
+所以当你写 `UserMessage(content="hello")` 时，Pydantic 会：
+1. 自动填上 `role="user"` 和 `timestamp=当前时间`
+2. 把 `content` 校验为合法的 `UserContent` 类型
+3. 序列化为 JSON 时，`tool_call_id` 会自动变成 `toolCallId`
+
+### 核心概念速查
+
+| 概念 | 含义 | Tau 中的用途 |
 |---|---|---|
-| **`BaseModel`** | `class UserMessage(BaseModel)` | Pydantic 数据模型的基类。声明字段类型后，Pydantic 自动处理校验、序列化、反序列化 |
-| **`WireModel`** | `class UserMessage(WireModel)` | Tau 自定义的 BaseModel 子类，统一设置了 `extra="forbid"`（禁止未知字段）和 `populate_by_name=True`（允许用别名构造） |
-| **`Field(...)`** | `role: Literal["user"] = Field(default="user")` | 字段配置器：设置默认值、别名、描述、校验规则等 |
-| **`Field(discriminator="type")`** | `Annotated[A \| B, Field(discriminator="type")]` | 联合类型判别器：根据 `type` 字段的值自动决定反序列化为 A 还是 B |
-| **`model_validator`** | `@model_validator(mode="before")` | 模型级校验器：在实例创建前/后对整个模型做自定义校验或转换 |
-| **`model_copy()`** | `msg.model_copy(deep=True)` | 深拷贝一个 Pydantic 实例，得到完全独立的副本 |
-| **`model_dump()`** | `msg.model_dump()` | 将模型转换为 Python 字典（可直接 `json.dumps()`） |
-| **`model_validate()`** | `Model.model_validate(dict)` | 从字典/JSON 反序列化为模型实例，自动校验字段类型 |
-| **`extra="forbid"`** | `model_config = ConfigDict(extra="forbid")` | 禁止传入未声明的字段——多一个字段就报错，防止拼写错误或协议变更导致静默失败 |
-| **`@dataclass`** | `@dataclass(slots=True)` | Python 原生数据类（非 Pydantic），用于纯内存结构（如 `AgentTool`），不需要 JSON 序列化 |
+| **`BaseModel`** | Pydantic 数据模型基类。声明字段类型后，自动校验、序列化、反序列化 | `WireModel` 的父类 |
+| **`WireModel`** | Tau 的 BaseModel 子类（`messages.py:23`），统一设置了 `extra="forbid"` + camelCase 别名 | 所有消息、事件、条目类的基类 |
+| **`Field(...)`** | 字段配置器。`default_factory=func` 表示"每次创建时调用 func 生成默认值" | `timestamp` 字段用它自动填当前时间 |
+| **`Field(discriminator="type")`** | 联合类型判别器。根据 `type` 字段的值自动决定反序列化为哪个子类 | `AgentEvent` 联合类型用它区分 10+ 种事件 |
+| **`model_validator`** | 模型级校验器。在创建前/后对整个模型做自定义转换 | `AssistantMessage` 用它把 `content: str` 自动包装成块列表 |
+| **`model_copy(deep=True)`** | 深拷贝一个实例，得到完全独立的副本 | agent 循环中复制 `partial` 消息避免竞态 |
+| **`model_dump()`** | 把模型转为 Python 字典，再 `json.dumps()` 就是 JSON | 会话持久化时写入 JSONL |
+| **`model_validate(dict)`** | 从字典/JSON 反序列化为模型实例，自动校验字段类型 | 从 JSONL 恢复会话时读取消息 |
+| **`extra="forbid"`** | 禁止传入未声明的字段——多一个字段就报错 | 防止协议变更导致静默失败 |
+| **`@dataclass`** | Python 原生数据类（非 Pydantic）。没有自动校验和 JSON 转换 | 纯内存结构如 `AgentTool`、`AgentHarnessConfig` |
 
-> **Pydantic vs dataclass？** 需要 JSON 序列化/反序列化的结构用 Pydantic（如消息、事件、条目）；纯内存的轻量结构用 `@dataclass`（如工具定义、配置）。
+> **为什么用 Pydantic 而不是 dataclass？** 消息需要从 JSON 序列化/反序列化（从磁盘恢复会话、发给模型 API）。Pydantic 提供自动校验和类型判别，普通 dataclass 做不到。所以凡是需要与 JSON 打交道的结构都用 Pydantic，纯内存的轻量结构用 `@dataclass`。
 
 ---
 
