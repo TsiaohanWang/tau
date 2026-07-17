@@ -24,8 +24,8 @@ code_files:
   `ModelChangeEntry`、`ThinkingLevelChangeEntry`、`CompactionEntry`、
   `BranchSummaryEntry`、`LabelEntry`、`LeafEntry`、`SessionInfoEntry`、
   `CustomEntry`）、`SessionState`、`JsonlSessionStorage`。
-- **工具**（`tools.py`）：`AgentTool`、`AgentToolResult`、`ToolCall`、`ToolExecutor`、
-  `ToolUpdateCallback`、`ToolCallRenderer`、`ToolResultRenderer`、`ToolCancellationToken`。
+- **工具**（`tools.py`）：`AgentTool`、`AgentToolResult`、`ToolCancellationToken`、
+  `ToolExecutionMode`、`ToolExecutor`、`ToolUpdateCallback`。
 - **类型**（`types.py`）：`JSONValue`、`JSONPrimitive`、`JSONObject`。
 
 外部（尤其是 `tau_coding`）几乎永远只 `from tau_agent import ...`，不直接 import
@@ -106,7 +106,7 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 
 ## tau_agent/__init__.py — 公共导出面
 
-`tau_agent/__init__.py` 本身只有 113 行,且**没有任何模块内定义的辅助函数、懒加载逻辑、`get_version` 或版本常量**——它纯粹是一个"聚合再导出"(re-export aggregation)模块。文件开头的模块 docstring 是 `"""Portable agent harness primitives for Tau."""`,紧接着用 7 个 `from ... import (...)` 语句从子模块拉取符号,最后用一个显式 `__all__` 列表(第 63–113 行)声明公共契约。
+`tau_agent/__init__.py` 本身只有 68 行,且**没有任何模块内定义的辅助函数、懒加载逻辑、`get_version` 或版本常量**——它纯粹是一个"聚合再导出"(re-export aggregation)模块。文件开头的模块 docstring 是 `"""Portable agent harness primitives for Tau."""`,紧接着用 7 个 `from ... import (...)` 语句从子模块拉取符号,最后用一个显式 `__all__` 列表(第 68 行)声明公共契约。
 
 从源码可以看到三个关键事实:
 
@@ -114,7 +114,7 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 2. **没有惰性加载**:所有符号在 `import tau_agent` 时一次性加载,不存在按需导入的 thunk、也不存在 `_LAZY` 注册表之类的机制。
 3. **不存在 `get_version` 之类的辅助函数**:根据对 `tau_agent/__init__.py` 全文(仅 113 行)的检查,以及在整个 `tau_agent/` 包内搜索 `get_version` 均无匹配,确认该包**不提供** `get_version`。任何版本查询入口若存在,应在别处(如 `pyproject.toml` 或 `tau/` 门面包),而非本文件。
 
-因此 `__init__.py` 的"公共导出面"完全由 `__all__` 的 51 个名字构成。下面逐条拆解每一项:它来自哪个子模块、对外暴露的契约是什么、以及它如何拼成 `tau_agent` 的 API 表面。
+因此 `__init__.py` 的"公共导出面"完全由 `__all__` 的 54 个名字构成。下面逐条拆解每一项:它来自哪个子模块、对外暴露的契约是什么、以及它如何拼成 `tau_agent` 的 API 表面。
 
 ### 导出项:`__all__`
 
@@ -142,23 +142,23 @@ __all__ = [name for name in globals() if not name.startswith("_")]
 
 ### 导出项:`AgentHarness`
 
-- **来源**:`tau_agent.harness`(第 22–28 行导入)。
-- **契约**:`AgentHarness` 是一个**有状态的、可复用的"agent 大脑"**(`harness.py:63` 的 docstring 原文:*"Reusable stateful agent brain"*)。它持有 transcript(对话记录)并把执行委托给 `run_agent_loop`。它独立于 CLI、Rich、Textual、`session` 文件位置与编码代理的资源加载。
+- **来源**:`tau_agent.harness`(第 18–24 行导入)。
+- **契约**:`AgentHarness` 是一个**有状态的、可复用的"agent 大脑"**(`harness.py:61` 的类定义,docstring 原文:*"Reusable stateful agent brain"*)。它持有 transcript(对话记录)并把执行委托给 `run_agent_loop`。它独立于 CLI、Rich、Textual、`session` 文件位置与编码代理的资源加载。
 - **关键能力**(基于 `harness.py`):
   - 构造时接收 `AgentHarnessConfig` 和可选的初始 `messages`(`harness.py:71`)。
   - 属性:`messages`(只读 transcript 快照)、`config`、`is_running`、`queued_messages`、`pending_message_count`。
   - `append_message` / `replace_messages`:用于恢复或重建会话状态。
-  - `subscribe(listener)`:订阅 `AgentEvent` 流,返回**取消订阅回调**(`harness.py:125`)。
+  - `subscribe(listener)`:订阅 `AgentEvent` 流,返回**取消订阅回调**(`harness.py:107`)。
   - `cancel()`:请求取消当前运行。
-  - `steer` / `steer_message` / `follow_up` / `follow_up_message`:在运行中或下一次运行前,把用户消息压入"转向队列"或"后续队列",返回 `QueueUpdateEvent`。
+  - `steer` / `steer_message` / `follow_up` / `follow_up_message`:在运行中或下一次运行前,把用户消息压入"转向队列"或"后续队列",返回 `QueuedMessages` 快照。
   - `clear_queues` / `pop_latest_follow_up` / `pop_latest_steering`:队列管理。
   - `prompt(content, ...)` → `AsyncIterator[AgentEvent]`:追加用户消息并跑循环。
   - `continue_()` → `AsyncIterator[AgentEvent]`:不追加新用户消息地继续循环。
-  - `append_interrupted_tool_results()`:修复被中断运行留下的"半截工具调用"transcript(给没有对应结果的 `ToolCall` 补一条 `ok=False` 的 `ToolResultMessage`),满足 OpenAI 兼容 provider 对"tool call 必须有 tool result"的要求(`harness.py:280` 起)。
+  - `append_interrupted_tool_results()`:修复被中断运行留下的"半截工具调用"transcript(给没有对应结果的 `ToolCall` 补一条 `ok=False` 的 `ToolResultMessage`),满足 OpenAI 兼容 provider 对"tool call 必须有 tool result"的要求(`harness.py:219`)。
 - **如何构成公共面**:它是 `tau_agent` 对外的"最高层门面"——上层应用(CLI / TUI)通常只直接持有 `AgentHarness`,通过它获得事件流并管理 transcript,而不必自己编排 `run_agent_loop`。
 
 ```python
-# __init__.py:22 — AgentHarness 从 harness 子模块 re-export
+# __init__.py:18 — AgentHarness 从 harness 子模块 re-export
 from tau_agent.harness import (
     AgentHarness, AgentHarnessConfig, EventListener,
     QueuedMessages, SimpleCancellationToken,
@@ -168,13 +168,13 @@ from tau_agent.harness import (
 
 ### 导出项:`AgentHarnessConfig`
 
-- **来源**:`tau_agent.harness`(第 22–28 行导入)。
-- **契约**:`harness.py:38` 定义的 `@dataclass(slots=True)`,是 `AgentHarness` 的配置对象。
+- **来源**:`tau_agent.harness`(第 18–24 行导入)。
+- **契约**:`harness.py:39` 定义的 `@dataclass(slots=True)`,是 `AgentHarness` 的配置对象。
 - **字段**:`provider: ModelProvider`、`model: str`、`system: str`、`tools: list[AgentTool]`(默认空)、`max_turns: int | None`(默认 `None` 表示不限)、`queue_mode: QueueMode`(默认 `"one_at_a_time"`)、`before_tool_call: BeforeToolCall | None`、`after_tool_call: AfterToolCall | None`。其中 `QueueMode = Literal["one_at_a_time", "all"]`(`harness.py:25`)。
 - **如何构成公共面**:它是把 `tau_ai` 的 `ModelProvider` 与 agent 的 `tools`/系统提示/轮次上限绑定在一起的"接线配置",是构造 `AgentHarness` 的唯一入口参数。
 
 ```python
-# harness.py:38 — AgentHarnessConfig 的接线配置
+# harness.py:39 — AgentHarnessConfig 的接线配置
 @dataclass(slots=True)
 class AgentHarnessConfig:
     provider: ModelProvider
@@ -190,7 +190,7 @@ class AgentHarnessConfig:
 
 ### 导出项:`EventListener`
 
-- **来源**:`tau_agent.harness`(第 22–28 行导入),但它是 `harness.py:24` 的类型别名:
+- **来源**:`tau_agent.harness`(第 18–24 行导入),但它是 `harness.py:24` 的类型别名:
   `EventListener = Callable[[AgentEvent], Awaitable[None] | None]`。
 - **契约**:任何接收 `AgentEvent`、可返回 `None`(同步)或 `Awaitable[None]`(异步)的可调用对象。`AgentHarness.subscribe` 接受它。
 - **如何构成公共面**:它定义了 agent 向外广播事件时,订阅者必须实现的"函数形状",是事件驱动集成的契约类型。
@@ -203,12 +203,12 @@ EventListener = Callable[[AgentEvent], Awaitable[None] | None]
 
 ### 导出项:`QueuedMessages`
 
-- **来源**:`tau_agent.harness`(第 22–28 行导入)。
-- **契约**:`harness.py:28` 的 `@dataclass(frozen=True, slots=True)`,是 harness 拥有的排队消息快照:`steering: tuple[AgentMessage, ...]` 和 `follow_up: tuple[AgentMessage, ...]`,带 `count` 属性(两者之和)。
+- **来源**:`tau_agent.harness`(第 18–24 行导入)。
+- **契约**:`harness.py:29` 的 `@dataclass(frozen=True, slots=True)`,是 harness 拥有的排队消息快照:`steering: tuple[AgentMessage, ...]` 和 `follow_up: tuple[AgentMessage, ...]`,带 `count` 属性(两者之和)。
 - **如何构成公共面**:`harness.queued_messages` 返回它,让 UI 读取当前排队状态以展示待发消息,而无需碰 harness 内部 deque。
 
 ```python
-# harness.py:28 — QueuedMessages 是 frozen 快照
+# harness.py:29 — QueuedMessages 是 frozen 快照
 @dataclass(frozen=True, slots=True)
 class QueuedMessages:
     steering: tuple[AgentMessage, ...] = ()
@@ -222,7 +222,7 @@ class QueuedMessages:
 
 ### 导出项:`SimpleCancellationToken`
 
-- **来源**:`tau_agent.harness`(第 22–28 行导入)。
+- **来源**:`tau_agent.harness`(第 18–24 行导入)。
 - **契约**:`harness.py:50` 定义的轻量取消令牌。有 `cancel()`(置 `_cancelled=True`)、`is_cancelled() -> bool`。
 - **如何构成公共面**:agent 循环与 harness 用它向 provider/工具传递"是否该停"的信号。注意它是 `tau_agent` 自己的实现;而 `run_agent_loop` 接受的是 `tau_ai.provider.CancellationToken`(协议),二者通过 `is_cancelled()` 形状兼容。
 
@@ -242,7 +242,7 @@ class SimpleCancellationToken:
 
 ### 导出项:`run_agent_loop`
 
-- **来源**:`tau_agent.loop`(第 29 行导入)。
+- **来源**:`tau_agent.loop`(第 25 行导入)。
 - **契约**:`loop.py:44` 的 `async def run_agent_loop(*, provider, model, system, messages, tools, prompts=(), max_turns=None, signal=None, get_steering_messages=None, get_follow_up_messages=None, before_tool_call=None, after_tool_call=None) -> AsyncIterator[AgentEvent]`。
 - **行为要点**(严格基于 `loop.py`):
   - 纯 provider/工具 agent 循环(`loop.py:1` docstring:"Pure provider/tool agent loop")。
@@ -261,7 +261,7 @@ class SimpleCancellationToken:
 > 数秒才回复完毕，但每个 token 生成时就应该立即展示给用户。
 
 ```python
-# __init__.py:29 — run_agent_loop 从 loop 子模块 re-export
+# __init__.py:25 — run_agent_loop 从 loop 子模块 re-export
 from tau_agent.loop import run_agent_loop
 
 # loop.py:44 — 纯循环的签名：一切靠参数注入，messages 由调用方拥有
@@ -285,52 +285,52 @@ async def run_agent_loop(
 
 ### 导出项:`AgentMessage`
 
-- **来源**:`tau_agent.messages`(第 30–37 行导入)。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:235` 的 `Annotated` 联合类型别名（带 `Field(discriminator="role")` 判别器）:
   `AgentMessage = UserMessage | AssistantMessage | ToolResultMessage | BashExecutionMessage | CustomMessage | BranchSummaryMessage | CompactionSummaryMessage`。
 - **如何构成公共面**:它是 transcript 中"一条消息"的联合类型,被 harness、loop、session 各处统一使用——是 agent 数据的核心载体类型。
 
 ### 导出项:`UserMessage`
 
-- **来源**:`tau_agent.messages`(第 30–37 行导入)。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:92` 的 `WireModel`。字段:`role: Literal["user"] = "user"`、`content: UserContent`（`str | list[TextContent | ImageContent]`）、`timestamp: int`。带 `text` 属性用于快速提取纯文本。
 - **如何构成公共面**:用户输入与 `harness.steer`/`prompt` 产生的消息类型。
 
 ### 导出项:`AssistantMessage`
 
-- **来源**:`tau_agent.messages`(第 30–37 行导入)。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:119` 的 `WireModel`。字段:`role: Literal["assistant"] = "assistant"`、`content: list[AssistantContent]`（`TextContent | ThinkingContent | ToolCall` 的有序列表）、`api: str`、`provider: str`、`model: str`、`response_model: str | None`、`response_id: str | None`、`diagnostics: list[AssistantMessageDiagnostic] | None`、`usage: Usage`、`stop_reason: StopReason`、`error_message: str | None`、`timestamp: int`。带 `text`、`thinking_text`、`tool_calls` 属性用于快速提取各类内容。
 - **注意**:构造时可以传 `content: str` 作为便利写法——`model_validator` 会自动把字符串包装成 `[TextContent(text=content)]`,但存储和序列化始终使用块列表格式。
 - **如何构成公共面**:模型回复,可能携带工具调用、思考过程与用量统计。
 
 ### 导出项:`ToolResultMessage`
 
-- **来源**:`tau_agent.messages`(第 30–37 行导入)。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:170` 的 `WireModel`。字段:`role: Literal["toolResult"] = "toolResult"`、`tool_call_id: str`、`tool_name: str`、`content: list[ToolResultContent]`（`TextContent | ImageContent` 的列表）、`details: JSONValue`、`added_tool_names: list[str] | None`、`is_error: bool`、`timestamp: int`。带 `text` 属性用于快速提取纯文本。
 - **如何构成公共面**:工具执行结果在 transcript 中的表示,被 loop 的 `_tool_result_message` 从 `AgentToolResult` 转换而来。
 
 ### 导出项:`Usage`
 
-- **来源**:`tau_agent.messages`(第 30–37 行导入)。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:45` 的 `WireModel`(端口 Pi 的 `Usage` 到 snake_case)。字段:`input: int`、`output: int`、`cache_read: int`、`cache_write: int`、`cache_write_1h: int | None`、`reasoning: int | None`、`total_tokens: int`、`cost: UsageCost`。
 - **如何构成公共面**:provider 报告的真实计费 token 用量(非本地估算),挂在 `AssistantMessage.usage` 上。
 
 ### 导出项:`UsageCost`
 
-- **来源**:`tau_agent.messages`(第 30–37 行导入)。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
 - **契约**:`messages.py:35` 的 `WireModel`,USD 计费的细分:`input / output / cache_read / cache_write / total`(float,默认 0.0)。
 - **如何构成公共面**:用量成本的细分结构,作为 `Usage.cost` 的可选子对象。
 
 ### 导出项:`AgentTool`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
-- **契约**:`tools.py:76` 的 `@dataclass(frozen=True, slots=True)`。字段:`name: str`、`label: str`、`description: str`、`parameters: Mapping[str, JSONValue]`、`execute_fn: ToolExecutor`、`prompt_snippet: str | None`、`prompt_guidelines: tuple[str, ...]`、`prepare_arguments: ToolArgumentPreparer | None`、`execution_mode: ToolExecutionMode`（`"parallel"` 或 `"sequential"`）、`render_call: ToolCallRenderer | None`、`render_result: ToolResultRenderer | None`。
+- **来源**:`tau_agent.tools`(第 58–65 行导入)。
+- **契约**:`tools.py:77` 的 `@dataclass(frozen=True, slots=True)`。字段:`name: str`、`label: str`、`description: str`、`parameters: Mapping[str, JSONValue]`、`execute_fn: ToolExecutor`、`prompt_snippet: str | None`、`prompt_guidelines: tuple[str, ...]`、`prepare_arguments: ToolArgumentPreparer | None`、`execution_mode: ToolExecutionMode`（`"parallel"` 或 `"sequential"`）、`render_call: ToolCallRenderer | None`、`render_result: ToolResultRenderer | None`。
 - **行为**:`async def execute(...)` 直接把调用委托给 `execute_fn`——所有参数转发由数据类完成。
 - **如何构成公共面**:暴露给 agent 的一个工具。构造 `AgentHarnessConfig.tools` 用的就是它。
 
 ### 导出项:`AgentToolResult`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
+- **来源**:`tau_agent.tools`(第 58–65 行导入)。
 - **契约**:`tools.py:21` 的 `WireModel`。字段:`content: list[TextContent | ImageContent]`（结构化内容块）、`details: JSONValue`（任意附加数据）、`added_tool_names: list[str] | None`（新注册的工具名）、`terminate: bool | None`（是否终止 agent 循环）。带 `text` 属性用于快速提取纯文本。
 - **如何构成公共面**:工具执行的结构化结果,被 loop 转换成 `ToolResultMessage` 并喂回 transcript。
 
@@ -342,31 +342,31 @@ async def run_agent_loop(
 
 ### 导出项:`ToolCallRenderer`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
+- **来源**:`tau_agent.tools`(但**未被 `__init__.py` re-export**,不属于 `tau_agent` 顶层公共 API)。
 - **契约**:`tools.py:45` 的 `Protocol`。`__call__(self, arguments: Mapping[str, JSONValue]) -> str | None`,把工具参数渲染成一行展示文本,返回 `None` 则回退。
-- **如何构成公共面**:前端友好展示工具调用的可选 hook(对应 Pi 的 `renderCall`,但只返回字符串而非 UI 组件)。
+- **使用场景**:只在 `AgentTool.render_call` 字段中作为类型引用,前端渲染工具调用的可选 hook(对应 Pi 的 `renderCall`,但只返回字符串而非 UI 组件)。需要通过 `tau_agent.tools.ToolCallRenderer` 访问。
 
 ### 导出项:`ToolResultRenderer`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
+- **来源**:`tau_agent.tools`(但**未被 `__init__.py` re-export**,不属于 `tau_agent` 顶层公共 API)。
 - **契约**:`tools.py:51` 的 `Protocol`。`__call__(self, result: AgentToolResult, *, expanded: bool) -> str | None`,返回 Rich 标记的展示文本,`None` 回退。
-- **如何构成公共面**:前端渲染工具结果的展示 hook(对应 Pi 的 `renderResult`,返回 Rich markup 字符串)。
+- **使用场景**:只在 `AgentTool.render_result` 字段中作为类型引用,前端渲染工具结果的展示 hook(对应 Pi 的 `renderResult`,返回 Rich markup 字符串)。需要通过 `tau_agent.tools.ToolResultRenderer` 访问。
 
 ### 导出项:`ToolExecutor`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
+- **来源**:`tau_agent.tools`(第 58–65 行导入)。
 - **契约**:`tools.py:60` 的 `Protocol`。`__call__(self, tool_call_id: str, arguments: Mapping[str, JSONValue], signal: ToolCancellationToken | None = None, on_update: ToolUpdateCallback | None = None) -> Awaitable[AgentToolResult]`。
 - **如何构成公共面**:执行一个工具的最小异步可调用契约,是 `AgentTool.execute_fn` 的类型。
 
 ### 导出项:`ToolUpdateCallback`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
+- **来源**:`tau_agent.tools`(第 58–65 行导入)。
 - **契约**:`tools.py:57` 的类型别名: `ToolUpdateCallback = Callable[[AgentToolResult], None]`。同步、fire-and-forget 的进度回调,接收一个 `AgentToolResult`（可以是部分结果,用于实时汇报工具执行进度）。
 - **如何构成公共面**:工具向 loop 实时汇报进度的契约,被 loop 的 `on_update` 转成 `ToolExecutionUpdateEvent`。
 
 ### 导出项:`JSONObject` / `JSONPrimitive` / `JSONValue`
 
-- **来源**:`tau_agent.types`(第 61 行导入)。
+- **来源**:`tau_agent.types`(第 66 行导入)。
 - **契约**:`types.py` 的三个 PEP 695 类型别名(供 Pydantic 递归 JSON 值用):
   - `JSONPrimitive = str | int | float | bool | None`
   - `JSONValue = JSONPrimitive | list[JSONValue] | dict[str, JSONValue]`
@@ -375,7 +375,7 @@ async def run_agent_loop(
 
 ### 导出项:`AgentEvent`(及全部 10 个具体事件类)
 
-`AgentEvent` 是 `events.py:75` 的 Union 类型别名,涵盖下列全部事件。`__init__.py` 把它们从 `tau_agent.events`(第 5–21 行)逐一 re-export:
+`AgentEvent` 是 `events.py:75` 的 Union 类型别名,涵盖下列全部事件。`__init__.py` 把它们从 `tau_agent.events`(第 5–17 行)逐一 re-export:
 
 - **`AgentStartEvent`**(`events.py:15`):`type="agent_start"`。一次运行的开始。
 - **`AgentEndEvent`**(`events.py:19`):`type="agent_end"`,带 `messages: list[AgentMessage]`。一次运行的结束,附带完整消息列表。
@@ -394,7 +394,7 @@ async def run_agent_loop(
 
 ### 导出项:`SessionEntry`(Union 类型别名)
 
-- **来源**:`tau_agent.session`(第 38–51 行导入)。`session/__init__.py` 又从 `session.entries` 导入。
+- **来源**:`tau_agent.session`(第 44–57 行导入)。`session/__init__.py` 又从 `session.entries` 导入。
 - **契约**:`entries.py:103` 的 `Annotated[MessageEntry | ModelChangeEntry | ThinkingLevelChangeEntry | CompactionEntry | BranchSummaryEntry | LabelEntry | LeafEntry | SessionInfoEntry | CustomEntry, Field(discriminator="type")]`。即以 `type` 字段判别的"追加式会话条目"联合类型。
 - **如何构成公共面**:会话持久化的原子单位。下面 9 个具体 entry 都是它的成员,被 `SessionStorage` 逐条追加。
 
@@ -463,15 +463,15 @@ async def run_agent_loop(
 
 ### 导出项(相关但未在 `tau_agent` 顶层再导出,列出以明确边界):`SessionStorage`
 
-需要修正一点:`__init__.py` 的 import(第 38–51 行)实际从 `tau_agent.session` 导入了 `BranchSummaryEntry / CompactionEntry / CustomEntry / JsonlSessionStorage / LabelEntry / LeafEntry / MessageEntry / ModelChangeEntry / SessionEntry / SessionInfoEntry / SessionState / ThinkingLevelChangeEntry`,**没有直接把 `SessionStorage`(协议类)列进 `tau_agent` 顶层**。`SessionStorage` 只在 `session/__init__.py` 的 `__all__` 中导出(作为 `tau_agent.session.SessionStorage` 可用),但顶层 `tau_agent/__init__.py` 的 `__all__`(第 63–113 行)未包含它,所以 `from tau_agent import SessionStorage` 会失败。这与任务描述里"覆盖 …SessionStorage 等所有 re-export"略有出入——严格基于源码,`SessionStorage` 是 `tau_agent.session` 子包的导出,而非 `tau_agent` 包顶层的导出。同理,session 子包还导出了 `BaseSessionEntry`(已在前述条目中覆盖)、`SessionTreeError`、`entries_by_id`、`path_to_entry`、`SessionJsonlError`、`entry_to_json_line`、`entry_from_json_line`、`entries_from_json_lines`,这些也都在 `tau_agent.session` 命名空间下,但不在 `tau_agent` 顶层 `__all__` 中。
+需要修正一点:`__init__.py` 的 import(第 44–57 行)实际从 `tau_agent.session` 导入了 `BranchSummaryEntry / CompactionEntry / CustomEntry / JsonlSessionStorage / LabelEntry / LeafEntry / MessageEntry / ModelChangeEntry / SessionEntry / SessionInfoEntry / SessionState / ThinkingLevelChangeEntry`,**没有直接把 `SessionStorage`(协议类)列进 `tau_agent` 顶层**。`SessionStorage` 只在 `session/__init__.py` 的 `__all__` 中导出(作为 `tau_agent.session.SessionStorage` 可用),但顶层 `tau_agent/__init__.py` 的 `__all__`(第 68 行)未包含它,所以 `from tau_agent import SessionStorage` 会失败。这与任务描述里"覆盖 …SessionStorage 等所有 re-export"略有出入——严格基于源码,`SessionStorage` 是 `tau_agent.session` 子包的导出,而非 `tau_agent` 包顶层的导出。同理,session 子包还导出了 `BaseSessionEntry`(已在前述条目中覆盖)、`SessionTreeError`、`entries_by_id`、`path_to_entry`、`SessionJsonlError`、`entry_to_json_line`、`entry_from_json_line`、`entries_from_json_lines`,这些也都在 `tau_agent.session` 命名空间下,但不在 `tau_agent` 顶层 `__all__` 中。
 
-换言之,**`tau_agent.__init__` 顶层的 session 类导出是 `SessionEntry` 的 9 个具体子类 + `SessionState` + `JsonlSessionStorage`**,而 `SessionStorage`(协议)、`SessionTreeError`(树遍历异常)、`path_to_entry` / `entries_by_id`(树助手)、JSONL 编解码函数等都归属于子包 `tau_agent.session`。`tau_agent/__init__.py` 的 `__all__` 第 63–113 行经逐行核对,确实**没有** `SessionStorage`、`SessionTree`、`SessionTreeError`、`entries_by_id`、`path_to_entry` 等名字——任务描述把它们笼统归为"re-export"是不准确的,这里以源码为准给出澄清。
+换言之,**`tau_agent.__init__` 顶层的 session 类导出是 `SessionEntry` 的 9 个具体子类 + `SessionState` + `JsonlSessionStorage`**,而 `SessionStorage`(协议)、`SessionTreeError`(树遍历异常)、`path_to_entry` / `entries_by_id`(树助手)、JSONL 编解码函数等都归属于子包 `tau_agent.session`。`tau_agent/__init__.py` 的 `__all__` 第 68 行经逐行核对,确实**没有** `SessionStorage`、`SessionTree`、`SessionTreeError`、`entries_by_id`、`path_to_entry` 等名字——任务描述把它们笼统归为"re-export"是不准确的,这里以源码为准给出澄清。
 
 ## 与 tau_ai 的边界
 
 `tau_agent` 是整个 agent harness 的可移植核心,而 `tau_ai` 是 provider/模型的流式层。**边界的本质是单向依赖 + 事件翻译**:
 
-- **agent 不知道 TUI / CLI / Textual / Rich**:`AgentHarness` 的 docstring(`harness.py:67`)明言它"remains independent of CLI, Rich, Textual, session files, and coding-agent resource loading"。agent 只通过 `EventListener` 和 `AgentEvent` 广播事件;渲染交给上层。agent 也**不知道 session 文件该放在哪**——`JsonlSessionStorage` 的路径由调用方传入,agent 包自身不决定目录。
+- **agent 不知道 TUI / CLI / Textual / Rich**:`AgentHarness` 的 docstring(`harness.py:62`)明言它是 *"Reusable stateful agent brain independent of coding/UI policy"*。agent 只通过 `EventListener` 和 `AgentEvent` 广播事件;渲染交给上层。agent 也**不知道 session 文件该放在哪**——`JsonlSessionStorage` 的路径由调用方传入,agent 包自身不决定目录。
 - **provider 流是 agent 的输入**:agent 不自己生产 token。它把 `tau_ai.provider.ModelProvider.stream_response` 返回的 provider 事件**翻译成**自己的 `AgentEvent`(见 `run_agent_loop`,`loop.py:79` 起)。provider 是上游数据源,agent 循环是其消费者与编排者。
 - **agent 不绑定具体 provider**:`AgentHarnessConfig.provider: ModelProvider` 是 `tau_ai` 定义的协议/接口,agent 只依赖这个抽象,不依赖任何具体模型实现(符合 AGENTS.md "Avoid provider-specific assumptions in core agent code")。
 
