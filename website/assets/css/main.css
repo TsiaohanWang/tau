@@ -35,33 +35,8 @@ body{
   font-size:18px;
   line-height:1.6;
   -webkit-font-smoothing:antialiased;
-  /* notebook grid */
-  background-image:
-    linear-gradient(var(--grid) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
-  background-size:var(--cell) var(--cell), var(--cell) var(--cell);
   position:relative;
   min-height:100vh;
-}
-/* faint top-fade so the grid feels like paper, not a screen */
-body::before{
-  content:"";
-  position:fixed; inset:0;
-  background:radial-gradient(120% 80% at 50% -10%, rgba(255,255,255,.85), rgba(255,255,255,0) 60%);
-  pointer-events:none; z-index:0;
-}
-/* red margin line of a notebook */
-body::after{
-  content:"";
-  position:fixed; top:0; bottom:0;
-  left:calc(var(--cell) * 3 + 1px);
-  width:1.5px;
-  background:var(--red);
-  opacity:.45;
-  pointer-events:none; z-index:1;
-}
-@media (max-width:720px){
-  body::after{ left:calc(var(--cell) * 1.5); }
 }
 /* hide red notebook line on docs pages */
 body:has(.docs-layout)::after{ opacity:0 !important; }
