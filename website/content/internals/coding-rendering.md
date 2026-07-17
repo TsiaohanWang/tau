@@ -502,5 +502,6 @@ def finish(self) -> bool:
 ---
 
 <!-- NAV -->
-[← tau_coding · 支撑模块(二)]({{< relref "./coding-support-2.md" >}})
+[← tau_coding · TUI 界面与控件]({{< relref "./coding-tui-app.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
+[→ tau_coding · 渲染层(print/json)]({{< relref "./coding-rendering-print.md" >}})

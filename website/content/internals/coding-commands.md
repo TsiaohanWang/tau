@@ -713,6 +713,6 @@ class SessionManager:
 ---
 
 <!-- NAV -->
-[← tau_coding · CodingSession]({{< relref "./coding-session.md" >}})
+[← tau_coding · Provider 配置]({{< relref "./coding-provider-config.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · 会话索引]({{< relref "./coding-session-manager.md" >}})
+[→ tau_coding · TUI 状态与适配]({{< relref "./coding-tui-state.md" >}})

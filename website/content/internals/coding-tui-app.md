@@ -2441,4 +2441,4 @@ actually launch all of the above.
 <!-- NAV -->
 [← tau_coding · TUI 状态与适配]({{< relref "./coding-tui-state.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · 凭证存储]({{< relref "./coding-credentials.md" >}})
+[→ tau_coding · 渲染层]({{< relref "./coding-rendering.md" >}})

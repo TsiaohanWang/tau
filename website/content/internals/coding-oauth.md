@@ -231,4 +231,4 @@ GITHUB_COPILOT_HEADERS = {"User-Agent": "GitHubCopilotChat/0.35.0", ...}
 <!-- NAV -->
 [← tau_coding · 凭证存储]({{< relref "./coding-credentials.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · CLI 入口]({{< relref "./coding-cli.md" >}})
+[→ tau_coding · Provider 配置]({{< relref "./coding-provider-config.md" >}})

@@ -115,6 +115,6 @@ def touch_session(self, session_id: str, *, model=None, provider_name=None, titl
 ---
 
 <!-- NAV -->
-[← tau_coding · Slash 命令]({{< relref "./coding-commands.md" >}})
+[← tau_coding · 支撑模块(二)]({{< relref "./coding-support-2.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · Provider 配置]({{< relref "./coding-provider-config.md" >}})
+[→ tau_coding · CLI 入口]({{< relref "./coding-cli.md" >}})

@@ -945,6 +945,6 @@ def _base_entry(context: AgentCallDiagnosticContext, *, phase: str, kind: str) -
 ---
 
 <!-- NAV -->
-[← tau_coding · 扩展系统]({{< relref "./coding-extensions.md" >}})
+[← tau_coding · 渲染层(print/json)]({{< relref "./coding-rendering-print.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
 [→ tau_coding · 支撑模块(二)]({{< relref "./coding-support-2.md" >}})

@@ -486,6 +486,5 @@ async def run_print_mode(*, prompt, model, cwd, provider, output=PrintOutputMode
 ---
 
 <!-- NAV -->
-[← tau_coding · OAuth 登录流程]({{< relref "./coding-oauth.md" >}})
+[← tau_coding · 会话索引]({{< relref "./coding-session-manager.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · 扩展系统]({{< relref "./coding-extensions.md" >}})

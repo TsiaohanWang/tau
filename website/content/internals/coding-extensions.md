@@ -861,6 +861,6 @@ Putting the entire `tau_coding` layer together (parts 3a–3e):
 *下一步:将 1a、1b、2a、2b、2c、2d、3a、3b、3c、3d、3e 各部分合并为单一教程文档。*
 
 <!-- NAV -->
-[← tau_coding · CLI 入口]({{< relref "./coding-cli.md" >}})
+[← tau_coding · CodingSession]({{< relref "./coding-session.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · 支撑模块(一)]({{< relref "./coding-support-1.md" >}})
+[→ tau_coding · 凭证存储]({{< relref "./coding-credentials.md" >}})

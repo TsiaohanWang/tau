@@ -940,6 +940,6 @@ def openai_compatible_config_from_provider(provider, *, credential_reader=None,
 必填非负浮点。须为 int/float(排除 bool),转 float 且 `>=0`,否则抛错,返回值。
 
 <!-- NAV -->
-[← tau_coding · 会话索引]({{< relref "./coding-session-manager.md" >}})
+[← tau_coding · OAuth 登录流程]({{< relref "./coding-oauth.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · 渲染层(print/json)]({{< relref "./coding-rendering-print.md" >}})
+[→ tau_coding · Slash 命令]({{< relref "./coding-commands.md" >}})

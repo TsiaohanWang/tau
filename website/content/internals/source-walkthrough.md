@@ -36,20 +36,40 @@ description: A bottom-up, file-by-file dissection of the Tau source — derived 
 
 ### `tau_coding` — coding agent 应用
 
+本节从 session 核心出发，沿"能力扩展 → 认证连接 → 用户界面 → 辅助工具 → 入口组装"的路径递进讲解。建议按下列顺序阅读：
+
+**核心会话（大脑）**
+
 - [工具与提示组装]({{< relref "./coding-tools-prompt.md" >}}) — `tools` / `system_prompt` / `context` / `context_window` / `skills` / `resources`
 - [`CodingSession`]({{< relref "./coding-session.md" >}}) — `session.py`
-- [Slash 命令]({{< relref "./coding-commands.md" >}}) — `commands.py`
-- [会话索引]({{< relref "./coding-session-manager.md" >}}) — `session_manager.py`
-- [Provider 配置]({{< relref "./coding-provider-config.md" >}}) — `provider_catalog` / `provider_config` / `provider_runtime`
-- [TUI:状态与适配]({{< relref "./coding-tui-state.md" >}}) — `tui/state` / `adapter` / `config` / `autocomplete`
-- [TUI:界面与控件]({{< relref "./coding-tui-app.md" >}}) — `tui/app` / `widgets` / `terminal_title`
+
+**扩展系统（可插拔能力）**
+
+- [扩展系统]({{< relref "./coding-extensions.md" >}}) — `extensions/` 包
+
+**认证与 Provider（连接模型）**
+
 - [凭证存储]({{< relref "./coding-credentials.md" >}}) — `credentials.py`
 - [OAuth 登录流程]({{< relref "./coding-oauth.md" >}}) — `oauth*` 系列
-- [CLI 入口]({{< relref "./coding-cli.md" >}}) — `cli.py`
-- [扩展系统]({{< relref "./coding-extensions.md" >}}) — `extensions/` 包
+- [Provider 配置]({{< relref "./coding-provider-config.md" >}}) — `provider_catalog` / `provider_config` / `provider_runtime`
+
+**用户界面（交互层）**
+
+- [Slash 命令]({{< relref "./coding-commands.md" >}}) — `commands.py`
+- [TUI:状态与适配]({{< relref "./coding-tui-state.md" >}}) — `tui/state` / `adapter` / `config` / `autocomplete`
+- [TUI:界面与控件]({{< relref "./coding-tui-app.md" >}}) — `tui/app` / `widgets` / `terminal_title`
+- [渲染层]({{< relref "./coding-rendering.md" >}}) — `rendering/` 包
+- [渲染层(print/json)]({{< relref "./coding-rendering-print.md" >}}) — `rendering/plain.py` / `rendering/json.py`
+
+**辅助工具**
+
 - [支撑模块(一)]({{< relref "./coding-support-1.md" >}}) — `thinking` / `catalog_loader` / `branch_summary` / `diagnostics`
 - [支撑模块(二)]({{< relref "./coding-support-2.md" >}}) — `prompt_templates` / `reload` / `session_export` / `shell_config` / `update_check` / `version`
-- [渲染层]({{< relref "./coding-rendering.md" >}}) — `rendering/` 包
+
+**入口与索引**
+
+- [会话索引]({{< relref "./coding-session-manager.md" >}}) — `session_manager.py`
+- [CLI 入口]({{< relref "./coding-cli.md" >}}) — `cli.py`
 
  ## 一致性校对记录
 

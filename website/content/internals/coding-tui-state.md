@@ -1198,6 +1198,6 @@ def _argument_token_end(text, start) -> int
 ---
 
 <!-- NAV -->
-[← tau_coding · 渲染层(print/json)]({{< relref "./coding-rendering-print.md" >}})
+[← tau_coding · Slash 命令]({{< relref "./coding-commands.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
 [→ tau_coding · TUI 界面与控件]({{< relref "./coding-tui-app.md" >}})

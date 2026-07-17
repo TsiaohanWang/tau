@@ -1141,4 +1141,4 @@ def current_version() -> str
 <!-- NAV -->
 [← tau_coding · 支撑模块(一)]({{< relref "./coding-support-1.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · 渲染层]({{< relref "./coding-rendering.md" >}})
+[→ tau_coding · 会话索引]({{< relref "./coding-session-manager.md" >}})

@@ -1286,3 +1286,8 @@ def _active_context_rows(self) -> tuple[tuple[str, AgentMessage], ...]
 - `default_session_path(cwd)`：返回 Tau 默认的会话存储路径。
 - `jsonl_session_storage(path)`：构造 JSONL 存储实例。
 - `_append_session_entry_sync(storage, entry)`：同步版本的条目追加（供无法 await 的斜杠命令使用）。
+
+<!-- NAV -->
+[← tau_coding · 工具与提示组装]({{< relref "./coding-tools-prompt.md" >}})
+[↑ 总览]({{< relref "./source-walkthrough.md" >}})
+[→ tau_coding · 扩展系统]({{< relref "./coding-extensions.md" >}})

@@ -752,6 +752,6 @@ URL 安全的 base64 编码并去掉填充(`=`)。
 ---
 
 <!-- NAV -->
-[← tau_coding · TUI 界面与控件]({{< relref "./coding-tui-app.md" >}})
+[← tau_coding · 扩展系统]({{< relref "./coding-extensions.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
 [→ tau_coding · OAuth 登录流程]({{< relref "./coding-oauth.md" >}})

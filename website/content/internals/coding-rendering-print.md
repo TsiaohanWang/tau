@@ -91,6 +91,6 @@ plain 和 json 渲染器共享 transcript 的事件分发结构，但各自把 `
 也是 **Part 3e** 中 auth/CLI/extensions 层之前的最后一大块。
 
 <!-- NAV -->
-[← tau_coding · Provider 配置]({{< relref "./coding-provider-config.md" >}})
+[← tau_coding · 渲染层]({{< relref "./coding-rendering.md" >}})
 [↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · TUI 状态与适配]({{< relref "./coding-tui-state.md" >}})
+[→ tau_coding · 支撑模块(一)]({{< relref "./coding-support-1.md" >}})
