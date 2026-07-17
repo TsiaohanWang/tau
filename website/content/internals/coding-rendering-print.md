@@ -12,8 +12,8 @@ code_files:
 
 在 TUI 模式下，用户能实时看到模型逐字生成文本、工具调用的进度和结果。但在非交互场景（比如写脚本把 agent 当函数调用），用户只关心最终答案。`FinalTextRenderer` 会安静地忽略所有中间事件（工具调用、进度更新等），只在 `finish()` 时输出最后一轮助手消息——或者在出错时把错误信息写到 stderr。
 
-- 它监听 `MessageEndEvent` 并记住最后的助手文本。
-- 它收集 `ErrorEvent`；不可恢复的会把运行标记为失败。
+- 它监听 `MessageEndEvent` 且消息为 `AssistantMessage` 时记住最后的助手文本（`.text`）。
+- 它通过 `stop_reason in {"error", "aborted"}` 检测错误（而非独立的 `ErrorEvent` 类型）。
   - `finish()` 打印最终的助手文本（或把每个错误打印到 stderr）并返回运行是否成功。
 
 因此在 print 模式下，终端只显示模型的*最终答案*，而非流式的那些中间事件。
@@ -25,14 +25,16 @@ class FinalTextRenderer:
         self._failed = False
         self._error_messages: list[str] = []
 
-    def render(self, event: AgentEvent) -> None:
-        if isinstance(event, MessageEndEvent):
-            self._last_assistant_text = event.message.content
+    def render(self, event: CodingSessionEvent) -> None:
+        if not isinstance(event, MessageEndEvent) or not isinstance(
+            event.message, AssistantMessage
+        ):
             return
-        if isinstance(event, ErrorEvent):
-            if not event.recoverable:
-                self._failed = True
-            self._error_messages.append(event.message)
+        self._last_assistant_text = event.message.text
+        if event.message.stop_reason in {"error", "aborted"}:
+            self._failed = event.message.stop_reason == "error"
+            if event.message.error_message:
+                self._error_messages.append(event.message.error_message)
 
     def finish(self) -> bool:
         if self._failed:
@@ -44,17 +46,17 @@ class FinalTextRenderer:
         return True
 ```
 
-关键点:`render()` 期间只静默缓冲,过程完全不输出;只有 `finish()` 才会落屏——成功打印最终助手文本,失败则逐条打印错误到 stderr。
+关键点:需要同时检查 `MessageEndEvent` 和 `AssistantMessage`（过滤用户消息和工具结果）；用 `.text`（而非 `.content`）获取助手文本；通过 `stop_reason` 检测错误。`render()` 期间只静默缓冲，只有 `finish()` 才会落屏。
 
 ## `tau_coding/rendering/json.py` — JSONL 事件流
 
 有些场景下，程序需要消费 agent 的输出而不是人类来阅读——比如 CI/CD 流水线、自动化测试、或者日志分析工具。`JsonEventRenderer` 把每个事件序列化为一行 JSON（这种逐行 JSON 的格式叫 JSONL，全称 JSON Lines），方便下游程序逐行解析。
 
-每个 `AgentEvent`（在 2a 部分定义）都会变成每行一个 JSON 对象，
+每个 `CodingSessionEvent`（包括 `AgentEvent` 和 `SessionOwnEvent`）都会变成每行一个 JSON 对象，
 这正是 TUI 和下游工具可以解析的那条流。
 
-- `render(event)` — 把 `event.model_dump_json()` 写成每行一个事件，
-  并把不可恢复的错误标记为失败。
+- `render(event)` — 把 `event.model_dump_json(by_alias=True, exclude_none=True)` 写成每行一个事件，
+  并通过 `MessageEndEvent` + `AssistantMessage.stop_reason == "error"` 检测错误。
 - `finish()` — 返回运行是否成功。
 
 ```python
@@ -62,18 +64,22 @@ class JsonEventRenderer:
     def __init__(self) -> None:
         self._failed = False
 
-    def render(self, event: AgentEvent) -> None:
-        if isinstance(event, ErrorEvent) and not event.recoverable:
+    def render(self, event: CodingSessionEvent) -> None:
+        if (
+            isinstance(event, MessageEndEvent)
+            and isinstance(event.message, AssistantMessage)
+            and event.message.stop_reason == "error"
+        ):
             self._failed = True
-        typer.echo(event.model_dump_json())
+        typer.echo(event.model_dump_json(by_alias=True, exclude_none=True))
 
     def finish(self) -> bool:
         return not self._failed
 ```
 
-关键点:所有事件一律 `model_dump_json()` 原样输出为一行 JSONL,不区分类型;不可恢复错误仅标记 `_failed` 但仍会打印该事件,保证流完整。
+关键点:所有事件一律 `model_dump_json(by_alias=True, exclude_none=True)` 原样输出为一行 JSONL；错误通过 `AssistantMessage.stop_reason` 检测（而非独立的 `ErrorEvent`），但仍会打印该事件，保证流完整。
 
-> 设计说明（Design note）：这两个渲染器消费的都是 agent 循环发出的*同一个* `AgentEvent` 联合类型。这正是 AGENTS.md 边界在起作用，也是 Tau README 原则"事件即契约（Events are the contract）"的直接体现：harness 发出事件并保持可移植，而每个前端（TUI、plain、json）独立地消费它们。因为事件流是稳定接口，print 和 JSON 后端可以在不修改 `tau_agent` 的情况下被添加或更改；agent 核心对当前挂载的是哪个前端一无所知。
+> 设计说明（Design note）：这两个渲染器消费的都是 agent 循环发出的*同一个* `CodingSessionEvent` 联合类型（`AgentEvent | SessionOwnEvent`）。这正是 AGENTS.md 边界在起作用，也是 Tau README 原则"事件即契约（Events are the contract）"的直接体现：harness 发出事件并保持可移植，而每个前端（TUI、plain、json）独立地消费它们。因为事件流是稳定接口，print 和 JSON 后端可以在不修改 `tau_agent` 的情况下被添加或更改；agent 核心对当前挂载的是哪个前端一无所知。
 
 ---
 
