@@ -26,7 +26,7 @@ async for event in session.prompt(user_text):
     render_event(event)
 ```
 
-该流从 `tau_agent.events` 产出提供方无关的 `AgentEvent` 值(列表见 [the agent loop]({{< relref "./agent-loop.md" >}}))。请基于这些进行渲染,绝不要基于提供方特定的数据块。应将 `AgentStartEvent`/`AgentEndEvent` 以及不可恢复的 `ErrorEvent` 视为"智能体是否正在工作"的权威依据。
+该流产出 `CodingSessionEvent` 值：来自 `tau_agent.events` 的可移植 `AgentEvent` 值，加上来自 `tau_coding.events` 的会话层事件（列表见 [the agent loop]({{< relref "./agent-loop.md" >}}))。请基于这些进行渲染，绝不要基于提供方特定的数据块。应将 `agent_start` 视为进入运行状态的信号，用 `agent_settled`（而非仅 `agent_end`）来标记运行结束——因为自动压缩、重试或排队的后续回合可能在 `agent_end` 之后继续发生。提供方错误以 `stop_reason` 为 `"error"` 的助手消息形式到达，随后是正常的回合/运行生命周期。
 
 ## Steering and follow-ups
 
