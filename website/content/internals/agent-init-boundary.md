@@ -44,43 +44,46 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 
 关键事实（已在源码中确认）：
 
-1. **`tau_ai` 反向 import `tau_agent`**：`tau_ai/provider.py` 的
+1. **`tau_ai` 依赖 `tau_agent` 的数据类型**：`tau_ai/provider.py` 的
    `ModelProvider.stream_response` 的签名里直接用了 `tau_agent.messages.AgentMessage`
-   和 `tau_agent.tools.AgentTool`；`tau_ai/events.py` 的 `ProviderToolCallEvent` 携带
-   `tau_agent.tools.ToolCall`；各 provider 文件的 import 顶部都 `from tau_agent.messages
+   和 `tau_agent.tools.AgentTool`；`tau_ai/events.py` 从 `tau_agent.provider_events`
+   re-export 事件类型；各 provider 文件的 import 顶部都 `from tau_agent.messages
    import ...`、`from tau_agent.tools import ...`。
    —— 即 `tau_ai` 把"消息/工具"当作**纯数据结构**来接收，不依赖 agent 的行为。
 
-2. **`tau_agent` 向上只依赖 `tau_ai` 的协议与事件**：`tau_agent/loop.py` 只 import
-   `tau_ai.provider` 的 `ModelProvider`/`CancellationToken`（两个 Protocol）和
-   `tau_ai.events` 的 `ProviderEvent` 子类；`tau_agent/harness.py` 同样只 import
-   `tau_ai.provider.ModelProvider`。它**从不** import 任何具体 provider 类
-   （`OpenAICompatibleProvider` 等），也从不碰 HTTP。
+2. **`tau_agent` 完全不依赖 `tau_ai`**：`tau_agent` 定义了自己的 `ModelProvider`
+   Protocol 和 `CancellationToken` Protocol（在 `tau_agent/provider.py`），以及
+   `AssistantMessageEvent` 等 provider 事件类型（在 `tau_agent/provider_events.py`）。
+   `tau_agent/loop.py` 只 import `tau_agent.provider` 的 `ModelProvider`/
+   `CancellationToken` 和 `tau_agent.provider_events` 的事件子类；`tau_agent/harness.py`
+   同样只 import `tau_agent.provider.ModelProvider`。它**从不** import 任何 `tau_ai`
+   模块，也从不碰 HTTP。
 
    > **什么是 Protocol？** 这里指的是 `typing.Protocol`——一种 Python 的结构化子类型
    > 机制：只要一个类实现了 Protocol 声明的方法签名，就自动满足这个接口，不需要显式
-   > 继承。`ModelProvider` 是 `tau_ai` 定义的一个 Protocol，声明了 `stream_response`
-   > 方法的签名。`tau_agent` 只认这个"形状"，不关心具体是哪家模型提供商的实现——
-   > 这样在测试时可以用 `FakeProvider` 完全替代真实网络请求。
+   > 继承。`ModelProvider` 是 `tau_agent` 定义的一个 Protocol，声明了 `stream_response`
+   > 方法的签名。`tau_ai` 的具体 provider 实现这个 Protocol，而 `tau_agent` 只认
+   > 这个"形状"——这样在测试时可以用 `FakeProvider` 完全替代真实网络请求。
 
 3. **所以真正的单向数据流是**：
-   - `tau_ai` 提供"把模型响应变成 `ProviderEvent` 流"的能力（依赖 `tau_agent` 的数据类型）；
-   - `tau_agent` 消费 `ProviderEvent`、产出 `AgentEvent`、维护 transcript 与持久化
-     （只认 `tau_ai` 的 Protocol，不认具体实现）；
-   - `tau_coding` 把具体 provider 实例（实现 `ModelProvider`）注入 `AgentHarness`，并
-     把 `AgentEvent` 接到 CLI/TUI/工具上。
+   - `tau_agent` 定义核心数据类型（消息、工具、类型）、Protocol（`ModelProvider`、
+     `CancellationToken`）和事件（`AssistantMessageEvent`、`AgentEvent`）；
+   - `tau_ai` 依赖 `tau_agent` 的数据类型，实现 `ModelProvider` Protocol，把模型
+     响应翻译成 `AssistantMessageEvent` 流；
+   - `tau_coding` 把具体 provider 实例（实现 `ModelProvider`）注入 `AgentHarness`，
+     并把 `AgentEvent` 接到 CLI/TUI/工具上。
 
-这种"**下层 import 上层的数据类型，但上层只认下层的 Protocol**"的安排，让 `tau_agent`
+这种"**下层定义类型和 Protocol，上层实现 Protocol**"的安排，让 `tau_agent`
 在单元测试里能用 `FakeProvider`（Part 1b）完全替代真实网络，也让 `tau_ai` 可以独立
 演进各家 API 而不波及 agent 逻辑。
 
 > Design note: 这套边界正是 README 的 agent 拆分原则——`AgentHarness = reusable agent brain`、
 > `AgentSession = coding-agent environment`、`TUI = one possible frontend`——在依赖方向上的落实。
-> 把"消息/工具"作为纯数据类型下沉到 `tau_agent`，`tau_ai` 只接收结构而不依赖 agent 行为；
-> `tau_agent` 反过来只依赖 `tau_ai` 的 `ModelProvider` / `ProviderEvent` 等 Protocol，不碰任何
-> 具体 provider 或 HTTP。结果是核心 agent 包满足 AGENTS.md 强调的"独立于 CLI、Textual、Rich、
-> 会话文件位置、应用特定资源加载"——`tau_coding` 把具体 provider 注入 harness、把事件接到
-> 前端，而 harness 自身对这些上层结构一无所知。这也是"Small layers beat magic"的直接后果:
+> `tau_agent` 定义"消息/工具"作为纯数据类型和 Protocol，`tau_ai` 只实现这些 Protocol 而不
+> 定义新数据类型；`tau_agent` 完全不知道 `tau_ai` 的存在——它只认自己定义的 Protocol。
+> 结果是核心 agent 包满足 AGENTS.md 强调的"独立于 CLI、Textual、Rich、会话文件位置、
+> 应用特定资源加载"——`tau_coding` 把具体 provider 注入 harness、把事件接到前端，
+> 而 harness 自身对这些上层结构一无所知。这也是"Small layers beat magic"的直接后果:
 > 每个包只暴露一个稳定的抽象面,边界清晰到可以用 fake 实现做确定性测试。
 
 ---
@@ -89,8 +92,9 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 
 - `tau_agent/__init__.py` 是 `tau_agent` 的"门面"，集中导出事件、harness、循环、
   消息、会话树、工具、类型七类符号。
-- 依赖边界的核心：**`tau_ai` import `tau_agent` 的数据类型；`tau_agent` import
-  `tau_ai` 的 Protocol + 事件**。二者通过"数据类型下沉、行为用 Protocol 抽象"解耦。
+- 依赖边界的核心：**`tau_agent` 定义 Protocol 和数据类型，`tau_ai` 实现 Protocol
+  并使用数据类型**。`tau_agent` 完全不知道 `tau_ai` 的存在——它只认自己定义的
+  `ModelProvider` Protocol 和 `AssistantMessageEvent` 等类型。
 
 至此整个 `tau_agent` 讲解完毕。下一任务（Part 3a）进入最上层 `tau_coding`，先看它
 的"工具与提示"子集：`tools.py`（read/write/edit/bash）、`system_prompt.py`、
@@ -115,33 +119,26 @@ tau_coding  ──►  tau_agent  ──►  tau_ai
 ### 导出项:`__all__`
 
 ```python
-# __init__.py:63 — 公共契约清单：51 个 re-export 符号全部入列
-__all__ = [
-    "AgentEndEvent", "AgentEvent", "AgentMessage", "AgentStartEvent",
-    "AgentHarness", "AgentHarnessConfig", "AgentTool", "AgentToolResult",
-    "AssistantMessage", "BranchSummaryEntry", "CompactionEntry", "CustomEntry",
-    "ErrorEvent", "EventListener", "JSONObject", "JSONPrimitive",
-    "JsonlSessionStorage", "JSONValue", "LabelEntry", "LeafEntry",
-    "MessageDeltaEvent", "MessageEndEvent", "MessageEntry", "MessageStartEvent",
-    "ModelChangeEntry", "QueuedMessages", "QueueUpdateEvent", "RetryEvent",
-    "SessionEntry", "SessionInfoEntry", "SessionState", "SimpleCancellationToken",
-    "ThinkingLevelChangeEntry", "ThinkingDeltaEvent", "ToolCall", "ToolCallRenderer",
-    "ToolExecutionEndEvent", "ToolExecutionStartEvent", "ToolExecutionUpdateEvent",
-    "ToolExecutor", "ToolResultMessage", "ToolResultRenderer", "ToolUpdateCallback",
-    "TurnEndEvent", "TurnStartEvent", "Usage", "UsageCost", "UserMessage",
-    "run_agent_loop",
-]
+# __init__.py:68 — 动态推导公共契约：所有非下划线开头的顶层名字自动入列
+__all__ = [name for name in globals() if not name.startswith("_")]
 ```
 
-
-`__all__` 是列表字面量(第 63–113 行),包含了下面所有被 re-export 的名字。它的作用是:
+`__all__` 使用**动态推导**——它收集 `globals()` 中所有不以 `_` 开头的名字，
+而不是硬编码列表。它的作用是:
 
 - 定义 `from tau_agent import *` 时的可见集合;
 - 作为包公共契约的权威清单(谁在列,谁就是稳定的对外 API;谁不在列,谁就是内部实现)。
 
-本文件 **re-export 的全部 51 个符号都进了 `__all__`**,没有"静默导出但不在 `__all__` 中"的遗漏——`__all__` 与文件实际 import 的符号一一对应、完全同步。
+本文件 **re-export 的全部符号都进了 `__all__`**,没有"静默导出但不在 `__all__` 中"的遗漏——`__all__` 与文件实际 import 的符号一一对应、完全同步。
 
-> **注意**:事件类实际上只有 10 个（`AgentStartEvent`、`AgentEndEvent`、`TurnStartEvent`、`TurnEndEvent`、`MessageStartEvent`、`MessageUpdateEvent`、`MessageEndEvent`、`ToolExecutionStartEvent`、`ToolExecutionUpdateEvent`、`ToolExecutionEndEvent`）,加上 `AgentEvent` 联合类型本身共 11 个符号。前文列表中的 `__all__` 包含了所有这 11 个事件相关符号。
+实际导出的符号按来源分组:
+- **事件**（`events.py`）：11 个符号（`AgentStartEvent`、`AgentEndEvent`、`TurnStartEvent`、`TurnEndEvent`、`MessageStartEvent`、`MessageUpdateEvent`、`MessageEndEvent`、`ToolExecutionStartEvent`、`ToolExecutionUpdateEvent`、`ToolExecutionEndEvent`、`AgentEvent`）
+- **harness**（`harness.py`）：5 个符号（`AgentHarness`、`AgentHarnessConfig`、`EventListener`、`QueuedMessages`、`SimpleCancellationToken`）
+- **循环**（`loop.py`）：1 个符号（`run_agent_loop`）
+- **消息**（`messages.py`）：16 个符号（`AgentMessage`、`AssistantMessage`、`BashExecutionMessage`、`BranchSummaryMessage`、`CompactionSummaryMessage`、`CustomMessage`、`ImageContent`、`TextContent`、`ThinkingContent`、`ToolCall`、`ToolResultMessage`、`Usage`、`UsageCost`、`UserMessage`、`content_text`、`message_text`）
+- **会话**（`session/*`）：12 个符号（`BranchSummaryEntry`、`CompactionEntry`、`CustomEntry`、`JsonlSessionStorage`、`LabelEntry`、`LeafEntry`、`MessageEntry`、`ModelChangeEntry`、`SessionEntry`、`SessionInfoEntry`、`SessionState`、`ThinkingLevelChangeEntry`）
+- **工具**（`tools.py`）：6 个符号（`AgentTool`、`AgentToolResult`、`ToolCancellationToken`、`ToolExecutionMode`、`ToolExecutor`、`ToolUpdateCallback`）
+- **类型**（`types.py`）：3 个符号（`JSONObject`、`JSONPrimitive`、`JSONValue`）
 
 ### 导出项:`AgentHarness`
 
@@ -251,10 +248,10 @@ class SimpleCancellationToken:
   - 纯 provider/工具 agent 循环(`loop.py:1` docstring:"Pure provider/tool agent loop")。
   - 它**不持有 transcript**:传入的 `messages: list[AgentMessage]` 由调用方拥有,循环把 assistant message 和 tool result 追加进去(保持无状态但允许 harness 拥有状态)。
   - 开头 `yield AgentStartEvent()`;然后按 `max_turns` 循环,每个 turn `yield TurnStartEvent`。
-  - 内部 `await provider.stream_response(...)` 并把 `tau_ai` 的 provider 事件**翻译/映射**为 agent 事件:`AssistantStartEvent → MessageStartEvent`、`AssistantMessageEvent(带 delta) → MessageUpdateEvent`、`AssistantDoneEvent → MessageEndEvent(带完整 assistant_message)`、`AssistantErrorEvent → ErrorEvent`。
+  - 内部 `await provider.stream_response(...)` 并把 `AssistantMessageEvent` 翻译/映射为 `AgentEvent`:`AssistantStartEvent → MessageStartEvent`、`TextDeltaEvent` 等 → `MessageUpdateEvent`、`AssistantDoneEvent → MessageEndEvent(带完整 assistant_message)`、`AssistantErrorEvent → MessageEndEvent`。
   - 没有 tool call 时:先尝试 drain steering 队列、再 drain follow_up 队列,有则继续下一 turn,否则结束。
-  - 有 tool call 时:调 `_execute_tool_calls` 逐个执行(未知工具名 → `_unknown_tool_result`;取消 → `_cancelled_tool_result`),每个结果追加为 `ToolResultMessage`,并 `yield ToolExecutionStart/Update/EndEvent`。支持 `before_tool_call` / `after_tool_call` 钩子。
-  - `max_turns` 耗尽时 `yield ErrorEvent(recoverable=True)`;最后 `yield AgentEndEvent()`。
+  - 有 tool call 时:调 `_execute_tool_call` 逐个执行(未知工具名 → 错误结果;取消 → 错误结果),每个结果追加为 `ToolResultMessage`,并 `yield ToolExecutionStart/Update/EndEvent`。支持 `before_tool_call` / `after_tool_call` 钩子。
+  - `max_turns` 耗尽时构造错误消息并结束;最后 `yield AgentEndEvent()`。
 - **如何构成公共面**:它是 harness 之下的"引擎",把 provider 流与工具执行编排成统一的 `AgentEvent` 流。需要无状态/嵌入式使用的调用方可以直接用它本身,而不经过 `AgentHarness`。
 
 > **什么是 AsyncIterator？** `AsyncIterator[AgentEvent]` 意味着这个函数返回的不是一个
@@ -339,9 +336,9 @@ async def run_agent_loop(
 
 ### 导出项:`ToolCall`
 
-- **来源**:`tau_agent.tools`(第 52–60 行导入)。
-- **契约**:`tools.py:107` 的 `BaseModel`。字段:`id: str`、`name: str`、`arguments: dict[str, JSONValue]`、`thought_signature: str | None`(某些 provider 如 Gemini 需回传的不透明签名)。
-- **如何构成公共面**:模型发起的工具调用请求(出现在 `AssistantMessage.tool_calls` 里),也是 `ToolExecutionStartEvent.tool_call` 的载荷。
+- **来源**:`tau_agent.messages`(第 26–43 行导入)。
+- **契约**:`messages.py:77` 的 `WireModel`。字段:`type: Literal["toolCall"] = "toolCall"`、`id: str`、`name: str`、`arguments: dict[str, JSONValue]`、`thought_signature: str | None`(某些 provider 如 Gemini 需回传的不透明签名)。
+- **如何构成公共面**:模型发起的工具调用请求(出现在 `AssistantMessage.content` 中作为 `ToolCall` 内容块),也是 `ToolExecutionStartEvent` 的载荷。注意 `ToolCall` 定义在 `messages.py` 而非 `tools.py`,因为它作为消息内容块存在于 `AssistantMessage.content` 中。
 
 ### 导出项:`ToolCallRenderer`
 
@@ -478,31 +475,50 @@ async def run_agent_loop(
 - **provider 流是 agent 的输入**:agent 不自己生产 token。它把 `tau_ai.provider.ModelProvider.stream_response` 返回的 provider 事件**翻译成**自己的 `AgentEvent`(见 `run_agent_loop`,`loop.py:79` 起)。provider 是上游数据源,agent 循环是其消费者与编排者。
 - **agent 不绑定具体 provider**:`AgentHarnessConfig.provider: ModelProvider` 是 `tau_ai` 定义的协议/接口,agent 只依赖这个抽象,不依赖任何具体模型实现(符合 AGENTS.md "Avoid provider-specific assumptions in core agent code")。
 
-### agent 包对 tau_ai 的依赖点(import 了哪些 tau_ai 符号)
+### agent 包对 tau_ai 的依赖点（**无**）
 
-严格基于源码搜索,`tau_agent` 仅在两个模块里 import `tau_ai`:
+严格基于源码搜索,`tau_agent` 的所有模块（`loop.py`、`harness.py`、`events.py`、
+`messages.py`、`tools.py`、`types.py`、`session/*`）**完全不 import `tau_ai`**。
 
-1. **`tau_agent/loop.py`**:
-   - 第 29–36 行:`from tau_ai.events import (ProviderErrorEvent, ProviderResponseEndEvent, ProviderResponseStartEvent, ProviderRetryEvent, ProviderTextDeltaEvent, ProviderThinkingDeltaEvent)`。这些是 provider 层的原始事件,loop 把它们一对一映射为 `AgentEvent`。
-   - 第 37 行:`from tau_ai.provider import CancellationToken, ModelProvider`。`ModelProvider` 是 agent 循环的输入抽象;`CancellationToken` 是 `run_agent_loop` 的 `signal` 参数类型(注意:agent 自己的 `SimpleCancellationToken` 与这个协议通过 `is_cancelled()` 形状兼容,但类型上 agent 接受的是 `tau_ai.provider.CancellationToken`)。
+`tau_agent` 定义了自己的 Protocol 和事件类型：
 
-2. **`tau_agent/harness.py`**:
-   - 第 17 行:`from tau_ai.provider import ModelProvider`。仅用于 `AgentHarnessConfig.provider` 字段的类型注解。
+1. **`tau_agent/provider.py`**：定义 `ModelProvider` Protocol 和 `CancellationToken`
+   Protocol。这些是 `tau_agent` 自己的抽象，不来自 `tau_ai`。
 
-除此之外,`tau_agent` 的 `events.py`、`messages.py`、`tools.py`、`types.py`、`session/*` 等模块**完全不 import `tau_ai`**——它们只依赖包内部的 `tau_agent.messages` / `tau_agent.tools` / `tau_agent.types` 等。这印证了边界的单向性:`tau_agent` 依赖 `tau_ai` 的"provider 与 provider 事件"两层,而 `tau_ai` 不反向依赖 `tau_agent`。
+2. **`tau_agent/provider_events.py`**：定义 `AssistantMessageEvent` 等 provider 层
+   流式事件。这些也是 `tau_agent` 自己的类型。
 
-**总结边界契约**:`tau_ai` 提供"模型与流",`tau_agent` 提供"大脑与事件面",`tau_coding`(CLI/TUI)负责"前端与资源"。`tau_agent` 通过 `ModelProvider` 抽象接收 provider 流、通过 `AgentEvent` 向外广播、通过 `SessionStorage` 协议接受调用方选定的落盘位置——它自身不触碰渲染、不碰文件位置、不绑具体模型。
+3. **`tau_agent/loop.py`** 只 import `tau_agent.provider` 和 `tau_agent.provider_events`
+   的符号——完全在 `tau_agent` 包内部。
+
+4. **`tau_agent/harness.py`** 只 import `tau_agent.provider.ModelProvider`。
+
+反过来，**`tau_ai` 依赖 `tau_agent`**：
+- `tau_ai/provider.py` 从 `tau_agent.provider` re-export `CancellationToken` 和
+  `ModelProvider`。
+- `tau_ai/events.py` 从 `tau_agent.provider_events` re-export 事件类型。
+- 各 provider 实现文件 import `tau_agent.messages`、`tau_agent.tools`、`tau_agent.types`
+  的数据类型。
+
+**总结边界契约**:`tau_agent` 定义 Protocol 和数据类型，`tau_ai` 实现 Protocol
+并使用数据类型，`tau_coding`(CLI/TUI)负责"前端与资源"。`tau_agent` 通过自定义的
+`ModelProvider` Protocol 定义 provider 接口、通过 `AgentEvent` 向外广播、通过
+`SessionStorage` 协议接受调用方选定的落盘位置——它自身不触碰渲染、不碰文件位置、
+不绑具体模型，也完全不知道 `tau_ai` 的存在。
 
 ```python
-# loop.py:29 — agent 仅依赖 tau_ai 的协议与事件（不依赖具体 provider）
-from tau_ai.events import (ProviderErrorEvent, ProviderResponseEndEvent,
-                            ProviderResponseStartEvent, ProviderRetryEvent,
-                            ProviderTextDeltaEvent, ProviderThinkingDeltaEvent)
-from tau_ai.provider import CancellationToken, ModelProvider
+# tau_agent/provider.py — Protocol 定义在 tau_agent 内部
+class ModelProvider(Protocol):
+    def stream_response(self, *, model, system, messages, tools, signal=None)
+        -> AsyncIterator[AssistantMessageEvent]: ...
 
-# 反方向：tau_ai.provider 的签名直接接收 tau_agent 的纯数据类型
-# ModelProvider.stream_response(model, system, messages: list[AgentMessage],
-#                               tools: list[AgentTool], signal) -> AsyncIterator[ProviderEvent]
+# tau_ai/provider.py — tau_ai 只是 re-export tau_agent 的 Protocol
+from tau_agent.provider import CancellationToken, ModelProvider
+
+# tau_ai 各 provider 实现这些 Protocol
+class OpenAICompatibleProvider:
+    def stream_response(self, *, model, system, messages, tools, signal=None):
+        # ... 实现 ModelProvider Protocol
 ```
 
 
