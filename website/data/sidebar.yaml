@@ -39,6 +39,7 @@
     - label: Built-in tools
       path: /reference/tools/
 - label: How Tau works
+  path: /internals/
   items:
     - label: Architecture overview
       path: /internals/architecture/

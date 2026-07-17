@@ -3,7 +3,6 @@ title: How Tau works
 description: 源码剖析：从底层到上层，逐文件解读 Tau 的每一处设计。
 build:
   list: false
-  render: false
 cascade:
   type: doc
 ---

@@ -648,6 +648,12 @@ section{ padding:88px 0; }
   font-size:11.5px; letter-spacing:.14em; text-transform:uppercase;
   color:var(--ink-soft);
 }
+.sidebar-group-label a{
+  color:inherit; text-decoration:none;
+  transition:color .15s;
+}
+.sidebar-group-label a:hover{ color:var(--ink); }
+.sidebar-group-label a.active{ color:var(--accent); }
 .docs-sidebar ul{ list-style:none; margin:0; padding:0; }
 .docs-sidebar li{ margin:0; }
 .docs-sidebar a{

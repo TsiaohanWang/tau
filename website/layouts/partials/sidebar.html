@@ -5,10 +5,15 @@
      {{ range $group := site.Data.sidebar }}
        {{ $link := "" }}
        {{ if $group.link }}{{ $link = $group.link }}{{ else if $group.path }}{{ $link = $group.path }}{{ end }}
-       {{ if $group.items }}
-         <div class="sidebar-group">
-           <p class="sidebar-group-label">{{ $group.label }}</p>
-           <ul>
+        {{ if $group.items }}
+          <div class="sidebar-group">
+            {{ if $group.path }}
+              {{ $href := printf "%s%s" $base ($group.path | relURL) }}
+              <p class="sidebar-group-label"><a href="{{ $href }}" {{ if eq $current $href }}class="active"{{ end }}>{{ $group.label }}</a></p>
+            {{ else }}
+              <p class="sidebar-group-label">{{ $group.label }}</p>
+            {{ end }}
+            <ul>
              {{ range $item := $group.items }}
                {{ if $item.items }}
                  {{/* nested subgroup: render as a non-link header, then its leaves */}}

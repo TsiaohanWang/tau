@@ -1,0 +1,21 @@
+{{ define "main" }}
+{{ $hasCode := .Params.code_files }}
+<div class="wrap docs-layout{{ if $hasCode }} has-code-panel{{ end }}">
+  <button class="sidebar-toggle" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">&#x276E;</button>
+  <aside>
+    {{ partial "sidebar.html" . }}
+  </aside>
+  <article class="docs-content">
+    <h1>{{ .Title }}</h1>
+    {{ with .Description }}<p class="docs-description">{{ . }}</p>{{ end }}
+    {{ .Content }}
+
+    <div class="docs-footer">
+      <a class="edit-link" href="{{ .Site.Params.editRepoUrl }}/{{ .File.Path }}">Edit this page on GitHub &#8599;</a>
+    </div>
+  </article>
+  {{ if $hasCode }}
+    {{ partial "code-browser.html" . }}
+  {{ end }}
+</div>
+{{ end }}
