@@ -113,7 +113,7 @@ class RuntimeProviderAuth:
 type RuntimeProviderAuthResolver = Callable[[], Awaitable[RuntimeProviderAuth]]
 ```
 
-类型别名（`type X = ...` 是 Python 3.10+ 的类型别名语法，类似 TypeScript 的 `type X = ...`）：一个无参、返回 `Awaitable[RuntimeProviderAuth]` 的可调用对象（`Callable` 是函数类型注解，`Callable[[参数类型], 返回类型]`，类似 Go 的 `func(参数类型) 返回类型` 或 TypeScript 的 `(参数类型) => 返回类型`；`Awaitable` 表示可以通过 `await` 等待结果的异步对象）。它代表"按需异步解析运行时凭证"的回调，供 `OpenAICompatibleConfig` / `AnthropicConfig` 的 `credential_resolver` 字段使用。
+类型别名（`type X = ...` 是 Python 3.12+ 的类型别名语法，类似 TypeScript 的 `type X = ...`）：一个无参、返回 `Awaitable[RuntimeProviderAuth]` 的可调用对象（`Callable` 是函数类型注解，`Callable[[参数类型], 返回类型]`，类似 Go 的 `func(参数类型) 返回类型` 或 TypeScript 的 `(参数类型) => 返回类型`；`Awaitable` 表示可以通过 `await` 等待结果的异步对象）。它代表"按需异步解析运行时凭证"的回调，供 `OpenAICompatibleConfig` / `AnthropicConfig` 的 `credential_resolver` 字段使用。
 
 ### OpenAICompatibleConfig
 
