@@ -1,6 +1,9 @@
 ---
 title: Build your own frontend
 description: Advanced — drive Tau's coding session from your own UI by consuming its event stream.
+code_files:
+  - tau_coding/session.py
+  - tau_coding/events.py
 ---
 
 {{% caution title="Advanced" %}}
