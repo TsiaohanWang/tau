@@ -3,6 +3,7 @@ title: tau_coding · CodingSession
 description: session.py —— coding agent 的环境核心
 code_files:
   - tau_coding/session.py
+  - tau_coding/events.py
 ---
 
 ## 公开数据类（`CodingSession` 之前的类型）
@@ -28,35 +29,86 @@ code_files:
   `index_on_first_persist`/`shell_command_prefix`/`skills_enabled`/`extension_paths`/
   `extensions_enabled`/`project_extensions_enabled`/`extension_runtime`。
 
-## 运行时入口：`prompt` / `continue_`
+---
 
-（已详读，核心逻辑）
+## 会话级事件：`tau_coding/events.py`
+
+Pi 将"会话级事件"（session-specific events）与"可移植 agent 事件"（portable agent events）分开。可移植的 `AgentEvent`（来自 `tau_agent.events`）描述 agent 循环的内部步骤（`MessageEndEvent`、`ToolExecutionEndEvent` 等），而会话层独有的事件——如压缩、自动重试、队列更新——则定义在 `tau_coding/events.py` 中。这两个层次通过联合类型 `CodingSessionEvent = AgentEvent | SessionOwnEvent` 合并，前端和扩展统一消费这个联合类型。
+
+`session.py` 的 import 也对应重构：不再从 `tau_ai.events` 导入，而是直接从 `tau_coding.events` 取用 `AgentSettledEvent`、`CompactionStartEvent`、`CompactionEndEvent`、`AutoRetryStartEvent`、`AutoRetryEndEvent`、`QueueUpdateEvent`、`SessionAgentEndEvent` 等。这把"会话层关注什么事件"显式化了。
+
+### `CodingSessionEvent`
+
+类型别名：`CodingSessionEvent = AgentEvent | SessionOwnEvent`。这是 `CodingSession.prompt()` 和 `continue_()` 方法 yield 的类型——前端遍历事件流时，既能看到可移植的 agent 事件（`MessageEndEvent` 等），也能看到会话层事件（`CompactionStartEvent` 等）。
+
+### `SessionOwnEvent`
+
+联合类型，包含 `tau_coding/events.py` 中定义的所有会话独有事件：
+
+| 事件类 | type 字段 | 含义 |
+|--------|-----------|------|
+| `SessionAgentEndEvent` | `"agent_end"` | agent 循环结束的会话包装 |
+| `AgentSettledEvent` | `"agent_settled"` | agent 回合完全结束（含重试后） |
+| `QueueUpdateEvent` | `"queue_update"` | 队列中 steering/follow-up 消息变化 |
+| `CompactionStartEvent` | `"compaction_start"` | 压缩开始（含 reason） |
+| `CompactionEndEvent` | `"compaction_end"` | 压缩完成（含 result/aborted/will_retry/error_message） |
+| `EntryAppendedEvent` | `"entry_appended"` | 持久化条目被追加 |
+| `SessionInfoChangedEvent` | `"session_info_changed"` | 会话元信息（如名称）变化 |
+| `ThinkingLevelChangedEvent` | `"thinking_level_changed"` | 思考级别切换 |
+| `AutoRetryStartEvent` | `"auto_retry_start"` | 自动重试开始（attempt/max_attempts/delay_ms/error_message） |
+| `AutoRetryEndEvent` | `"auto_retry_end"` | 自动重试结束（success/attempt/final_error） |
+
+### `SessionAgentEndEvent`
+
+包装 `AgentEndEvent`（来自 `tau_agent.events`），使其成为 `SessionOwnEvent`。当 `prompt()` 或 `continue_()` 遍历 agent 事件流时，遇到 `AgentEndEvent` 会将其转换为 `SessionAgentEndEvent(messages=..., will_retry=False)` 再 yield——这样前端只需监听 `SessionOwnEvent` 类型，就能感知回合结束，无需同时处理两个层次的事件。
+
+```python
+# session.py 中的转换逻辑
+if isinstance(event, AgentEndEvent):
+    yield SessionAgentEndEvent(messages=event.messages, will_retry=False)
+else:
+    yield event
+```
+
+### `CompactionReason`
+
+字面量类型 `Literal["manual", "threshold", "overflow"]`，标识压缩触发原因。`manual` 是用户主动调用 `/compact`；`threshold` 是上下文 token 超过自动压缩阈值；`overflow` 是上下文溢出后的兜底压缩。
+
+### `AgentSettledEvent`
+
+空载荷事件（只有 `type` 字段），标志着一次 `prompt()` 或 `continue_()` 调用的完全结束——包括所有自动重试和压缩之后。前端在收到此事件后可以安全地认为"这次交互彻底完成了"，可以更新 UI 状态、启用输入等。它在正常路径和溢出重试路径的末尾都会被 yield。
+
+---
+
+## 运行时入口：`prompt` / `continue_`
 
 - **`prompt(content, *, streaming_behavior, source, custom_type, details)`**：
   1. 跑扩展 `input_hooks`（可被扩展拦截/改写/短路）；
   2. `expand_prompt_text`（展开 `/skill:` 与 prompt 模板）；
   3. 若 harness 正在运行：按 `streaming_behavior` 决定 `steer`/`follow_up` 或报错；
+     steer/follow_up 成功后 yield `QueueUpdateEvent` 让前端感知队列变化；
   4. 可能 `_try_auto_compact`（prompt 后）；
-  5. 驱动 `harness.prompt(...)`，对每个 `MessageEndEvent` 调 `_persist_messages_since`
+  5. 驱动 `harness.prompt_message(...)`，对每个 `MessageEndEvent` 调 `_persist_messages_since`
      落盘，对每个用户消息尝试自动命名；对 `ToolExecutionEndEvent` 失效上下文缓存；
-  6. 遇到不可恢复**上下文溢出** `ErrorEvent` → `_try_overflow_compact` + `continue_()`
-     自动重试一次；
-  7. 最后 `_try_auto_compact`（prompt 后）。
-- **`continue_()`**：恢复后继续跑 harness，同样在每个 `MessageEndEvent` 落盘。
+  6. 遇到不可恢复**上下文溢出** → yield `CompactionStartEvent(reason="overflow")` + 尝试
+     `_try_overflow_compact` → yield `CompactionEndEvent(reason="overflow", ...)` →
+     yield `AutoRetryStartEvent` + `harness.continue_()` 重试 → yield `AutoRetryEndEvent`；
+  7. 最后 yield `AgentSettledEvent`，然后 `_try_auto_compact`（prompt 后）。
+
+**消息构造的变化**：Pi 兼容层中，`UserMessage` 的内容通过 `.text` 属性访问（而非直接的 `.content`）。当 `prompt()` 需要携带自定义消息元数据时（例如扩展发起的回合），构造 `CustomMessage(custom_type=..., content=..., display=True, details=...)` 而非普通 `UserMessage`。
 
 **为什么 `prompt` / `continue_` 是这样的结构**：Tau 官方设计原则 "Sessions are durable
 and inspectable"（会话持久且可检视）要求每一步交互都可落盘、可回放。因此 `prompt` 在每个 `MessageEndEvent`
 处即调 `_persist_messages_since` 落盘，而不是等整个回合结束——即使进程中途崩溃，已完成
 的消息也已写入 append-only JSONL（一种只追加的 JSON 日志格式）。`is_running` 时拒绝新 prompt（要求显式 `steer`/
 `follow_up`）保证同一时刻只有一条活跃的 harness 驱动链，避免并发写树导致父指针错乱。
-溢出后 `_try_overflow_compact` + `continue_()` 自动重试一次，是把"上下文超限"从不可恢复
-错误降级为可自愈事件——就像程序遇到了内存不足，自动清理缓存后重试，而不是直接报错退出。
+溢出后的自动重试（`AutoRetryStartEvent` → `continue_()` → `AutoRetryEndEvent`），是把"上下文超限"从不可恢复
+错误降级为可自愈事件——就像程序遇到了内存不足，自动清理缓存后重试，而不是直接报错退出。压缩过程通过
+`CompactionStartEvent`/`CompactionEndEvent` 显式通知前端，让 UI 可以展示"正在压缩…"的进度提示。
 
 ---
 
 ## 持久化核心：`_persist_messages_since` 与辅助
-
-（已详读）
 
 - **`_persist_messages_since(persisted_count)`**：把 harness 里"自 `persisted_count`
   **之后**"的新消息逐个写成 `MessageEntry`（父节点为 `_last_parent_id`），并紧跟一个
@@ -136,6 +188,8 @@ and inspectable"（会话持久且可检视）要求每一步交互都可落盘�
 - **`_try_overflow_compact(context)`**：上下文溢出时的兜底压缩（对应 `prompt()` 里的
   重试路径）。
 
+压缩过程全程通过 `CompactionStartEvent`/`CompactionEndEvent` 通知前端——`CompactionEndEvent` 携带 `aborted`（是否中止）、`will_retry`（是否将重试）和 `error_message`（失败原因），让 UI 可以展示细粒度的压缩状态。
+
 ---
 
 ## 会话生命周期：resume / new_session / adopt
@@ -189,6 +243,7 @@ and inspectable"（会话持久且可检视）要求每一步交互都可落盘�
 CodingSession 是 coding-agent 环境层的集成点，对照 Tau README 的 `CodingSession = coding-agent environment`——它属于应用层，而非 `AgentHarness` 那个可移植内核：
 
 - 包住 `AgentHarness`，在每次 `MessageEndEvent` 把 transcript 落盘成"消息+叶指针"树——确保每一步交互都可持久化、可回放；
+- 会话独有事件（`CompactionStartEvent`、`AutoRetryStartEvent`、`AgentSettledEvent` 等）定义在 `tau_coding/events.py`，与可移植的 `AgentEvent` 通过联合类型 `CodingSessionEvent` 合并——前端只需遍历一个事件流就能感知全部状态变化；
 - 模型/思考级别/分支/压缩，都通过写对应 `SessionEntry` + `LeafEntry` 变成可持久化的状态变更——所有操作都是 append-only（只追加不删除），保证历史完整性；
 - 自动/溢出压缩用 Part 3a 的估算与总结提示——当上下文接近窗口上限时自动触发，避免对话"撑爆"模型的短期记忆；
 - `resume`/`new_session` 通过"load + adopt"切换活跃状态，同时保全扩展运行时——切换会话时不需要重建整个运行环境。
@@ -264,7 +319,7 @@ CodingSession 是 coding-agent 环境层的集成点，对照 Tau README 的 `Co
 
 ### CompactionPlan
 
-`frozen=True, slots=True`,表示一次压缩运行所准备的“活动上下文条目”。
+`frozen=True, slots=True`,表示一次压缩运行所准备的"活动上下文条目"。
 
 - `replace_entry_ids: tuple[str, ...]` —— 将被压缩摘要替换掉的条目 id 列表。
 - `messages_to_summarize: tuple[AgentMessage, ...]` —— 需要被摘要的消息(与上面一一对应)。
@@ -326,7 +381,7 @@ def __init__(self, config, *, state, harness, last_parent_id, skills=(), prompt_
 - `_context_usage_cache = None`(惰性估算),`_owned_providers = []`(本会话创建的 provider,`aclose` 时统一关闭)。
 - 构建 `_diagnostic_logger`(基于资源路径)与 `_credential_store`(基于 credentials 路径),并初始化 `_last_diagnostic_log_path = None`。
 
-注意:`__init__` 是“被 `load` 调用”的低层构造器,不会触发任何异步 I/O 或扩展生命周期事件。
+注意:`__init__` 是"被 `load` 调用"的低层构造器,不会触发任何异步 I/O 或扩展生命周期事件。
 
 ### `load` (classmethod async)
 
@@ -338,7 +393,7 @@ async def load(cls, config: CodingSessionConfig) -> CodingSession
 
 1. `entries = await config.storage.read_all()`。若为空,则构造初始三段:`SessionInfoEntry(cwd=...)` → `ModelChangeEntry(parent=info.id, model=_initial_model_for_config(config))` → `ThinkingLevelChangeEntry(parent=model.id, thinking_level=_initial_thinking_level_for_config(config, model=...))`,存入 `pending_initial_entries`。
 2. 若非空,调用 `_detach_missing_parents(entries)` 断开指向外部(缺失)父节点的悬挂指针。
-3. 构建线性状态 `SessionState.from_entries(entries)`,并对最新叶子 `_latest_leaf_entry` 用 `leaf_id` 重建“活动分支”状态。
+3. 构建线性状态 `SessionState.from_entries(entries)`,并对最新叶子 `_latest_leaf_entry` 用 `leaf_id` 重建"活动分支"状态。
 4. 计算资源路径,调用 `_load_session_resources(...)` 加载 skills/模板/上下文文件。
 5. 处理扩展运行时:若 `config.extension_runtime` 为 `None`(`fresh_extension_runtime=True`),新建并用 `load(...)` 加载(依据 `extensions_enabled / extension_paths / project_extensions_enabled`)。
 6. 计算工具:显式 `config.tools` 或 `create_coding_tools(...)`,再经 `extension_runtime.compose_tools(base_tools)` 叠加扩展工具。
@@ -404,7 +459,7 @@ def available_models(self) -> tuple[str, ...]
 def available_model_choices(self) -> tuple[ModelChoice, ...]
 ```
 
-返回所有“provider+model”可用组合。无设置时返回单个 `ModelChoice(provider_name, self.model)`;否则对每个可用 provider 的每个 model 生成 `ModelChoice`。
+返回所有"provider+model"可用组合。无设置时返回单个 `ModelChoice(provider_name, self.model)`;否则对每个可用 provider 的每个 model 生成 `ModelChoice`。
 
 ### `scoped_model_choices`
 
@@ -461,7 +516,7 @@ async def branch_to_entry(self, entry_id, *, summarize=False, custom_instruction
 1. 若 harness 正在运行,抛 `RuntimeError(TREE_RUNNING_MESSAGE)`。
 2. 读取条目,`by_id` 索引;未知 id 或不可分支则抛 `ValueError`。
 3. `summarize=True` 时:收集 `_messages_after_entry_on_active_path(entries, entry_id, self._last_parent_id)` 中将被遗弃的消息,调用 `_summarize_branch_messages` 生成摘要,写 `BranchSummaryEntry(parent=entry_id)`,再 `target_id = summary_entry.id`。
-4. 否则若目标是用户消息条目:回退到其父节点,并把该用户消息内容作为 `input_prefill`。
+4. 否则若目标是用户消息条目:回退到其父节点,并把该用户消息内容作为 `input_prefill`（通过 `selected_entry.message.text` 属性访问）。
 5. 追加 `LeafEntry(parent=target_id, entry_id=target_id)`,更新 `_last_parent_id`。
 6. `_refresh_persisted_state(leaf_id=target_id)`,用 `self._state.messages` 替换 harness 消息,失效上下文缓存。
 7. 重算 `_thinking_level` 并 `_sync_thinking_level_to_active_model()`、`_refresh_runtime_provider()`。
@@ -492,7 +547,7 @@ def available_thinking_levels(self) -> tuple[ThinkingLevel, ...]
 def thinking_unavailable_reason(self) -> str | None
 ```
 
-若 `available_thinking_levels` 非空返回 `None`;否则解释原因(`_active_provider_config()` 为 None 时返回文案,否则 `provider_thinking_unavailable_reason(...)`)。
+若 `available_thinking_levels` 非空返回 `None`;否则解释原因(`_active_provider_config()` 为 None 时返回文案,否则 `provider_thinking_unavailable_reason(...)`。
 
 ### `storage`
 
@@ -616,7 +671,7 @@ def extension_runtime(self) -> ExtensionRuntime
 async def emit_pending_session_start(self) -> None
 ```
 
-发出 `load` 推迟的 `session_start`,每会话一次。若 `_session_start_pending` 为 False 直接返回;否则置 False 并 `await self._extension_runtime.emit_session_start("startup")`。对“接管已启动扩展运行时”的会话是空操作。
+发出 `load` 推迟的 `session_start`,每会话一次。若 `_session_start_pending` 为 False 直接返回;否则置 False 并 `await self._extension_runtime.emit_session_start("startup")`。对"接管已启动扩展运行时"的会话是空操作。
 
 ### `queue_steering_message`
 
@@ -624,7 +679,7 @@ async def emit_pending_session_start(self) -> None
 def queue_steering_message(self, content, *, custom_type=None, details=None) -> None
 ```
 
-通过 harness 队列一条 steering 用户消息(扩展运行时接缝),包装为 `UserMessage(...)` 调用 `self._harness.steer_message(...)`。
+通过 harness 队列一条 steering 用户消息(扩展运行时接缝)。若有 `custom_type` 则构造 `CustomMessage(custom_type=..., content=content, details=details)`,否则构造 `UserMessage(content=content)`。最终调用 `self._harness.steer_message(message)`。
 
 ### `queue_follow_up_message`
 
@@ -632,7 +687,7 @@ def queue_steering_message(self, content, *, custom_type=None, details=None) -> 
 def queue_follow_up_message(self, content, *, custom_type=None, details=None) -> None
 ```
 
-队列一条 follow-up 用户消息,调用 `self._harness.follow_up_message(...)`。
+队列一条 follow-up 用户消息,逻辑同上但调用 `self._harness.follow_up_message(message)`。
 
 ### `append_custom_entry`
 
@@ -728,7 +783,7 @@ def cancel(self) -> None
 def queue_update_event(self) -> QueueUpdateEvent
 ```
 
-把当前队列状态封装为事件:`self._harness.queue_update_event()`。
+把当前队列状态封装为 `QueueUpdateEvent`(来自 `tau_coding.events`)。`QueueUpdateEvent` 包含 `steering` 和 `follow_up` 两个元组,分别携带排队中消息的文本——这样前端在 steer/follow_up 后能通过 yield 此事件刷新 UI 上的队列显示。
 
 ### `clear_queued_messages`
 
@@ -983,36 +1038,40 @@ async def run_terminal_command(self, command, *, add_to_context) -> TerminalComm
 ### `prompt`
 
 ```python
-async def prompt(self, content, *, streaming_behavior=None, source="interactive", custom_type=None, details=None) -> AsyncIterator[AgentEvent]
+async def prompt(self, content, *, streaming_behavior=None, source="interactive", custom_type=None, details=None) -> AsyncIterator[CodingSessionEvent]
 ```
 
-追加用户提示、运行 agent、持久化新消息。这是核心交互入口。
+追加用户提示、运行 agent、持久化新消息。这是核心交互入口。yield 的事件类型为 `CodingSessionEvent`（即 `AgentEvent | SessionOwnEvent`）。
 
 1. `context = self._diagnostic_context()`;运行扩展 `run_input_hooks(...)`,若被处理且带消息则 `ui.notify` 并返回。
 2. `content = input_outcome.text`;尝试 `expand_prompt_text(content)`(`ResourceError` 透传,其它异常写诊断日志后抛出)。
 3. 若 harness 正在运行:
-   - `streaming_behavior == "steer"` → `yield self._harness.steer(...)` 并 return;
-   - `== "follow_up"` → `yield self._harness.follow_up(...)` 并 return;
+   - `streaming_behavior == "steer"` → `yield self._harness.steer(...)` → yield `QueueUpdateEvent` → return;
+   - `== "follow_up"` → `yield self._harness.follow_up(...)` → yield `QueueUpdateEvent` → return;
    - 否则抛 `RuntimeError`(要求传 streaming_behavior)。
 4. `_try_auto_compact(context, phase="auto_compact_before_prompt")`。
-5. `persisted_count = len(messages)`;`auto_name_attempted = False`;`overflow_event = None`。
-6. `events = self._harness.prompt(...)`,失效缓存,逐事件:
-   - `MessageEndEvent`:`persisted_count = await _persist_messages_since(persisted_count)`;若是 `UserMessage` 且未尝试过命名,则 `_try_auto_name_session(content, context)`。
+5. `persisted_count = len(messages)`;`auto_name_attempted = False`;`overflow_message = None`。
+6. 构造消息：若有 `custom_type` 则 `CustomMessage(custom_type=..., content=expanded_content, display=True, details=details)`，否则 `UserMessage(content=expanded_content)`。调 `harness.prompt_message(prompt_message)`，逐事件:
+   - `MessageEndEvent`:`persisted_count = await _persist_messages_since(persisted_count)`;若是 `UserMessage` 且未尝试过命名,则 `_try_auto_name_session(event.message.text, context=context)`。
    - `ToolExecutionEndEvent`:失效缓存。
-   - 不可恢复 `ErrorEvent`:写诊断日志;若 `_is_context_overflow_error` 则记 `overflow_event`。
-   - 始终 `yield event`。
+   - 不可恢复 `AssistantMessage` 错误:写诊断日志;若 `_is_context_overflow_error` 则记 `overflow_message`。
+   - `AgentEndEvent`:yield `SessionAgentEndEvent(messages=event.messages, will_retry=False)`。
+   - 其他事件:原样 yield。
 7. 循环结束后 `_persist_messages_since(persisted_count)`。
-8. 若 `overflow_event` 非空:`_try_overflow_compact(context)`,成功则 `retry_persisted_count = len(messages)`,`self._harness.continue_()` 重试,逐事件持久化(与上面同构:MessageEnd/ToolEnd/Error 处理),最后持久化并返回。
-9. 无溢出则 `_try_auto_compact(context, phase="auto_compact_after_prompt")`。
+8. 若 `overflow_message` 非空:yield `CompactionStartEvent(reason="overflow")` →
+   `_try_overflow_compact(context)` → yield `CompactionEndEvent(reason="overflow", ...)` →
+   yield `AutoRetryStartEvent(...)` → `self._harness.continue_()` 重试(逐事件持久化同构) →
+   yield `AutoRetryEndEvent(...)` → yield `AgentSettledEvent()` → return。
+9. 无溢出则 `_try_auto_compact(context, phase="auto_compact_after_prompt")` → yield `AgentSettledEvent()`。
 10. 任何异常写诊断日志后抛出。
 
 ### `continue_`
 
 ```python
-async def continue_(self) -> AsyncIterator[AgentEvent]
+async def continue_(self) -> AsyncIterator[CodingSessionEvent]
 ```
 
-从恢复状态继续 agent 并持久化。`context = _diagnostic_context()`;`persisted_count = len(messages)`;跑 `harness.continue_()`,逐事件:`MessageEnd` → 持久化;`ToolExecutionEnd` → 失效缓存;不可恢复 `ErrorEvent` → 写日志;`yield event`;结束后 `_persist_messages_since` + `_try_auto_compact(context, "auto_compact_after_continue")`。异常写日志后抛出。
+从恢复状态继续 agent 并持久化。`context = _diagnostic_context()`;`persisted_count = len(messages)`;跑 `harness.continue_()`,逐事件:`MessageEnd` → 持久化;`ToolExecutionEnd` → 失效缓存;不可恢复 `AssistantMessage` 错误 → 写日志;`AgentEndEvent` → yield `SessionAgentEndEvent`;其他事件原样 yield;结束后 `_persist_messages_since` + `_try_auto_compact(context, "auto_compact_after_continue")` → yield `AgentSettledEvent()`。异常写日志后抛出。
 
 ### `_diagnostic_context`
 
@@ -1028,7 +1087,7 @@ def _diagnostic_context(self) -> AgentCallDiagnosticContext
 async def _persist_loaded_interrupted_tool_repairs(self) -> None
 ```
 
-为载入时悬挂 tool call 的会话持久化修复(旧版只在内存中修复,resume 后缺合成 tool result,provider 会拒绝整段对话)。用 `_interrupted_tool_repair_plan(state.messages, context_entry_ids=...)` 得到 `(parent_id, suffix)`;为空则返回。否则把 suffix 每一条写成 `MessageEntry`,推进 `_last_parent_id`,追加 `LeafEntry`,刷新 `_last_parent_id` 与持久状态;最后用新 `state.messages` **重建** `AgentHarness`(丢弃旧的,避免监听挂到废弃实例)。
+为载入时悬挂 tool call 的会话持久化修复。用 `_interrupted_tool_repair_plan(state.messages, context_entry_ids=...)` 得到 `(parent_id, suffix)`;为空则返回。否则把 suffix 每一条写成 `MessageEntry`,推进 `_last_parent_id`,追加 `LeafEntry`,刷新 `_last_parent_id` 与持久状态;最后用新 `state.messages` **重建** `AgentHarness`(丢弃旧的,避免监听挂到废弃实例)。
 
 ### `_persist_messages_since`
 
@@ -1116,7 +1175,7 @@ async def _try_auto_compact(self, *, context, phase) -> bool
 async def _try_overflow_compact(self, *, context) -> bool
 ```
 
-上下文溢出压缩:用 `_recent_preserving_compaction_plan()`;为 `None` 返回 `False`;否则 `_generate_compaction_summary(...)` + `_append_compaction(...)` 返回 `True`;异常写日志并返回 `False`(让原始溢出可见)。
+上下文溢出时的兜底压缩——先 `_recent_preserving_compaction_plan()` 准备计划，再 `_generate_compaction_summary(...)` 生成摘要，最后 `_append_compaction(...)` 写入。任何异常写诊断日志后返回 `False`，原始溢出仍然可见。
 
 ### `_try_auto_name_session`
 
@@ -1124,15 +1183,7 @@ async def _try_overflow_compact(self, *, context) -> bool
 async def _try_auto_name_session(self, first_message, *, context) -> None
 ```
 
-若 `_should_auto_name_session()` 为 False 则返回;否则 `_generate_session_name(first_message)`(异常或 `None` 时退化为 `_fallback_session_name`);得到标题后 `_set_auto_session_title(title)`。
-
-### `_should_auto_name_session`
-
-```python
-def _should_auto_name_session(self) -> bool
-```
-
-无 id/manager 或已有标题则返回 False;否则要求 harness 中 `UserMessage` 数量恰好为 1(即首个用户消息)。
+首个用户消息后尝试自动命名。先 `_should_auto_name_session()` 判断条件（有 manager/session_id、尚无标题、仅一条 UserMessage），再 `_generate_session_name(first_message)` 调模型生成 ≤4 词标题，最后 `_set_auto_session_title(title)` 写入 manager。异常被吞，回退到从消息文本截取的 `_fallback_session_name`。
 
 ### `_generate_session_name`
 
@@ -1140,321 +1191,7 @@ def _should_auto_name_session(self) -> bool
 async def _generate_session_name(self, first_message: str) -> str | None
 ```
 
-用 provider 的 `stream_response`(system=`SESSION_NAME_SYSTEM_PROMPT`,无工具)生成至多 4 词的会话名,拼装 `final_text` 或 delta 片段,经 `_sanitize_session_name` 清洗;`ProviderErrorEvent` 时抛 `RuntimeError`。
-
-### `_set_auto_session_title`
-
-```python
-def _set_auto_session_title(self, title: str) -> None
-```
-
-无 id/manager 或已有标题则空返回;否则 `touch_session(..., title=title)` 记录标题。
-
-### `_provider_is_usable`
-
-```python
-def _provider_is_usable(self, provider: ProviderConfig) -> bool
-```
-
-`provider_has_usable_credentials(provider, credential_reader=self._credential_store)`。
-
-### `_usable_provider_configs`
-
-```python
-def _usable_provider_configs(self) -> tuple[ProviderConfig, ...]
-```
-
-无设置则返回 `()`;否则返回所有 `_provider_is_usable` 为真的 provider。
-
-### `_maybe_auto_compact`
-
-```python
-async def _maybe_auto_compact(self) -> bool
-```
-
-真正的自动压缩决策:`threshold = auto_compact_token_threshold`(`None`/≤0 返回 False);`context_entry_ids` 少于 2 返回 False;`context_token_estimate <= threshold` 返回 False;`_recent_preserving_compaction_plan()` 为 `None` 返回 False;否则生成摘要并 `_append_compaction(...)` 返回 `True`。
-
-### `_generate_compaction_summary`
-
-```python
-async def _generate_compaction_summary(self, messages, *, custom_instructions=None) -> str
-```
-
-用 `build_compaction_summary_prompt` 构造提示词,经 provider `stream_response`(system=`SUMMARIZATION_SYSTEM_PROMPT`,无工具)流式收集文本;`ProviderErrorEvent` 抛 `RuntimeError`;空摘要抛错;返回 `strip()` 后的摘要。
-
-### `_summarize_branch_messages`
-
-```python
-async def _summarize_branch_messages(self, messages, *, custom_instructions=None, replace_instructions=False) -> str
-```
-
-尝试 `summarize_branch_messages_with_model(...)`;失败(抛异常)则 `summary = None`,最终回退到 `summarize_messages_for_compaction(messages)`。
-
-### `_manual_compaction_plan`
-
-```python
-def _manual_compaction_plan(self) -> CompactionPlan
-```
-
-`_active_context_rows()`;为空则抛 `ValueError`;返回覆盖全部行的 `CompactionPlan(replace_entry_ids=..., messages_to_summarize=...)`。
-
-### `_recent_preserving_compaction_plan`
-
-```python
-def _recent_preserving_compaction_plan(self) -> CompactionPlan | None
-```
-
-保留最近的压缩方案。`_active_context_rows()`;行数 <2 返回 `None`;用 `_first_recent_context_index(rows, keep_recent_tokens=DEFAULT_COMPACTION_KEEP_RECENT_TOKENS)` 找起点,`<=0` 返回 `None`;取前 `first_kept_index` 行作为 replaced,返回对应 `CompactionPlan`(否则 `None`)。
-
-### `_active_context_rows`
-
-```python
-def _active_context_rows(self) -> tuple[tuple[str, AgentMessage], ...]
-```
-
-`tuple(zip(self._state.context_entry_ids, self._state.messages, strict=True))`。
-
-### `_append_compaction`
-
-```python
-async def _append_compaction(self, summary, *, replace_entry_ids) -> CompactionEntry
-```
-
-无 `replace_entry_ids` 则抛错;写 `CompactionEntry(parent=last_parent, summary=..., replaces_entry_ids=list(...))` + `LeafEntry`;更新 `_last_parent_id`;`_refresh_persisted_state(leaf_id=compaction.id)`;用 `self._state.messages` 替换 harness 消息、失效缓存;返回 `compaction`。
-
----
-
-## 模块级函数
-
-### `_first_recent_context_index`
-
-```python
-def _first_recent_context_index(rows, *, keep_recent_tokens: int) -> int
-```
-
-从末尾向前累加 `estimate_message_tokens`,直到达到 `keep_recent_tokens`,得到 `candidate_index`。随后做“对齐到用户消息边界”的调整:
-
-- 若 candidate 是 user:若其索引 >0 直接返回;否则找下一个 user 消息(index 从 1 起),有则返回其索引否则 0。
-- 若 candidate 非 user:找下一个 user 消息,有则返回其索引。
-- 否则从 candidate 向后扫描,跳过 `tool` 角色,返回第一个非 tool 的索引;若都跳完返回 `len(rows)`。
-
-特殊处理:`keep_recent_tokens <= 0` 返回 `len(rows)`;`candidate_index is None`(全部行累计都未达阈值)返回 0。
-
-### `_next_user_message_index`
-
-```python
-def _next_user_message_index(rows, *, start: int) -> int | None
-```
-
-从 `start` 起向后找第一个 role == `"user"` 的行,返回其索引,找不到返回 `None`。
-
-### `_is_context_overflow_error`
-
-```python
-def _is_context_overflow_error(event: ErrorEvent) -> bool
-```
-
-把 `event.message`(+`event.data`)转小写,匹配一组标记(`"context length"`、`"token limit"`、`"input is too long"` 等)。任一命中即视为上下文溢出错误。
-
-### `_detach_missing_parents`
-
-```python
-def _detach_missing_parents(entries: list[SessionEntry]) -> list[SessionEntry]
-```
-
-收集全部 entry id;对 `parent_id` 不在集合中的条目,`model_copy(update={"parent_id": None})` 断开为根(导入外部历史时常见),其余原样保留。
-
-### `_last_parent_id_from_state`
-
-```python
-def _last_parent_id_from_state(state: SessionState) -> str | None
-```
-
-优先 `state.active_leaf_id`;否则取 `state.entries[-1].id`;都为空返回 `None`。
-
-### `_latest_leaf_entry`
-
-```python
-def _latest_leaf_entry(entries: list[SessionEntry]) -> LeafEntry | None
-```
-
-逆序找第一个 `LeafEntry` 并返回;找不到返回 `None`。
-
-### `_is_branchable_tree_entry`
-
-```python
-def _is_branchable_tree_entry(entry: SessionEntry) -> bool
-```
-
-`compaction` / `branch_summary` 类型恒为可分支;非 `message` 类型返回 False;`message` 类型仅当是 `UserMessage | AssistantMessage` 时可分支。
-
-### `_tree_choice_label`
-
-```python
-def _tree_choice_label(entry: SessionEntry, *, branch_indent: int = 0) -> str
-```
-
-在 `_tree_entry_title(entry)` 前加 `"  " * branch_indent` 前缀。
-
-### `_tree_branch_indents`
-
-```python
-def _tree_branch_indents(entries: list[SessionEntry]) -> dict[str, int]
-```
-
-按 `parent_id` 建 children 表(忽略 leaf),并算每个节点的 sibling 序号;随后对每个非 leaf 节点:`parent_indent = indents.get(parent_id, 0)`,若其 sibling 序号 >0 则 `indent = parent_indent + 1` 否则同父缩进。返回 `entry_id -> indent`。
-
-### `_ordered_tree_entries`
-
-```python
-def _ordered_tree_entries(entries: list[SessionEntry]) -> tuple[SessionEntry, ...]
-```
-
-用**迭代式**深度优先(避免长链递归爆栈)重排条目:`children_by_parent` 表 → `append_descendants(None)` 从根展开(先 emit 直接子、再逆序压栈以保持原序),并用 `expanded` 集合防父环死循环;最后扫描未被看到的条目补入。返回有序非 leaf 条目序列。
-
-### `_is_tool_call_tree_entry`
-
-```python
-def _is_tool_call_tree_entry(entry: SessionEntry) -> bool
-```
-
-仅当 `message` 类型、是 `AssistantMessage` 且 `tool_calls` 非空时为真。
-
-### `_tree_entry_title`
-
-```python
-def _tree_entry_title(entry: SessionEntry) -> str
-```
-
-按类型生成标题:
-
-- `message`:`AssistantMessage` 且有 tool_calls 且无 content → `"tool call: {names}"`;否则 `"{role}: {_message_text_preview}"`。
-- `compaction` → `"compaction summary: {_short_preview}"`。
-- `branch_summary` → `"branch summary: {_short_preview}"`。
-- 其它 → `entry.type`。
-
-### `_message_text_preview`
-
-```python
-def _message_text_preview(message: AgentMessage) -> str
-```
-
-对 `message.content` 取字符串形式再 `_short_preview`(非 str 用 `str(content)`)。
-
-### `_short_preview`
-
-```python
-def _short_preview(text: str, *, limit: int = 72) -> str
-```
-
-合并空白(`" ".join(text.split())`),≤limit 直接返回(空则 `"(empty)"`),否则返回 `text[:limit-1] + "..."`。
-
-### `_messages_after_entry_on_active_path`
-
-```python
-def _messages_after_entry_on_active_path(entries, entry_id, active_leaf_id) -> tuple[AgentMessage, ...]
-```
-
-`active_leaf_id` 为 None 返回 `()`;用 `path_to_entry(entries, active_leaf_id)` 取活动路径(`SessionTreeError` 返回 `()`);找 `entry_id` 在路径中的位置,返回其**之后**所有 `message` 类型条目的消息;找不到目标则返回 `()`。
-
-### `_storage_path`
-
-```python
-def _storage_path(storage: SessionStorage) -> Path | None
-```
-
-取 `storage.path`,仅当其为 `Path` 时返回,否则 `None`。
-
-### `_resolve_export_destination`
-
-```python
-def _resolve_export_destination(destination, *, cwd, session_path, format) -> Path
-```
-
-计算导出文件路径:
-
-- `destination is None`:`session_path` 有则用 `default_session_export_artifact_path(session_path, destination_dir=cwd, format)`,否则 `cwd / f"tau-session.{format}"`。
-- 有 destination:非绝对则 `cwd / destination`;若已带后缀直接返回;否则以 `session_path.stem`(无则 `"tau-session"`)配合 `default_session_export_artifact_path`。
-
-### `_session_export_title`
-
-```python
-def _session_export_title(session: CodingSession) -> str
-```
-
-优先返回 manager 中记录的标题;否则 `f"Tau session {session_id}"`(id 为 None 时 `"Tau Session Export"`)。
-
-### `_initial_model_for_config`
-
-```python
-def _initial_model_for_config(config: CodingSessionConfig) -> str
-```
-
-无 `provider_settings` 或 `runtime_provider_config` 时返回 `config.model`;`_provider_config_for_name` 取不到返回 `config.model`;校验 `config.model` 失败则用 `provider.default_model`;否则 `config.model`。
-
-### `_runtime_model_for_state`
-
-```python
-def _runtime_model_for_state(config: CodingSessionConfig, state: SessionState) -> str
-```
-
-`state_model = state.model or config.model`;无设置返回 `state_model`;取不到 provider 返回 `state_model`;校验 `state_model` 失败:若 `config.model` 在 `provider.models` 中用 `config.model`,否则 `provider.default_model`;否则返回 `state_model`。
-
-### `_initial_thinking_level_for_config`
-
-```python
-def _initial_thinking_level_for_config(config, *, model) -> ThinkingLevel
-```
-
-取 provider 配置(无则返回 `config.thinking_level`),用 `_preferred_thinking_level_for_model(provider, model, fallback=config.thinking_level)`。
-
-### `_provider_config_for_name`
-
-```python
-def _provider_config_for_name(config, provider_name) -> ProviderConfig | None
-```
-
-优先 `provider_settings.get_provider`(失败跳过),其次 `runtime_provider_config`,否则 `None`。
-
-### `_state_thinking_level`
-
-```python
-def _state_thinking_level(state: SessionState, default: ThinkingLevel) -> ThinkingLevel
-```
-
-取 `getattr(state, "thinking_level", None)`;为空返回 `default`,否则 `normalize_thinking_level(...)`。
-
-### `_default_thinking_level_for_active_model`
-
-```python
-def _default_thinking_level_for_active_model(session: CodingSession) -> ThinkingLevel
-```
-
-取 `_active_provider_config()`(无则返回 `session._config.thinking_level`),用 `_preferred_thinking_level_for_model(provider, model=session.model, fallback=session._config.thinking_level)`。
-
-### `_preferred_thinking_level_for_model`
-
-```python
-def _preferred_thinking_level_for_model(provider, *, model, fallback) -> ThinkingLevel
-```
-
-取 `levels = provider_thinking_levels(provider, model)`;`preferred = provider.thinking_defaults.get(model)`;若 `preferred in levels` 返回它;若 `fallback in levels` 或 `levels` 为空返回 `fallback`;否则 `provider_default_thinking_level` 或 `levels[0]`。
-
-### `_coerced_thinking_level`
-
-```python
-def _coerced_thinking_level(provider, *, model, current, preferred=None) -> ThinkingLevel
-```
-
-`levels = provider_thinking_levels(provider, model)`;若 `levels` 为空或 `current in levels` 返回 `current`;若 `preferred in levels` 返回 `preferred`;否则 `provider_default_thinking_level` 或 `levels[0]`。
-
-### `_unavailable_thinking_message`
-
-```python
-def _unavailable_thinking_message(session: CodingSession) -> str
-```
-
-基础文案 `"Thinking controls are unavailable for {provider_name}:{model}"`,若 `thinking_unavailable_reason` 非空则追加 `": {reason}"`。
+用 `provider.stream_response` 发送命名提示（system = `SESSION_NAME_SYSTEM_PROMPT`），收集 `TextDeltaEvent` 的 delta 拼接文本，从 `AssistantDoneEvent` 取最终文本，最后 `_sanitize_session_name(...)` 清理。
 
 ### `_sanitize_session_name`
 
@@ -1462,137 +1199,90 @@ def _unavailable_thinking_message(session: CodingSession) -> str
 def _sanitize_session_name(text: str) -> str | None
 ```
 
-合并空白、剥除引号与 `string.punctuation`、按词再清洗;无词返回 `None`;否则返回前 4 个词拼接(带约束“最多四个词、无标点、无引号”)。
+清理模型生成的标题：去空白、去引号/标点、截取前 4 词。无有效词时返回 `None`。
 
-### `_fallback_session_name`
-
-```python
-def _fallback_session_name(first_message: str) -> str | None
-```
-
-直接 `_sanitize_session_name(first_message)`(命名失败时的兜底)。
-
-### `_terminal_command_context_message`
+### `_maybe_auto_compact`
 
 ```python
-def _terminal_command_context_message(command: str, output: str) -> str
+async def _maybe_auto_compact(self) -> bool
 ```
 
-构造加入上下文的用户消息文本:`"Terminal command executed by the user."` + bash 代码块命令 + text 代码块输出。
+自动压缩的核心判定：`threshold > 0` → `context_entry_ids` 至少 2 条 → `context_token_estimate > threshold` → 准备 `_recent_preserving_compaction_plan()` → 生成摘要 → `_append_compaction(...)`。每一步不满足则返回 `False`。
 
-### `parse_terminal_command`
+### `_generate_compaction_summary`
 
 ```python
-def parse_terminal_command(text: str) -> TerminalCommandRequest | None
+async def _generate_compaction_summary(self, messages, *, custom_instructions=None) -> str
 ```
 
-解析输入框终端命令语法:`!!` 前缀 → `add_to_context=False`;`!` 前缀 → `add_to_context=True`;命令为空返回 `None`;均不匹配返回 `None`。
+用 `build_compaction_summary_prompt` 构造提示，`provider.stream_response`（system = `SUMMARIZATION_SYSTEM_PROMPT`）生成摘要。空结果抛 `RuntimeError`。
 
-### `_category_summary`
+### `_append_compaction`
 
 ```python
-def _category_summary(before, after) -> ReloadCategorySummary
+async def _append_compaction(self, summary, *, replace_entry_ids) -> CompactionEntry
 ```
 
-对比 before/after 签名元组,返回 `ReloadCategorySummary(before=len, after=len, changed=(before != after))`。
+写 `CompactionEntry(parent=last_parent, summary=..., replaces_entry_ids=...)` + `LeafEntry`，刷新 `_state`，`harness.replace_messages` 替换内存中的消息列表，失效缓存。返回 compaction entry。
 
-### `_skill_signatures`
+### `_manual_compaction_plan`
 
 ```python
-def _skill_signatures(skills) -> tuple[tuple[object, ...], ...]
+def _manual_compaction_plan(self) -> CompactionPlan
 ```
 
-每个 skill 映射为 `(name, str(path), description, content)` 的签名元组。
+全量压缩：`_active_context_rows()` 取全部活动上下文，打包为 `CompactionPlan`。
 
-### `_prompt_template_signatures`
+### `_recent_preserving_compaction_plan`
 
 ```python
-def _prompt_template_signatures(prompt_templates) -> tuple[tuple[object, ...], ...]
+def _recent_preserving_compaction_plan(self) -> CompactionPlan | None
 ```
 
-每个模板映射为 `(name, str(path), description, content)`。
+保留最近 N token 的压缩：从尾部反向累积 `DEFAULT_COMPACTION_KEEP_RECENT_TOKENS`（20K）个 token，找到分界点，只压缩较早部分。不足 2 条或分界点在开头则返回 `None`。
 
-### `_context_file_signatures`
+### `_active_context_rows`
 
 ```python
-def _context_file_signatures(context_files) -> tuple[tuple[object, ...], ...]
+def _active_context_rows(self) -> tuple[tuple[str, AgentMessage], ...]
 ```
 
-每个上下文文件映射为 `(path, content)`。
+将 `_state.context_entry_ids` 与 `_state.messages` 配对为 `(entry_id, message)` 元组。
 
-### `_diagnostic_signatures`
+---
 
-```python
-def _diagnostic_signatures(diagnostics) -> tuple[tuple[object, ...], ...]
-```
+## 模块级辅助函数
 
-每个诊断映射为 `(kind, message, str(path)|None, name, severity)`。
-
-### `_extension_signatures`
-
-```python
-def _extension_signatures(runtime: ExtensionRuntime) -> tuple[tuple[object, ...], ...]
-```
-
-返回 `((name,) for name in runtime.extension_names)`。
-
-### `_system_prompt_resource_signatures`
-
-```python
-def _system_prompt_resource_signatures(*, skills, context_files) -> tuple[tuple[object, ...], tuple[object, ...]]
-```
-
-返回 `(prompt_skills, context_file_signatures)`:前者按 `name` 排序的 skill 三元组 `(name, str(path), description)`,后者为上下文文件签名。
-
-### `_load_session_resources`
-
-```python
-def _load_session_resources(resource_paths, explicit_context_files, *, skills_enabled=True) -> SessionResources
-```
-
-加载资源:若 `skills_enabled` 则 `load_skills_with_diagnostics` 否则空;总是 `load_prompt_templates_with_diagnostics` 与 `discover_project_context_with_diagnostics`;把显式与发现到的上下文文件经 `_merge_context_files` 合并;诊断合并 skill/prompt/context 三类;返回 `SessionResources`。
-
-### `_merge_context_files`
-
-```python
-def _merge_context_files(explicit, discovered) -> tuple[ProjectContextFile, ...]
-```
-
-按 `path` 去重(先 explicit 后 discovered),返回合并后的元组。
-
-### `_interrupted_tool_repair_plan`
-
-```python
-def _interrupted_tool_repair_plan(messages, *, context_entry_ids) -> tuple[str, tuple[AgentMessage, ...]] | None
-```
-
-修复载入时悬挂的 tool call:收集所有 `ToolResultMessage` 的 `tool_call_id` 作为已返回集合;遍历消息,遇 `AssistantMessage` 时对每个 `tool_calls` 若 id 未返回则补一个 `"Tool call interrupted by user"` 的 `ToolResultMessage`(`ok=False`,`error=...`)。若 `repaired == messages` 返回 `None`;否则算公共前缀长度(为 0 返回 `None`),返回 `(context_entry_ids[common_prefix_length - 1], repaired[common_prefix_length:])`(即挂到前缀末端、待追加的修复消息)。
-
-### `default_session_path`
-
-```python
-def default_session_path(cwd: Path) -> Path
-```
-
-`TauPaths().default_session_path(cwd)`(用户主目录下该项目的默认会话路径)。
-
-### `jsonl_session_storage`
-
-```python
-def jsonl_session_storage(path: str | Path) -> JsonlSessionStorage
-```
-
-构造 `JsonlSessionStorage(path)` 的便捷工厂。
-
-### `_append_session_entry_sync`
-
-```python
-def _append_session_entry_sync(storage: SessionStorage, entry: SessionEntry) -> None
-```
-
-同步追加条目,供无法 await 的斜杠命令初始化使用。仅支持 `JsonlSessionStorage`:确保父目录存在,以追加模式写 `entry_to_json_line(entry)`;否则抛 `RuntimeError("Session storage does not support synchronous initialization")`。
-
-<!-- NAV -->
-[← tau_coding · 工具与提示组装]({{< relref "./coding-tools-prompt.md" >}})
-[↑ 总览]({{< relref "./source-walkthrough.md" >}})
-[→ tau_coding · Slash 命令]({{< relref "./coding-commands.md" >}})
+- `_first_recent_context_index(rows, *, keep_recent_tokens)`：从尾部反向累积 token，找到应保留的最近消息的起始索引。会尝试在 UserMessage 边界切分（避免切断对话轮次）。
+- `_next_user_message_index(rows, *, start)`：从 `start` 起找下一个 user role 消息的索引。
+- `_is_context_overflow_error(message)`：检查 `AssistantMessage.error_message` 是否包含上下文溢出关键词（"context length"、"token limit"、"input is too long" 等）。
+- `_detach_missing_parents(entries)`：把 `parent_id` 指向不存在条目的 entries 的 `parent_id` 置为 `None`（处理外部导入的历史）。
+- `_last_parent_id_from_state(state)`：从 `SessionState` 取最后活跃叶指针或最后一条 entry 的 id。
+- `_latest_leaf_entry(entries)`：从后往前找第一个 `LeafEntry`。
+- `_is_branchable_tree_entry(entry)`：`compaction`/`branch_summary` 类型或 `UserMessage`/`AssistantMessage` 类型的 message entry 可分支。
+- `_tree_choice_label(entry, *, branch_indent)`：生成带缩进前缀的树选择标签。
+- `_tree_branch_indents(entries)`：计算每个 entry 的分支缩进层级。
+- `_ordered_tree_entries(entries)`：深度优先遍历树，返回按显示顺序排列的 entries。
+- `_is_tool_call_tree_entry(entry)`：判断是否为包含 `tool_calls` 的 AssistantMessage。
+- `_tree_entry_title(entry)`：生成 entry 的简短标题（"tool call: ..."、"user: ..."、"compaction summary: ..." 等）。
+- `_message_text_preview(message)` / `_short_preview(text, *, limit=72)`：消息文本的截断预览。
+- `_messages_after_entry_on_active_path(entries, entry_id, active_leaf_id)`：取活跃路径上某 entry 之后的消息（用于分支时收集将被遗弃的消息）。
+- `_storage_path(storage)`：从 `SessionStorage` 取文件路径（如果是 JSONL）。
+- `_resolve_export_destination(destination, *, cwd, session_path, format)`：计算导出文件的目标路径。
+- `_session_export_title(session)`：从 manager 取标题，否则返回默认标题。
+- `_initial_model_for_config(config)` / `_runtime_model_for_state(config, state)`：校验模型在 provider 配置中是否有效，无效时回退到默认模型。
+- `_initial_thinking_level_for_config(config, *, model)`：从 provider 配置推导初始思考级别。
+- `_provider_config_for_name(config, provider_name)`：按名称取 provider 配置（先 settings，后 runtime）。
+- `_state_thinking_level(state, default)`：从持久状态取思考级别，否则用默认值。
+- `_default_thinking_level_for_active_model(session)` / `_preferred_thinking_level_for_model(provider, *, model, fallback)` / `_coerced_thinking_level(provider, *, model, current, preferred)`：思考级别选择与强制转换的三级辅助。
+- `_unavailable_thinking_message(session)`：生成思考不可用时的错误文案。
+- `_terminal_command_context_message(command, output)`：格式化终端命令输出为上下文消息。
+- `parse_terminal_command(text)`：解析 `!` / `!!` 前缀语法。
+- `_category_summary(before, after)`：生成 `ReloadCategorySummary`（重载前后对比）。
+- `_skill_signatures` / `_prompt_template_signatures` / `_context_file_signatures` / `_diagnostic_signatures` / `_extension_signatures` / `_system_prompt_resource_signatures`：重载快照签名。
+- `_load_session_resources(resource_paths, explicit_context_files, *, skills_enabled)`：加载 skills/模板/上下文文件，合并诊断。
+- `_merge_context_files(explicit, discovered)`：去重合并显式与发现的上下文文件。
+- `_interrupted_tool_repair_plan(messages, *, context_entry_ids)`：检查是否有悬挂的 tool call（助手发起了工具调用但没有对应的 result），修复时生成合成的 `ToolResultMessage`。
+- `default_session_path(cwd)`：返回 Tau 默认的会话存储路径。
+- `jsonl_session_storage(path)`：构造 JSONL 存储实例。
+- `_append_session_entry_sync(storage, entry)`：同步版本的条目追加（供无法 await 的斜杠命令使用）。

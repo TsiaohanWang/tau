@@ -4,6 +4,7 @@ description: tui/state / adapter / config / autocomplete
 code_files:
   - tau_coding/tui/state.py
   - tau_coding/tui/adapter.py
+  - tau_coding/events.py
 ---
 
 ## `tui/state.py` — 对话流的数据模型
@@ -69,22 +70,27 @@ TUI 的"状态管理"中心——这是**分离关注点**原则的体现：把"
 
 ## `tui/adapter.py` — 事件 → 状态
 
-`TuiEventAdapter` 是把 `AgentEvent` 映射到 `TuiState` 的唯一边界——这就是经典的**适配器模式**（Adapter Pattern）。为什么需要适配器？因为 agent 核心发出的是通用事件流（"用户说了一句话"、"工具开始执行了"），而 TUI 需要的是结构化的展示数据（"对话列表里多了一条消息"、"工具状态变成了运行中"）。适配器做的就是这个翻译工作，而且只做这一件事。它的 `apply(event)` 是对事件继承体系的一次 `isinstance` 分发：
+`TuiEventAdapter` 是把 `CodingSessionEvent` 映射到 `TuiState` 的唯一边界——这就是经典的**适配器模式**（Adapter Pattern）。为什么需要适配器？因为 agent 核心发出的是通用事件流（"用户说了一句话"、"工具开始执行了"），而 TUI 需要的是结构化的展示数据（"对话列表里多了一条消息"、"工具状态变成了运行中"）。适配器做的就是这个翻译工作，而且只做这一件事。它的 `apply(event)` 是对事件继承体系的一次 `isinstance` 分发：
 
+适配器从两个模块导入事件：
+- **`tau_agent.events`**：可移植 agent 层的 `AgentEvent`（`AgentStartEvent`、`AgentEndEvent`、`MessageStartEvent`、`MessageUpdateEvent`、`MessageEndEvent`、`ToolExecutionStartEvent`、`ToolExecutionUpdateEvent`、`ToolExecutionEndEvent`）。
+- **`tau_coding.events`**：coding 会话层的事件（`AutoRetryStartEvent`、`QueueUpdateEvent` 等）。
+- **`tau_ai.events`**：Pi 兼容的流式子事件（`TextDeltaEvent`、`ThinkingDeltaEvent`），用于解析 `MessageUpdateEvent` 的嵌套载荷。
+
+事件分发映射：
 - `AgentStartEvent` → `running = True`，清空错误。
 - `AgentEndEvent` → 刷新 assistant 缓冲区，`running = False`。
-- `MessageStartEvent` → 为一次 assistant 轮次重置 `assistant_buffer`。
-- `MessageDeltaEvent` → 追加到 `assistant_buffer`。
-- `ThinkingDeltaEvent` → `add_thinking_delta`。
+- `agent_settled`（按 `event.type` 匹配）→ 刷新缓冲区，`running = False`。
 - `QueueUpdateEvent` → `update_queue`。
-- `MessageEndEvent` → 若为 `user`，则 `add_user_message`；若为 `tool`，则忽略（harness 已通过 `ToolExecutionEndEvent` 记录过它）；否则把 assistant 缓冲区刷入一个 `assistant` 条目。
+- `MessageStartEvent` → 若消息为 `AssistantMessage`，用其 `text` 初始化 `assistant_buffer`。
+- **`MessageUpdateEvent`** → 解析嵌套的 `assistant_message_event` 字段：若为 `TextDeltaEvent` 则追加 delta 到 `assistant_buffer`；若为 `ThinkingDeltaEvent` 则调用 `add_thinking_delta`。（注意：旧版的 `MessageDeltaEvent`/`ThinkingDeltaEvent` 顶层事件已替换为统一的 `MessageUpdateEvent`，delta 信息嵌套在其中。）
+- `MessageEndEvent` → 若为 `UserMessage`，则 `add_user_message`；若为 `CustomMessage`，则 `add_user_message` 带 `custom_type`；若为 `AssistantMessage`，则根据 `stop_reason` 判断——错误/中止时标记 `error` 并停止 `running`，否则把 assistant 缓冲区刷入 `assistant` 条目。
 - `ToolExecutionStartEvent` → 刷新缓冲区，`add_tool_call`。
 - `ToolExecutionUpdateEvent` → `record_tool_update`。
-- `RetryEvent` → 一个瞬时的 `status` 条目。
-- `ToolExecutionEndEvent` → `record_tool_result`。
-- `ErrorEvent` → 刷新、标记错误/取消；不可恢复的会停止 `running`。
+- `AutoRetryStartEvent` → 一个瞬时的 `status` 条目。
+- `ToolExecutionEndEvent` → `record_tool_result`（现在接收 `tool_call_id`、`tool_name`、`result`、`is_error` 四个独立参数，而非单独的 `result` 对象）。
 
-`_flush_assistant_buffer` 把任何已累积的流式文本推进一个最终的 assistant 条目。这种分离意味着*同一个*适配器可以驱动任意视图；只有 `app.py` 才了解 Textual。适配器是把 `tau_agent` 可移植的 `AgentEvent` 流映射到 `TuiState` 的唯一边界，因此事件→状态的翻译与任何渲染关注点完全解耦（"薄层胜过魔法（Small layers beat magic）"——适配器只做一件事，且在一个窄接口背后完成）。
+`_flush` 把任何已累积的流式文本推进一个最终的 assistant 条目。这种分离意味着*同一个*适配器可以驱动任意视图；只有 `app.py` 才了解 Textual。适配器是把 `tau_agent` 可移植的 `AgentEvent` 与 `tau_coding` 的会话事件映射到 `TuiState` 的唯一边界，因此事件→状态的翻译与任何渲染关注点完全解耦（"薄层胜过魔法（Small layers beat magic）"——适配器只做一件事，且在一个窄接口背后完成）。
 
 ---
 
@@ -358,14 +364,14 @@ def record_tool_update(self, tool_call_id: str, message: str) -> ChatItem | None
 #### method: record_tool_result
 
 ```python
-def record_tool_result(self, result: AgentToolResult) -> None
+def record_tool_result(self, tool_call_id: str, tool_name: str, result: AgentToolResult, is_error: bool) -> None
 ```
 
-- 作用:把工具结果绑定到对应调用,若无匹配则以孤儿结果追加。
+- 作用:把 Pi 兼容的工具结果绑定到对应调用,若无匹配则以孤儿结果追加。参数为四个独立值而非单个 `AgentToolResult` 对象，因为适配器层直接从 `ToolExecutionEndEvent` 拆出各字段传入。
 - 步骤:
-  1. `format_tool_result_block(...)` 生成 `result_text`。
-  2. 倒序查 `tool`/`skill` 条目且 `tool_call_id == result.tool_call_id`:命中则写 `tool_result_text`/`tool_result`、清空 `update_text` 并返回。
-  3. 未命中:追加 `tool` 条目,`text=format_tool_result_summary(name, ok)`,并带 `tool_result_text`/`tool_result`。
+  1. `format_tool_result_block(name=tool_name, ok=not is_error, content=result.text, data=…)` 生成 `result_text`。
+  2. 倒序查 `tool`/`skill` 条目且 `tool_call_id == tool_call_id`:命中则写 `tool_result_text`/`tool_result`、清空 `update_text` 并返回。
+  3. 未命中:追加 `tool` 条目,`text=format_tool_result_summary(name=tool_name, ok=not is_error)`,并带 `tool_result_text`/`tool_result`。
 
 #### method: toggle_tool_results
 
@@ -609,7 +615,14 @@ def _preview_text(text: str, *, max_lines: int) -> str
 
 ## 文件:adapter.py
 
-本文件是 **agent 事件 → TuiState 投影**的适配器边界——它把 `tau_agent` 发出的可移植事件流增量地翻译成 `TuiState.items` 的增删改，使下游 widget 能纯投影渲染。**适配器模式**（Adapter Pattern）是一种设计模式，它把一种数据格式（这里是事件流）转换为另一种（这里是状态模型），转换逻辑集中在一个地方，方便测试和维护。
+本文件是 **coding 会话事件 → TuiState 投影**的适配器边界——它把 `tau_agent` 的可移植 `AgentEvent` 与 `tau_coding` 的会话事件增量地翻译成 `TuiState.items` 的增删改，使下游 widget 能纯投影渲染。**适配器模式**（Adapter Pattern）是一种设计模式，它把一种数据格式（这里是事件流）转换为另一种（这里是状态模型），转换逻辑集中在一个地方，方便测试和维护。
+
+### 事件来源与导入
+
+适配器同时从三个模块导入事件，体现了 Tau 的分层设计：
+- **`tau_agent.events`**：agent 可移植层的事件——`AgentStartEvent`、`AgentEndEvent`、`MessageStartEvent`、`MessageUpdateEvent`、`MessageEndEvent`、`ToolExecutionStartEvent`、`ToolExecutionUpdateEvent`、`ToolExecutionEndEvent`。
+- **`tau_coding.events`**：coding 会话层的事件——`AutoRetryStartEvent`、`QueueUpdateEvent`（以及 `CodingSessionEvent` 类型别名，即 `AgentEvent | SessionOwnEvent`）。
+- **`tau_ai.events`**：Pi 兼容的流式子事件——`TextDeltaEvent`、`ThinkingDeltaEvent`，用于解析 `MessageUpdateEvent` 中嵌套的 `assistant_message_event` 字段。
 
 ### class: TuiEventAdapter
 
@@ -630,39 +643,38 @@ def __init__(self, state: TuiState) -> None
 #### method: apply
 
 ```python
-def apply(self, event: AgentEvent) -> None
+def apply(self, event: CodingSessionEvent) -> None
 ```
 
 - 作用:事件主分发器,按事件类型调用对应处理(全部为 `isinstance` 分支,逐个返回)。
 - 分支映射:
   - `AgentStartEvent` → `state.running=True`、`error=None`。
-  - `AgentEndEvent` → `_flush_assistant_buffer()` 后 `running=False`。
-  - `MessageStartEvent` → 若 `message_role == "assistant"` 清空 `assistant_buffer`。
-  - `MessageDeltaEvent` → `assistant_buffer += delta`(累积增量)。
-  - `ThinkingDeltaEvent` → `add_thinking_delta(delta)`。
+  - `AgentEndEvent` → `_flush()` 后 `running=False`。
+  - `event.type == "agent_settled"` → `_flush()` 后 `running=False`（通过字符串类型匹配，而非 isinstance，因为 `AgentSettledEvent` 定义在 `tau_coding.events`）。
   - `QueueUpdateEvent` → `update_queue(steering=…, follow_up=…)`。
+  - `MessageStartEvent` → 若 `event.message` 是 `AssistantMessage`，用其 `text` 初始化 `assistant_buffer`。
+  - **`MessageUpdateEvent`** → 取 `event.assistant_message_event`（嵌套的 Pi 兼容流式事件）：若为 `TextDeltaEvent` 则 `assistant_buffer += delta`；若为 `ThinkingDeltaEvent` 则 `add_thinking_delta(delta)`。（旧版的 `MessageDeltaEvent` / 顶层 `ThinkingDeltaEvent` 已被 `MessageUpdateEvent` 统一替代。）
   - `MessageEndEvent` → 见下:
-    - `role == "user"` → `add_user_message(...)`。
-    - `role == "tool"` → 直接返回(工具结果由 `ToolExecutionEndEvent` 单独处理)。
-    - 否则 → `text = message.content or assistant_buffer`;非空则 `add_item("assistant", text)`,清空 `assistant_buffer`。
-  - `ToolExecutionStartEvent` → `_flush_assistant_buffer()` 后 `add_tool_call(event.tool_call)`。
-  - `ToolExecutionUpdateEvent` → `record_tool_update(tool_call_id, message)`。
-  - `RetryEvent` → `add_item("status", f"… {message}")`。
-  - `ToolExecutionEndEvent` → `record_tool_result(event.result)`。
-  - `ErrorEvent` → `_flush_assistant_buffer()`;若 `recoverable and message=="Agent run cancelled"` → 添加 `status` 行;否则设 `error` 并 `add_item("error", …)`,不可恢复时 `running=False`。
+    - `UserMessage` → `add_user_message(message.text)`。
+    - `CustomMessage` → `add_user_message(message.text, custom_type=…, details=…)`。
+    - `AssistantMessage` → 若 `stop_reason in {"error", "aborted"}`，标记 `error` 并 `running=False`；否则把 `assistant_buffer` 刷入 `assistant` 条目；清空 `assistant_buffer`。
+  - `ToolExecutionStartEvent` → `_flush()` 后 `add_tool_call(ToolCall(id=…, name=…, arguments=…))`（注意：适配器在这里手动构造 `ToolCall` 对象）。
+  - `ToolExecutionUpdateEvent` → `record_tool_update(tool_call_id, partial_result.text)`。
+  - `AutoRetryStartEvent` → `add_item("status", f"… {event.error_message}")`。
+  - `ToolExecutionEndEvent` → `record_tool_result(event.tool_call_id, event.tool_name, event.result, event.is_error)`（四个独立参数，而非旧版的单个 `result` 对象）。
 
-#### method: _flush_assistant_buffer
+#### method: _flush
 
 ```python
-def _flush_assistant_buffer(self) -> None
+def _flush(self) -> None
 ```
 
 - 作用:把尚未成块的 assistant 增量缓冲落盘为一条 transcript 条目,并清空缓冲。
-- 使用位置:在 tool 开始、agent 结束、错误发生前调用,确保零散 delta 先成块。
+- 使用位置:在 tool 开始、agent 结束时调用,确保零散 delta 先成块。
 
 ### 串联说明(adapter → TuiState → render)
 
-`CodingSession` 驱动 `tau_agent` 的事件循环,每个 `AgentEvent` 经 `TuiEventAdapter.apply` 增量修改同一份 `TuiState`:文本 delta 进 `assistant_buffer`,工具以 `add_tool_call` 占位、`record_tool_update` 追加进度、`record_tool_result` 收口,思考碎片进 `thinking` 条目,用户/工具消息经 `add_user_message`/`record_tool_result` 落地。下游 `TranscriptView` 仅需 `for item in state.items` 纯投影渲染,通过 `resolve_*` 懒调用注册的 renderer,完全不持有逻辑——这正是 widgets 页"state 拥有模型、render 只读"约定的落地。
+`CodingSession` 驱动事件循环，每个 `CodingSessionEvent`（`AgentEvent | SessionOwnEvent`）经 `TuiEventAdapter.apply` 增量修改同一份 `TuiState`:Pi 流式 delta（`TextDeltaEvent`/`ThinkingDeltaEvent`）通过 `MessageUpdateEvent` 进入 `assistant_buffer`，工具以 `add_tool_call` 占位、`record_tool_update` 追加进度、`record_tool_result` 收口，思考碎片进 `thinking` 条目，用户/工具消息经 `add_user_message`/`record_tool_result` 落地。下游 `TranscriptView` 仅需 `for item in state.items` 纯投影渲染,通过 `resolve_*` 懒调用注册的 renderer,完全不持有逻辑——这正是 widgets 页"state 拥有模型、render 只读"约定的落地。
 
 ---
 

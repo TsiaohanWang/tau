@@ -68,12 +68,12 @@ code_files:
 
 这组模块建立了 `tau_ai` 的全部"规则"：
 
-- `provider.py` 给出两个 Protocol（`CancellationToken` 与 `ModelProvider`），定义了 provider 的最小接口；
-- `events.py` 给出 7 种 `ProviderEvent`，是所有 provider 的**统一输出格式**；
+- `provider.py` 从 `tau_agent.provider` 重新导出两个 Protocol（`CancellationToken` 与 `ModelProvider`），定义了 provider 的最小接口；这两个 Protocol 的**真正定义**位于 `tau_agent/provider.py`，即 Pi 可移植 agent 层，`tau_ai` 只是做了一次"二次导出"（re-export），这样下游代码仍可写 `from tau_ai.provider import ModelProvider` 而无需感知分层细节；
+- `events.py` 从 `tau_agent.provider_events` 重新导出 Pi 兼容的流式事件（`AssistantStartEvent`、`TextDeltaEvent`、`ThinkingDeltaEvent`、`ToolCallStartEvent`、`AssistantDoneEvent` 等 15 种），是所有 provider 的**统一输出格式**；同样，事件的真正定义也在 `tau_agent` 层，`tau_ai.events` 只做 re-export；
 - `retry.py` / `http.py` / `http_errors.py` 是共享的退避重试、HTTP 客户端、错误提取基建；
 - `env.py` 给出 frozen dataclass（不可变数据类）配置与从环境变量构建配置的方式。
 
-任何具体 provider（下一篇将介绍）都只需：实现 `ModelProvider.stream_response` 方法，把模型服务商的原生响应流翻译成 `ProviderEvent`，复用 `retry`/`http` 共享助手，并读取 `env.py` 里的配置类。
+任何具体 provider（下一篇将介绍）都只需：实现 `ModelProvider.stream_response` 方法，把模型服务商的原生响应流翻译成 Pi 兼容的 `AssistantMessageEvent`（即 `AssistantStartEvent` → `TextDeltaEvent` → … → `AssistantDoneEvent` 序列），复用 `retry`/`http` 共享助手，并读取 `env.py` 里的配置类。
 
 ## 逐方法深度剖析（env / http_errors / __init__）
 
@@ -309,7 +309,7 @@ def _loads_object(value: str) -> Mapping[str, Any] | None:
 
 ## 文件:__init__.py
 
-本文件是 `tau_ai` 包的公开门面（facade，即统一的对外接口）。它把各 provider 的实现类、环境配置辅助、事件类型、provider 抽象基类，统一 `import` 到一个命名空间下，并通过 `__all__` 声明导出面，使上层代码只需 `from tau_ai import ...` 即可拿到所有常用符号，无需深入子模块。
+本文件是 `tau_ai` 包的公开门面（facade，即统一的对外接口）。它把各 provider 的实现类、环境配置辅助、Pi 兼容的流式事件类型、provider 抽象基类，统一 `import` 到一个命名空间下，并通过 `__all__` 声明导出面，使上层代码只需 `from tau_ai import ...` 即可拿到所有常用符号，无需深入子模块。
 
 ### 导入聚合
 
@@ -317,56 +317,24 @@ def _loads_object(value: str) -> Mapping[str, Any] | None:
 
 - `tau_ai.anthropic`:`AnthropicProvider`(Anthropic provider 实现类)。
 - `tau_ai.env`:`DEFAULT_ANTHROPIC_BASE_URL`、`DEFAULT_OPENAI_COMPATIBLE_MAX_RETRIES`、`DEFAULT_OPENAI_COMPATIBLE_MAX_RETRY_DELAY_SECONDS`、`DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS`、`AnthropicConfig`、`OpenAICompatibleConfig`、`RuntimeProviderAuth`、`openai_compatible_config_from_env`(环境配置入口与默认值常量)。
-- `tau_ai.events`:`ProviderErrorEvent`、`ProviderEvent`、`ProviderResponseEndEvent`、`ProviderResponseStartEvent`、`ProviderRetryEvent`、`ProviderTextDeltaEvent`、`ProviderThinkingDeltaEvent`、`ProviderToolCallEvent`(流式响应事件类型)。
+- `tau_ai.events`:`AssistantDoneEvent`、`AssistantErrorEvent`、`AssistantMessageEvent`、`AssistantStartEvent`、`TextDeltaEvent`、`TextEndEvent`、`TextStartEvent`、`ThinkingDeltaEvent`、`ThinkingEndEvent`、`ThinkingStartEvent`、`ToolCallDeltaEvent`、`ToolCallEndEvent`、`ToolCallStartEvent`(Pi 兼容的流式响应事件类型，由 `tau_agent.provider_events` 真正定义，此处为 re-export)。
 - `tau_ai.fake`:`FakeProvider`(确定性测试用假 provider)。
 - `tau_ai.google`:`GoogleGenerativeAIProvider`(Google 实现类)。
 - `tau_ai.mistral`:`MistralConversationsProvider`(Mistral 实现类)。
 - `tau_ai.openai_codex`:`DEFAULT_OPENAI_CODEX_BASE_URL`、`OpenAICodexConfig`、`OpenAICodexCredentials`、`OpenAICodexProvider`(Codex provider 的配置、凭证与实现类)。
 - `tau_ai.openai_compatible`:`OpenAICompatibleProvider`(OpenAI 兼容端点实现类)。
-- `tau_ai.provider`:`CancellationToken`、`ModelProvider`(取消令牌与 provider 抽象基类)。
+- `tau_ai.provider`:`CancellationToken`、`ModelProvider`(取消令牌与 provider 抽象基类，由 `tau_agent.provider` 真正定义，此处为 re-export)。
 
 ### __all__
 
-```python
-__all__ = [
-    "CancellationToken",
-    "AnthropicConfig",
-    "AnthropicProvider",
-    "DEFAULT_ANTHROPIC_BASE_URL",
-    "DEFAULT_OPENAI_COMPATIBLE_MAX_RETRIES",
-    "DEFAULT_OPENAI_COMPATIBLE_MAX_RETRY_DELAY_SECONDS",
-    "DEFAULT_OPENAI_COMPATIBLE_TIMEOUT_SECONDS",
-    "DEFAULT_OPENAI_CODEX_BASE_URL",
-    "FakeProvider",
-    "GoogleGenerativeAIProvider",
-    "MistralConversationsProvider",
-    "ModelProvider",
-    "OpenAICodexConfig",
-    "OpenAICodexCredentials",
-    "OpenAICodexProvider",
-    "OpenAICompatibleConfig",
-    "OpenAICompatibleProvider",
-    "RuntimeProviderAuth",
-    "ProviderErrorEvent",
-    "ProviderEvent",
-    "ProviderResponseEndEvent",
-    "ProviderResponseStartEvent",
-    "ProviderRetryEvent",
-    "ProviderThinkingDeltaEvent",
-    "ProviderTextDeltaEvent",
-    "ProviderToolCallEvent",
-    "openai_compatible_config_from_env",
-]
-```
-
-作用:显式声明该包对外的公共符号列表,共 27 项。它决定了 `from tau_ai import *` 以及 IDE/linter 能看到的导出面。
+`__init__.py` 使用动态推导：`__all__ = [name for name in globals() if not name.startswith("_")]`，即导出所有顶层公开名称，而非硬编码列表。
 
 导出面构成:
-- 抽象与基础:`CancellationToken`、`ModelProvider`(来自 `provider`)。
+- 抽象与基础:`CancellationToken`、`ModelProvider`(来自 `provider`，源头为 `tau_agent.provider`)。
 - 配置与默认值:`AnthropicConfig`、`OpenAICompatibleConfig`、`RuntimeProviderAuth`、`openai_compatible_config_from_env`,以及 5 个 `DEFAULT_*` 常量(来自 `env`)。
 - 各 provider 实现类:`AnthropicProvider`、`FakeProvider`、`GoogleGenerativeAIProvider`、`MistralConversationsProvider`、`OpenAICodexProvider`、`OpenAICompatibleProvider`。
 - Codex 专用配置/凭证:`OpenAICodexConfig`、`OpenAICodexCredentials`、`DEFAULT_OPENAI_CODEX_BASE_URL`。
-- 事件类型:8 个 `Provider*` 事件(来自 `events`)。
+- 事件类型:Pi 兼容的流式事件（`AssistantStartEvent`、`TextDeltaEvent`、`ThinkingDeltaEvent`、`ToolCallStartEvent`、`AssistantDoneEvent` 等，来自 `events`，源头为 `tau_agent.provider_events`）。
 
 ### 与"统一导入面"的串联
 

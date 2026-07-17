@@ -16,18 +16,17 @@ code_files:
 ### 5.1 `extensions/__init__.py`
 
 纯再导出,以便调用方可以 `from tau_coding.extensions import ExtensionAPI,
-ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块在包边界处绑定在一起。
+ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块在包边界处绑定在一起。当前导出的名称包括 `AGENT_EVENT_TYPES`、`AGENT_EVENT_WILDCARD`、`LIFECYCLE_EVENT_TYPES`，以及 `TurnStartEvent`、`TurnEndEvent` 等 Pi 兼容的扩展事件类型。
 
 ### 5.2 `extensions/api.py` — 契约
 
-`ExtensionAPI` 是传给每个扩展的 `setup(tau)` 函数的对象——它就像一个"遥控器"，只暴露安全的能力面。扩展可以通过它注册工具（`register_tool`）、注册斜杠命令（`register_command`）、注册自定义消息渲染器（`register_message_renderer`）、订阅事件（`subscribe`）、发送消息（`send_user_message`）等等。每个方法都会针对当前活跃的
+`ExtensionAPI` 是传给每个扩展的 `setup(tau)` 函数的对象——它就像一个"遥控器"，只暴露安全的能力面。扩展可以通过它注册工具（`register_tool`）、注册斜杠命令（`register_command`）、注册自定义消息渲染器（`register_message_renderer`）、订阅事件（`on`）、发送消息（`send_user_message`）等等。每个方法都会针对当前活跃的
 `ExtensionGeneration` 进行校验；来自已重载代（Generation）的 API 对象会抛出 `ExtensionError`。
 
-辅助类型:`ExtensionHandler`、`ExtensionCommandHandler`、`ExtensionCommandContext`、
-`MessageRenderer`、`MessageRenderOptions`、`CustomMessageView`、`InputEvent`、
-`InputHookResult`、`ToolCallHookEvent`/`ToolCallHookResult`、
+辅助类型:`ExtensionHandler`（现在签名包含 `ExtensionContext` 作为第二个参数）、`ExtensionCommandHandler`、`ExtensionCommandContext`、
+`MessageRenderer`、`MessageRenderOptions`、`CustomMessageView`、`InputEvent`、`InputHookResult`、`ToolCallHookEvent`/`ToolCallHookResult`、
 `ToolResultHookEvent`/`ToolResultHookResult`、`SessionStartEvent`/`SessionShutdownEvent`、
-`RegisteredExtension`、`ExtensionGeneration`、`ExtensionError`、`UiBridge`/`NullUiBridge`,
+`RegisteredExtension`、`ExtensionGeneration`、`ExtensionError`、`UiBridge`/`NullUiBridge`，
 以及 `AGENT_EVENT_TYPES` / `LIFECYCLE_EVENT_TYPES` / `AGENT_EVENT_WILDCARD` 常量。
 
 #### 逐方法深度剖析（`api.py`）
@@ -44,7 +43,24 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 ## 模块级常量与类型别名
 
 ### `AGENT_EVENT_TYPES`
-模块级 `frozenset[str]`,列出 agent 运行期产生的事件类型集合:`"agent_start"`、`"agent_end"`、`"turn_start"`、`"turn_end"`、`"retry"`、`"queue_update"`、`"message_start"`、`"message_delta"`、`"thinking_delta"`、`"message_end"`、`"tool_execution_start"`、`"tool_execution_update"`、`"tool_execution_end"`、`"error"`。它是不可变集合,用作订阅分发时对"agent 事件"分类的依据以及白名单校验。
+模块级 `frozenset[str]`,列出 agent 运行期产生的事件类型集合。与早期版本相比，Pi 兼容重构后此集合有显著变化：
+
+```python
+AGENT_EVENT_TYPES: frozenset[str] = frozenset({
+    "agent_start", "agent_end", "agent_settled",
+    "turn_start", "turn_end",
+    "queue_update",
+    "message_start", "message_update", "message_end",
+    "tool_execution_start", "tool_execution_update", "tool_execution_end",
+    "compaction_start", "compaction_end",
+    "entry_appended",
+    "session_info_changed",
+    "thinking_level_changed",
+    "auto_retry_start", "auto_retry_end",
+})
+```
+
+**Pi 兼容重构的变化**：移除了旧的 `"message_delta"` 和 `"thinking_delta"` 事件，替换为统一的 `"message_update"`；新增了会话层事件 `"agent_settled"`、`"turn_start"`/`"turn_end"`、`"compaction_start"`/`"compaction_end"`、`"entry_appended"`、`"auto_retry_start"`/`"auto_retry_end"`、`"session_info_changed"`、`"thinking_level_changed"`。这些事件让扩展可以更细粒度地感知会话状态——比如扩展可以监听 `compaction_start` 来展示压缩进度，或监听 `auto_retry_start` 来展示重试提示。
 
 ### `AGENT_EVENT_WILDCARD`
 字符串常量,值为 `"agent_event"`。作为订阅 agent 类事件的统配符(event 名),让扩展可以用一个订阅覆盖所有 `AGENT_EVENT_TYPES` 中的事件,而不必逐个注册。
@@ -71,7 +87,7 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 `Callable[[str, "Mapping[str, JSONValue]"], "str | None"]`。宿主侧解析器:给定工具调用名与参数,返回工具 `render_call` 产出的友好调用行,或 `None` 回退到通用格式。错误被吞掉。
 
 ### `ToolResultMarkup`
-`Callable[[AgentToolResult, bool], "str | None"]`。宿主侧解析器:给定工具结果与行是否展开,返回 `render_result` 的显示标记,或 `None` 回退到通用结果块。错误被吞掉。
+`Callable[[str, AgentToolResult, bool], "str | None"]`。宿主侧解析器:给定**工具名称**、工具结果与行是否展开,返回 `render_result` 的显示标记,或 `None` 回退到通用结果块。Pi 兼容重构后第一个参数为工具名称（`str`），而非直接传入 `AgentToolResult`——这使得解析器在渲染前就能按工具名选择不同的展示策略。
 
 ### `Placement`
 `Literal["above_prompt", "below_prompt"]` 类型别名,决定槽位(slot) widget 挂载在提示框上方还是下方。
@@ -92,13 +108,42 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 模块级 `_DEFAULT_THEME: TuiTheme | None = None`,缓存默认主题的哨兵变量,初始为 `None`。
 
 ### `ExtensionHandler`
-`Callable[[object], object | Awaitable[object]]` 类型别名:扩展事件处理器的通用签名,接收任意事件载荷对象,返回对象或 awaitable 对象。
+`Callable[[object, "ExtensionContext"], object | Awaitable[object]]` 类型别名:扩展事件处理器的通用签名,**接收任意事件载荷对象和 `ExtensionContext`**，返回对象或 awaitable 对象。Pi 兼容重构后，handler 签名新增了第二个参数 `ExtensionContext`——这让扩展 handler 可以直接从上下文中获取会话信息（cwd、model、session_id 等），而不需要在 `setup()` 时捕获 `tau.context` 引用。这一变化与 `ExtensionGeneration` 失活机制协同：handler 每次调用都拿到当前代的上下文，过期的 handler 不会读到旧世界的值。
 
 ### `ExtensionCommandHandler`
 `Callable[["str", "ExtensionCommandContext"], "str | None"]` 类型别名:斜杠命令处理器,**仅同步**。因命令路径(CommandRegistry -> CodingSession.handle_command -> TUI submit)端到端同步。接收参数字符串与命令上下文,返回字符串(回复)或 `None`。
 
 ### `StderrUiBridge`(见下)与 `NullUiBridge`(见下)相关:`ComponentBridge`、`UiBridge`
 见各自协议/类小节。
+
+---
+
+## TurnStartEvent / TurnEndEvent
+
+### `TurnStartEvent`
+
+Pi 兼容重构新增的扩展事件,在每次 agent 回合开始时触发。它的类型字段固定为 `"turn_start"`,携带 `turn_index`（零起始的回合索引）和 `timestamp`（毫秒时间戳）。可移植的 agent 层没有会话元数据（回合索引、时间戳是会话层概念），因此 `TurnStartEvent` 定义在 `api.py` 而非 `tau_agent`——这与 Pi 的事件分层设计一致：agent 循环只产生纯粹的、与会话无关的事件，会话层负责添加上下文信息后分发给扩展。
+
+```python
+@dataclass(frozen=True, slots=True)
+class TurnStartEvent:
+    turn_index: int
+    timestamp: int
+    type: Literal["turn_start"] = field(default="turn_start", init=False)
+```
+
+### `TurnEndEvent`
+
+在每次 assistant/tool 回合结束后触发。携带 `turn_index`、`message`（本轮的 `AgentMessage`）和 `tool_results`（本轮产生的所有 `ToolResultMessage` 列表）。扩展可以用它来感知一轮完整交互的结束——例如，在每轮结束后自动检查代码质量或更新进度显示。
+
+```python
+@dataclass(frozen=True, slots=True)
+class TurnEndEvent:
+    turn_index: int
+    message: AgentMessage
+    tool_results: list[ToolResultMessage]
+    type: Literal["turn_end"] = field(default="turn_end", init=False)
+```
 
 ---
 
@@ -331,9 +376,6 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 ### `content: str | None = None`
 字段:覆盖结果内容,默认 `None`。
 
-### `ok: bool | None = None`
-字段:覆盖 ok 标志,默认 `None`。
-
 ### `details: dict[str, JSONValue] | None = None`
 字段:覆盖细节字典,默认 `None`。
 
@@ -522,6 +564,8 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 ### 类定义
 `class ExtensionContext` — 暴露给扩展的只读会话上下文。每个属性(含平凡读取,与 Pi 的 context getters 一致)都断言所属加载代仍存活,使 `/reload` 前捕获的上下文抛出 `ExtensionError`,而非读取重载后的世界。
 
+**Pi 兼容重构的变化**：`ExtensionContext` 新增了会话目录（`session_dir`）、agent 目录（`agent_dir`）、会话配置（`session_config`）、agent 配置（`agent_config`）、会话引用（`session`）和扩展引用（`extension`）等属性，以及 `get(type)` 辅助方法。这些属性让扩展 handler 可以直接从上下文中获取深层信息——比如访问会话的存储目录来读写自定义数据，或获取 agent 配置来调整行为——而不需要在 `setup()` 时通过多个 API 调用来捕获。
+
 ### `def __init__(self, runtime, generation=None) -> None`
 作用:构造上下文。保存 `self._runtime`;若 `generation` 为 `None` 新建 `ExtensionGeneration()`;并实例化 `self._ui = ExtensionUi(runtime, self._generation)`。
 
@@ -601,8 +645,8 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 #### 关于 `ExtensionAPI` 的"能力面 / 校验 / 注册表 / 钩子"小结
 - **代校验**:每个方法首行几乎都是 `self._generation.assert_active()`,因此 reload 后旧 `tau` 对象、旧 `context`、旧 `ui` 句柄再用即抛 `ExtensionError`。这是它作为"安全能力面"的核心:扩展无法拿旧世界状态作用于新注册集。
 - **注册表写入**:`register_tool`/`register_command`/`add_prompt_guideline`/`register_message_renderer` 全部以 `self._extension_name` 为命名空间调用 `self._runtime` 对应 `register_*` 方法,由 runtime 维护按扩展名分组的注册表,并施加"首次注册生效"或"去重"策略。
-- **订阅分发**:`on` 把 `(extension_name, event, handler)` 写入 runtime 订阅表;runtime 在事件发生时按事件名(含 `AGENT_EVENT_WILDCARD`/`LIFECYCLE_EVENT_TYPES` 分类)分发到各扩展 handler。`on` 同时支持直调与装饰器两种形态,装饰器闭包内再次 `assert_active` 保证失效代上的装饰也安全。
-- **输入/工具钩子拦截**:虽然 `run_input_hooks`/`run_tool_call_hooks`/`run_tool_result_hooks` 本身不在此文件的 `ExtensionAPI` 上实现(其为 runtime 方法),但扩展通过 `on("input", ...)` 等订阅间接参与:`input` 钩子经 `InputHookResult`(`continue`/`transform`/`handled`,transform 链式传递、handled 短路)改写或吞掉用户提示;`tool_call` 钩子经 `ToolCallHookResult`(`block`/`reason`/`arguments`,block 优先且短路)阻止或改写工具调用;`tool_result` 钩子经 `ToolResultHookResult`(`content`/`ok`/`details` 覆盖)改写工具结果。这些入口的注册走 runtime 的订阅/钩子表,本文件提供的是事件类型常量与载荷/结果数据类。
+- **订阅分派**:`on` 把 `(extension_name, event, handler)` 写入 runtime 订阅表;runtime 在事件发生时按事件名(含 `AGENT_EVENT_WILDCARD`/`LIFECYCLE_EVENT_TYPES` 分类)分派到各扩展 handler。`on` 同时支持直调与装饰器两种形态,装饰器闭包内再次 `assert_active` 保证失效代上的装饰也安全。
+- **输入/工具钩子拦截**:虽然 `run_input_hooks`/`run_tool_call_hooks`/`run_tool_result_hooks` 本身不在此文件的 `ExtensionAPI` 上实现(其为 runtime 方法),但扩展通过 `on("input", ...)` 等订阅间接参与:`input` 钩子经 `InputHookResult`(`continue`/`transform`/`handled`,transform 链式传递、handled 短路)改写或吞掉用户提示;`tool_call` 钩子经 `ToolCallHookResult`(`block`/`reason`/`arguments`,block 优先且短路)阻止或改写工具调用;`tool_result` 钩子经 `ToolResultHookResult`(`content`/`details` 覆盖)改写工具结果。这些入口的注册走 runtime 的订阅/钩子表,本文件提供的是事件类型常量与载荷/结果数据类。
 - **消息与通知**:`send_user_message`/`send_custom_message`/`append_entry`/`notify` 经 runtime/ui 桥发出,触发 agent 回路或 UI 展示。
 
 ---
@@ -610,7 +654,7 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 ## RegisteredExtension
 
 ### 类定义
-`@dataclass(slots=True) class RegisteredExtension` — runtime 内部对一个已加载扩展的记账(book-keeping)。注意此处未用 `frozen`(可随运行修改)。
+`@dataclass(slots=True) class RegisteredExtension` — runtime 内部对一个已加载扩展的记账(book-king)。注意此处未用 `frozen`(可随运行修改)。
 
 ### `name: str`
 字段:扩展名。
@@ -622,7 +666,7 @@ ExtensionRuntime, load_extensions, StderrUiBridge, ...`。它把三个子模块�
 字段:该扩展对应的 `ExtensionAPI` 实例(每次加载/代更新都会换新实例,从而旧实例失效)。
 
 ### `handlers: dict[str, list[ExtensionHandler]] = field(default_factory=dict)`
-字段:事件名到处理器列表的映射,默认空字典。runtime 在 `subscribe` 时按事件名把 handler 追加到对应列表,分发时遍历执行(支持多 handler;某些事件如 input 钩子的 `handled`/`block` 会短路后续)。
+字段:事件名到处理器列表的映射,默认空字典。runtime 在 `subscribe` 时按事件名把 handler 追加到对应列表,分派时遍历执行(支持多 handler;某些事件如 input 钩子的 `handled`/`block` 会短路后续)。
 
 ---
 

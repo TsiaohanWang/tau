@@ -2,6 +2,7 @@
 title: tau_ai · 各 Provider 实现
 description: openai_compatible / anthropic / google / mistral / openai_codex / fake
 code_files:
+  - tau_ai/stream.py
   - tau_ai/openai_compatible.py
   - tau_ai/anthropic.py
   - tau_ai/google.py
@@ -10,7 +11,25 @@ code_files:
   - tau_ai/fake.py
 ---
 
-本页介绍 `tau_ai` 层的六个具体 provider 实现：它们是 `ModelProvider` 接口的具体实现，负责与各家 LLM 服务通信，把各自原生的流式响应转换成统一的 `ProviderEvent` 事件流。每个 provider 内部处理了不同的 API 格式、鉴权方式、工具调用编码和思考（thinking，即模型在回答前的内部推理过程，如 o1、Claude 的扩展思考）格式差异，但对外暴露的接口完全一致。
+本页介绍 `tau_ai` 层的六个具体 provider 实现：它们是 `ModelProvider` 接口的具体实现，负责与各家 LLM 服务通信。每个 provider 内部处理了不同的 API 格式、鉴权方式、工具调用编码和思考（thinking，即模型在回答前的内部推理过程，如 o1、Claude 的扩展思考）格式差异，但对外暴露的接口完全一致——`stream_response` 返回 `AsyncIterator[AssistantMessageEvent]`，即 Pi 规范的助手消息事件流。
+
+## 双层事件架构：`ProviderEvent` → Pi 事件
+
+所有 provider 内部的 parser（解析器）仍产出一套**过渡性**事件类型：`ProviderTextDeltaEvent`、`ProviderThinkingDeltaEvent`、`ProviderToolCallEvent`、`ProviderResponseStartEvent`、`ProviderResponseEndEvent`、`ProviderErrorEvent`、`ProviderRetryEvent`。这些事件是 parser 与 HTTP 信封之间的契约——parser 只管"把原生 SSE 块转成什么"，不关心上层如何消费。
+
+`stream.py` 中的 `canonicalize_provider_stream` 负责**桥接**：消费上述 `ProviderEvent` 流，产出 Pi 规范的 `AssistantMessageEvent` 子类型：
+
+| ProviderEvent（过渡层） | Pi 事件（公开层） | 说明 |
+|---|---|---|
+| `ProviderRetryEvent` | *(跳过)* | 重试是 provider 内部行为，不暴露给上层 |
+| `ProviderResponseStartEvent` | `AssistantStartEvent` | 标记一次助手响应的开始 |
+| `ProviderTextDeltaEvent` | `TextStartEvent` → `TextDeltaEvent` (×N) | 首次出现文本时发 `TextStart`，后续每个片段发 `TextDelta` |
+| `ProviderThinkingDeltaEvent` | `ThinkingStartEvent` → `ThinkingDeltaEvent` (×N) | 同上，思考内容 |
+| `ProviderToolCallEvent` | `ToolCallStartEvent` → `ToolCallEndEvent` | 工具调用在 finalize 阶段一次性发出 |
+| `ProviderResponseEndEvent` | `TextEndEvent` / `ThinkingEndEvent` + `AssistantDoneEvent` | 收尾所有活跃块，发最终消息 |
+| `ProviderErrorEvent` | `AssistantErrorEvent` | 错误转为 Pi 错误事件 |
+
+每个 Pi 事件都携带 `partial`（当前 `AssistantMessage` 的深拷贝快照），让上层可以增量构建完整消息。`stream.py` 还负责统一 `api`/`provider`/`model` 元数据，以及把 finish_reason 映射成 Pi 的 `"stop"`/`"length"`/`"toolUse"` 三值枚举。
 
 ## `tau_ai/openai_compatible.py` — OpenAI 系"总管"
 
@@ -26,8 +45,9 @@ code_files:
 
 - **`__init__(config, *, client=None)`**：持有 `OpenAICompatibleConfig`；若外部没
   传 `client`，则自己创建并在 `aclose()` 时关闭（`_owns_client` 标志）。
-- **`stream_response(...)`**：先判断走 `_stream_responses` 还是
-  `_stream_chat_completions`，二者都调用统一的 `_stream(...)`。
+- **`stream_response(...)`**：返回 Pi 事件流。内部先调 `_stream_provider_events(...)` 拿到过渡性 `ProviderEvent` 流，再经 `canonicalize_provider_stream` 桥接为 `AssistantMessageEvent`。
+- **`_stream_provider_events(...)`**：按模型名/配置判断走 `_stream_responses` 还是
+  `_stream_chat_completions`，二者都调用统一的 `_stream(...)`，产出过渡性 `ProviderEvent`。
 - **`_stream_chat_completions` / `_stream_responses`**：各自用
   `_build_chat_payload` / `_build_responses_payload` 构造请求体，再交给 `_stream`
   并以不同的 parser 工厂（`_ChatStreamParser` / `_ResponsesStreamParser`）解析。
@@ -178,7 +198,7 @@ OpenAI Codex 是面向 ChatGPT Plus/Pro 订阅用户的编码助手，它走的�
 
 ## 本部分小结
 
-六个 provider 殊途同归：无论后端是 OpenAI、Anthropic、Google、Mistral、Codex，还是测试用的 Fake，它们的 `stream_response` 都只产出那 7 种 `ProviderEvent`。差异被彻底吸收在各文件的 parser（解析器）与 payload（请求体）构造里。这正是契约设计的价值：上层 `tau_agent` 永远不必关心"现在用的是哪家模型"——它只依赖一份稳定、可枚举的事件词汇表，新增或替换模型后端时无需触动上层逻辑。
+六个 provider 殊途同归：无论后端是 OpenAI、Anthropic、Google、Mistral、Codex，还是测试用的 Fake，它们的 `stream_response` 都返回 `AsyncIterator[AssistantMessageEvent]`——即 Pi 规范的助手消息事件流。内部 parser 产出的过渡性 `ProviderEvent` 经 `stream.py` 的 `canonicalize_provider_stream` 统一桥接为 `AssistantStartEvent` / `TextDeltaEvent` / `ThinkingDeltaEvent` / `ToolCallStartEvent` / `AssistantDoneEvent` 等 Pi 事件。差异被彻底吸收在各文件的 parser（解析器）与 payload（请求体）构造里。这正是契约设计的价值：上层 `tau_agent` 永远不必关心"现在用的是哪家模型"——它只依赖一份稳定、可枚举的事件词汇表，新增或替换模型后端时无需触动上层逻辑。
 
 ## 逐方法深度剖析（各 provider 实现）
 
@@ -215,19 +235,26 @@ def __init__(self, config, *, client=None):
 #### `async def aclose(self) -> None`
 若该 provider 自己创建了 client(`_owns_client`)且尚未关闭,则 `await self._client.aclose()` 并置 `None`。
 
-#### `def stream_response(self, *, model: str, system: str, messages: list[AgentMessage], tools: list[AgentTool], signal: CancellationToken | None = None) -> AsyncIterator[ProviderEvent]`
-入口分流:若 `config.api == "openai-responses"` 或 `_use_responses_api(model)` 为真,返回 `_stream_responses(...)`,否则返回 `_stream_chat_completions(...)`。两类方法各自先构造 payload 再调用共享的 `_stream`。
+#### `def stream_response(self, *, model: str, system: str, messages: list[AgentMessage], tools: list[AgentTool], signal: CancellationToken | None = None) -> AsyncIterator[AssistantMessageEvent]`
+公共入口，返回 **Pi 规范的事件流**。内部先调 `_stream_provider_events(...)` 拿到过渡性 `ProviderEvent` 流，再经 `canonicalize_provider_stream` 桥接为 Pi 事件：
 
 ```python
 def stream_response(self, *, model, system, messages, tools, signal=None):
-    if self._config.api == "openai-responses" or _use_responses_api(model):
-        return self._stream_responses(
-            model=model, system=system, messages=messages, tools=tools, signal=signal)
-    return self._stream_chat_completions(
-        model=model, system=system, messages=messages, tools=tools, signal=signal)
+    raw = self._stream_provider_events(
+        model=model, system=system, messages=messages, tools=tools, signal=signal
+    )
+    return canonicalize_provider_stream(
+        raw,
+        api=self._config.api,
+        provider=getattr(self._config, "provider_name", "openai-compatible"),
+        model=model,
+    )
 ```
 
-这段代码说明了路由逻辑:单凭模型名(或配置)就决定走 chat 还是 responses 协议,调用方无感知。
+这段代码说明了双层设计：`_stream_provider_events` 处理所有协议路由（chat vs responses）与 HTTP 重试，产出过渡性 `ProviderEvent`；`canonicalize_provider_stream` 把它们翻译成 Pi 的 `AssistantStartEvent` / `TextDeltaEvent` / `AssistantDoneEvent` 等，上层只需消费 Pi 事件。
+
+#### `def _stream_provider_events(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
+内部路由：若 `config.api == "openai-responses"` 或 `_use_responses_api(model)` 为真，调 `_stream_responses(...)`，否则调 `_stream_chat_completions(...)`。返回过渡性 `ProviderEvent` 流，供 `stream_response` 桥接。
 
 #### `def _stream_chat_completions(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
 构造 chat-completions payload(`_build_chat_payload`,传入 `reasoning_effort`/`reasoning_effort_parameter`/`thinking_format`/`compat`/`max_tokens`/`include_reasoning_effort_none`),再调用 `_stream`,URL 为 `{base_url}/chat/completions`,`parser_factory=_ChatStreamParser`。
@@ -637,8 +664,10 @@ Anthropic Messages API 适配器，完全独立于 openai_compatible 基类：�
 #### `async def aclose(self) -> None`
 同通用关闭逻辑。
 
-#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
-内部 `iterator()`:
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[AssistantMessageEvent]`
+公共入口，返回 **Pi 规范的事件流**。内部先调 `_stream_provider_events(...)` 拿到过渡性 `ProviderEvent` 流，再经 `canonicalize_provider_stream` 桥接为 Pi 事件（与 OpenAI 系同一套桥接机制）。
+
+#### `_stream_provider_events` 内部流程（产出过渡性 ProviderEvent）：
 1. 取 client;准备 `api_key`、`base_url`、`auth_headers`;`credential_resolver` 存在则解析并可能改写 `base_url`(确保带 `/v1`)、合并 headers。
 
 ```python
@@ -744,8 +773,10 @@ Google Generative Language API 适配器，偏离基类最彻底：端点是 `{b
 #### `async def aclose(self) -> None`
 标准关闭。
 
-#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
-内部 `iterator()`:
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[AssistantMessageEvent]`
+公共入口，返回 **Pi 规范的事件流**。内部先调 `_stream_provider_events(...)` 拿到过渡性 `ProviderEvent` 流，再经 `canonicalize_provider_stream` 桥接为 Pi 事件。
+
+#### `_stream_provider_events` 内部流程（产出过渡性 ProviderEvent）：
 1. 取 client;`_build_google_payload(...)` 构造体。
 
 ```python
@@ -861,21 +892,27 @@ Mistral Conversations 适配器，形态上最接近 openai_compatible 的 chat 
 #### `async def aclose(self) -> None`
 标准关闭。
 
-#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
-先 `_build_mistral_payload(...)`,再调 `_stream(model=model, url=f"{_mistral_base_url(base_url)}/chat/completions", payload=payload, signal=signal)`。
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[AssistantMessageEvent]`
+公共入口，返回 **Pi 规范的事件流**。内部先 `_build_mistral_payload(...)` 构造体，再经 `canonicalize_provider_stream` 桥接为 Pi 事件：
 
 ```python
 def stream_response(self, *, model, system, messages, tools, signal=None):
     payload = _build_mistral_payload(
         model=model, system=system, messages=messages, tools=tools,
         reasoning_effort=self._config.reasoning_effort, max_tokens=self._config.max_tokens)
-    return self._stream(
+    raw = self._stream(
         model=model,
         url=f"{_mistral_base_url(self._config.base_url)}/chat/completions",
         payload=payload, signal=signal)
+    return canonicalize_provider_stream(
+        raw,
+        api=self._config.api,
+        provider=getattr(self._config, "provider_name", "mistral"),
+        model=model,
+    )
 ```
 
-这段代码说明了 Mistral 路由的形态:它直接走 `/chat/completions`(且 `_mistral_base_url` 自动补 `/v1`),与 OpenAI chat 分支同构但独立实现。
+这段代码说明了 Mistral 的双层结构：`_stream` 产出过渡性 `ProviderEvent`，`canonicalize_provider_stream` 桥接为 Pi 事件，与 OpenAI 系同一模式。
 
 #### `def _stream(self, *, model, url, payload, signal) -> AsyncIterator[ProviderEvent]`
 内部 `iterator()`(与基类 `_stream` 同构):取 client,headers=`config.headers`+`Authorization: Bearer {api_key}`;重试循环每轮 `parser=_MistralStreamParser()`;`status>=400` 重试/错误;发 `ProviderResponseStartEvent`;逐行 `_parse_sse_line`→`events, stop = parser.feed(event)`,逐个 yield,`stop` 则 break;最后 `parser.finalize()`;HTTP 异常按 `parser.emitted_content` 重试。
@@ -1004,8 +1041,10 @@ OpenAI Codex 订阅版 Responses 适配器，完全自包含（不继承 openai_
 #### `async def aclose(self) -> None`
 标准关闭。
 
-#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
-内部 `iterator()`:
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[AssistantMessageEvent]`
+公共入口，返回 **Pi 规范的事件流**。内部先调 `_stream_provider_events(...)` 拿到过渡性 `ProviderEvent` 流，再经 `canonicalize_provider_stream` 桥接为 Pi 事件。
+
+#### `_stream_provider_events` 内部流程（产出过渡性 ProviderEvent）：
 1. 取 client,`_build_codex_payload(...)` 构造体,`_resolve_codex_url(base_url)` 得 URL。
 
 ```python
@@ -1169,22 +1208,22 @@ body 小写后若含任一计费相关 marker(`gousagelimiterror`/`freeusagelimi
 
 ## 文件:fake.py
 
-确定性测试 provider，不发起任何网络请求，只回放预定义的事件流，用于 agent-loop 测试。
+确定性测试 provider，不发起任何网络请求，只回放预定义的 Pi 事件流，用于 agent-loop 测试。
 
 ### FakeProvider
 
-#### `__init__(self, streams: Iterable[Iterable[ProviderEvent]]) -> None`
-把每个传入流 `list(...)` 存入 `self._streams`,并初始化 `self.calls`(记录每次调用的 `(model, system, messages, tools)`)。
+#### `__init__(self, streams: Iterable[Iterable[AssistantMessageEvent]]) -> None`
+把每个传入的 **Pi 事件流** `list(...)` 存入 `self._streams`，并初始化 `self.calls`（记录每次调用的 `(model, system, messages, tools)`）。注意 FakeProvider 直接构造 `AssistantMessageEvent`（Pi 事件），不经过 `ProviderEvent` 中间层。
 
-#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[ProviderEvent]`
-记录本次调用到 `self.calls`(`model, system, list(messages), list(tools)`);从 `self._streams` 弹出下一条流(无则空列表);定义内部 `async def iterator()` 逐 `yield event`,但每轮检查 `signal is not None and signal.is_cancelled()` 可提前 `return`;返回该迭代器。即每次调用消费一个预脚本流,使测试具备确定性、可断言调用参数。
+#### `def stream_response(self, *, model, system, messages, tools, signal=None) -> AsyncIterator[AssistantMessageEvent]`
+记录本次调用到 `self.calls`（`model, system, list(messages), list(tools)`）；从 `self._streams` 弹出下一条流（无则空列表）；定义内部 `async def iterator()` 逐 `yield event`，但每轮检查 `signal is not None and signal.is_cancelled()` 可提前 `return`；返回该迭代器。即每次调用消费一个预脚本 Pi 事件流，使测试具备确定性、可断言调用参数。
 
 ```python
 def stream_response(self, *, model, system, messages, tools, signal=None):
     self.calls.append((model, system, list(messages), list(tools)))
     stream = self._streams.pop(0) if self._streams else []
 
-    async def iterator() -> AsyncIterator[ProviderEvent]:
+    async def iterator() -> AsyncIterator[AssistantMessageEvent]:
         for event in stream:
             if signal is not None and signal.is_cancelled():
                 return
@@ -1193,7 +1232,7 @@ def stream_response(self, *, model, system, messages, tools, signal=None):
     return iterator()
 ```
 
-这段代码说明了 FakeProvider 的确定性来源:它不碰网络,只是逐条回放预存事件流,并把入参记进 `self.calls` 供测试断言。
+这段代码说明了 FakeProvider 的确定性来源：它不碰网络，只是逐条回放预存的 Pi 事件流，并把入参记进 `self.calls` 供测试断言。与其他 provider 不同，FakeProvider 直接产出 `AssistantStartEvent`/`TextDeltaEvent`/`AssistantDoneEvent` 等 Pi 事件，跳过了 `ProviderEvent` → `canonicalize_provider_stream` 的桥接步骤。
 
 ### 对比小结（各 provider 在请求体、工具 schema、思考格式、事件映射 上的异同）
 
@@ -1205,9 +1244,9 @@ def stream_response(self, *, model, system, messages, tools, signal=None):
 
 **thinking（思考/推理）**：OpenAI 系靠 `reasoning_effort`/`reasoning`（按 thinking_format 多变），Anthropic 用 `thinking.budget_tokens` 或 `adaptive`+`output_config.effort`，Google 用 `thinkingConfig`（`thinkingBudget`/`thinkingLevel`/`includeThoughts`），Mistral 用 `reasoning_effort:"high"` 或 `prompt_mode:"reasoning"`，Codex 用 `reasoning.effort`+`summary`。
 
-**流式事件映射**：所有 provider 都把原生块映射为统一的 `ProviderResponseStartEvent`/`ProviderTextDeltaEvent`/`ProviderThinkingDeltaEvent`/`ProviderToolCallEvent`/`ProviderResponseEndEvent`/`ProviderErrorEvent`/`provider_retry_event`。差异在原生事件名：OpenAI 系看 `choices[].delta`/Responses `response.*`；Anthropic 看 `content_block_*`/`message_delta`；Google 看 `candidates[].content.parts` 且以 `thought` 标志区分 thinking；Codex 内联处理 `response.*` 且 thinking 映射到 `reasoning.*` 系列。错误统一转 `ProviderErrorEvent`（HTTP 用 `provider_http_error_message`，流内错误用各自 `_*_error_message`）。
+**流式事件映射**：所有 provider 内部 parser 都把原生块映射为统一的 `ProviderResponseStartEvent`/`ProviderTextDeltaEvent`/`ProviderThinkingDeltaEvent`/`ProviderToolCallEvent`/`ProviderResponseEndEvent`/`ProviderErrorEvent`/`ProviderRetryEvent`，再经 `stream.py` 的 `canonicalize_provider_stream` 桥接为 Pi 事件（`AssistantStartEvent`/`TextDeltaEvent`/`ThinkingDeltaEvent`/`ToolCallStartEvent`/`AssistantDoneEvent`/`AssistantErrorEvent`）。FakeProvider 则直接构造 Pi 事件，跳过过渡层。差异在原生事件名：OpenAI 系看 `choices[].delta`/Responses `response.*`；Anthropic 看 `content_block_*`/`message_delta`；Google 看 `candidates[].content.parts` 且以 `thought` 标志区分 thinking；Codex 内联处理 `response.*` 且 thinking 映射到 `reasoning.*` 系列。错误统一转 `ProviderErrorEvent`（HTTP 用 `provider_http_error_message`，流内错误用各自 `_*_error_message`）。
 
-**偏离基类**：除 mistral/openai_compatible 共享"chat-completions 同构信封"思路外，anthropic、google、codex 均自成一套流式解析（anthropic 在 `stream_response` 内联分支、google 用 `_GoogleStreamParser`、codex 用异步生成器 `_codex_provider_events`），且各自有独立的消息格式转换与 usage/retry 判定。openai_compatible 通过 `_use_responses_api` 参数化路由覆盖了绝大多数 OpenAI 兼容端点，mistral 与 codex 则是对该范式的变体（前者贴近 chat、后者贴近 responses 但带订阅凭证）。
+**偏离基类**：除 mistral/openai_compatible 共享"chat-completions 同构信封"思路外，anthropic、google、codex 均自成一套流式解析（anthropic 在 `_stream_provider_events` 内联分支、google 用 `_GoogleStreamParser`、codex 用异步生成器 `_codex_provider_events`），且各自有独立的消息格式转换与 usage/retry 判定。openai_compatible 通过 `_use_responses_api` 参数化路由覆盖了绝大多数 OpenAI 兼容端点，mistral 与 codex 则是对该范式的变体（前者贴近 chat、后者贴近 responses 但带订阅凭证）。所有 provider（除 Fake 外）共享同一个 `canonicalize_provider_stream` 桥接层，确保对外暴露的事件契约一致。
 
 ---
 
